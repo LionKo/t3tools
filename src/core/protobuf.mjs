@@ -11,7 +11,7 @@ export class ProtobufDecodeError extends Error {
   }
 }
 
-export function readVarint(buf, offset) {
+export function readVarint(buf, offset, signed = false) {
   let result = 0n;
   let shift = 0n;
   let pos = offset;
@@ -24,7 +24,7 @@ export function readVarint(buf, offset) {
     }
     result |= (byte & 0x7fn) << shift;
     if ((byte & 0x80n) === 0n) {
-      return [Number(result), pos];
+      return [Number(signed ? BigInt.asIntN(64, result) : result), pos];
     }
     shift += 7n;
     if (shift > 63n) {
@@ -34,7 +34,7 @@ export function readVarint(buf, offset) {
   throw new ProtobufDecodeError('Unterminated varint', offset);
 }
 
-export function decodeFields(raw) {
+export function decodeFields(raw, signedValues = false) {
   const map = new Map();
   if (!raw || raw.length === 0) return map;
   const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
@@ -44,6 +44,7 @@ export function decodeFields(raw) {
     const fieldStart = pos;
     const [tag, nextPos] = readVarint(buf, pos);
     pos = nextPos;
+    if (tag > 0xffffffff) throw new ProtobufDecodeError('Field tag exceeds uint32', fieldStart);
     const fieldNumber = tag >>> 3;
     const wireType = tag & 7;
     if (fieldNumber === 0) {
@@ -52,7 +53,7 @@ export function decodeFields(raw) {
 
     let value;
     if (wireType === 0) {
-      [value, pos] = readVarint(buf, pos);
+      [value, pos] = readVarint(buf, pos, signedValues);
     } else if (wireType === 1) {
       if (pos + 8 > buf.length) {
         throw new ProtobufDecodeError('Truncated 64-bit fixed field', fieldStart);
@@ -106,10 +107,10 @@ export function stringField(fieldMap, fieldNumber, fallback = '') {
  */
 export function durationOrTimestampMs(raw) {
   if (!Buffer.isBuffer(raw) || raw.length === 0) return null;
-  const f = decodeFields(raw);
+  const f = decodeFields(raw, true);
   const seconds = firstField(f, 1, 0);
   const nanos = firstField(f, 2, 0);
-  if (!Number.isFinite(seconds) && !Number.isFinite(nanos)) return null;
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanos) || Math.abs(nanos) >= 1e9) return null;
   const ms = Math.trunc(seconds) * 1000 + Math.floor((Number(nanos) || 0) / 1e6);
   return Number.isFinite(ms) ? ms : null;
 }

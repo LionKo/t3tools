@@ -23,22 +23,32 @@
 
 ## 快速开始（Windows，Node.js >= 22.13，零 npm 依赖）
 
-采用 **方案 A（图标联动启停，零黑框、平时零常驻）**：
+默认采用 **Magpie 风格独立托盘模式（`T3Tools.exe`，右下角系统托盘 + 自动吸附 T3 Code）**：
 
 ```powershell
-# 1. 一键安装（生成无黑框静默启动器并绑定桌面/开始菜单 T3 Code 图标，保留原图标且随时可无损还原）
+# 1. 一键编译并安装托盘程序（零 npm 依赖，调用系统内置 .NET 编译器生成 T3Tools.exe）
+#    自动创建桌面/开始菜单「T3Tools」快捷方式，并为 T3 Code 快捷方式注入 --remote-debugging-port=0
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
+
+# 可选参数：同时开启开机自启 / 启动即缩放到右下角托盘
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -AutoStart -StartMinimized
 ```
 
-安装完成后，**以后完全无需再手动开终端**：直接双击桌面或开始菜单的 T3 Code 图标即可自动静默拉起单实例守护进程并挂载插件；完全退出 T3 Code 后，守护进程也会自动退出不留后台常驻。
+安装完成后：
+- **右下角托盘常驻**：双击「T3Tools」启动，点击最小化、关闭（`×`）或「缩放到托盘」即可缩放到右下角系统托盘；单击/双击托盘图标随时恢复主控窗口，右键菜单可一键打开看板、开关自动吸附、开机自启或退出。
+- **启动后自动吸附 T3 Code**：托盘程序启动后会静默拉起后台守护进程（零黑框，随托盘退出自动清理），1.5 秒内自动探测并吸附到 T3 Code 窗口；若检测到 T3 Code 已打开但尚未开启调试端口，托盘图标会亮起琥珀色提示并提供一键「重启 T3 Code 并吸附」。
+- **仍兼容原方案 A（图标联动启停）**：如需不常驻托盘、随 T3 Code 同启同退，可运行 `.\scripts\install.ps1 -WrapperMode`。
 
 ### 常用命令
 
 ```powershell
-node bin/t3tools.mjs doctor      # 环境、快捷方式与数据源一键诊断
-node bin/t3tools.mjs status      # 查看运行中的守护进程与 CDP 挂载状态
-node bin/t3tools.mjs stop        # 手动停止守护进程
-node bin/t3tools.mjs snapshot    # 命令行快速预览当前会话与本轮周统计
+powershell -ExecutionPolicy Bypass -File .\scripts\build-tray.ps1  # 单独编译 dist\T3Tools.exe
+node bin/t3tools.mjs tray              # 启动 T3Tools 托盘程序（可加 --tray 直接静默进托盘）
+node bin/t3tools.mjs patch-debug       # 仅为 T3 Code 快捷方式注入 --remote-debugging-port=0
+node bin/t3tools.mjs doctor            # 环境、托盘、进程与数据源一键诊断
+node bin/t3tools.mjs status            # 查看运行中的守护进程与 CDP 挂载状态
+node bin/t3tools.mjs stop              # 手动停止守护进程
+node bin/t3tools.mjs snapshot          # 命令行快速预览当前会话与本轮周统计
 node --test tests/*.test.mjs           # 运行全部单元测试与集成测试
-powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1  # 一键无损还原原版快捷方式
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1  # 一键无损还原并移除托盘与自启
 ```

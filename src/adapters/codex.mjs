@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import zlib from 'node:zlib';
 import { findLatestUsageScanCache } from '../core/paths.mjs';
@@ -8,6 +8,18 @@ import { classifyErrorCode } from './antigravity.mjs';
 import { computeTurnCacheHit, summarizeThreadUsageMetrics } from '../analytics/usage-metrics.mjs';
 
 export const HAS_NATIVE_ZSTD = typeof zlib.zstdDecompressSync === 'function';
+const COLD_HYDRATE_LIMIT = 8;
+
+function normalizeFsKey(p = '') {
+  const r = resolve(String(p || ''));
+  return process.platform === 'win32' ? r.toLowerCase() : r;
+}
+
+function canonicalRolloutFileName(filePath = '') {
+  const base = String(filePath || '').split(/[\\/]/).pop() || '';
+  const m = base.match(/^(rollout-.+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl)(?:\.zst)?$/i);
+  return m ? m[1].toLowerCase() : '';
+}
 
 function walkFilesChecked(dir, predicate) {
   if (!dir || !existsSync(dir)) return { ok: false, files: [] };
@@ -46,7 +58,7 @@ function extractRateLimitWindows(rl, observedAtMs) {
   const out = [];
   for (const slot of ['primary', 'secondary']) {
     const w = rl[slot];
-    if (!w || !Number.isFinite(Number(w.used_percent))) continue;
+    if (w?.used_percent == null || !Number.isFinite(Number(w.used_percent))) continue;
     const mins = Number(w.window_minutes) || (slot === 'primary' ? 10080 : 300);
     out.push({
       limitId,
@@ -99,6 +111,7 @@ export function parseCodexRolloutContent(rawText, { filePath = '', pricing, thre
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
 
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) continue;
     const tsMs = obj.timestamp ? Date.parse(obj.timestamp) : null;
 
     if (obj.type === 'session_meta' && obj.payload) {
@@ -266,7 +279,7 @@ export function parseCodexRolloutContent(rawText, { filePath = '', pricing, thre
     }
     if (ev.kind === 'retry') {
       pendingRetries++;
-      pendingErrorText = ev.errMsg;
+      pendingErrorText = [pendingErrorText, ev.errMsg].filter(Boolean).join(' | ').slice(0, 1000);
       continue;
     }
     if (ev.kind === 'error') {
@@ -306,7 +319,7 @@ export function parseCodexRolloutContent(rawText, { filePath = '', pricing, thre
         outcomeKnown: true,
         retries: pendingRetries,
         errorCode: classifyErrorCode(ev.errMsg),
-        errorText: ev.errMsg.slice(0, 220),
+        errorText: ev.errMsg.slice(0, 1000),
         compactionBefore: pendingCompaction
       });
       pendingCompaction = false;
@@ -388,7 +401,7 @@ export function parseCodexRolloutContent(rawText, { filePath = '', pricing, thre
         outcomeKnown: true,
         retries: pendingRetries,
         errorCode: pendingRetries > 0 ? classifyErrorCode(pendingErrorText) : '',
-        errorText: pendingRetries > 0 ? pendingErrorText.slice(0, 220) : '',
+        errorText: pendingRetries > 0 ? pendingErrorText.slice(0, 1000) : '',
         compactionBefore: pendingCompaction
       });
 
@@ -460,9 +473,50 @@ export function parseCodexRolloutContent(rawText, { filePath = '', pricing, thre
 }
 
 export function createCodexAdapter({ paths, store, pricing, t3State }) {
-  const rolloutMetaCache = new Map(); // filePath -> { stamp, sessionId, accountId, requestCount, latestContext, rateLimitWindows }
+  const rolloutMetaCache = new Map(); // filePath -> { stamp, sessionId, accountId, defaultAccountId, requestCount, usageCount, latestContext, rateLimitWindows, hydrated }
   const rateLimitsByAccount = new Map();
   let skippedZstCount = 0;
+  let lastRolloutDirsCount = 0;
+  let lastRolloutFilesCount = 0;
+
+  function resolveRolloutRoots() {
+    const roots = [];
+    const seen = new Set();
+
+    function addDir(dir, defaultAccountId = 'codex') {
+      if (!dir) return;
+      const abs = resolve(dir);
+      const key = normalizeFsKey(abs);
+      if (seen.has(key)) return;
+      seen.add(key);
+      roots.push({ dir: abs, defaultAccountId: defaultAccountId || 'codex' });
+    }
+
+    // Primary configured paths: both active `sessions` and `archived_sessions`
+    // (Codex moves finished/delegated rollouts into `archived_sessions/` and compresses older ones to `.jsonl.zst`)
+    addDir(paths.codexSessionsDir, 'codex');
+    addDir(paths.codexArchivedSessionsDir, 'codex');
+
+    // Also discover any Codex provider instances with custom `config.homePath` in T3 settings.json
+    const instances = t3State?.readProviderInstances?.();
+    if (instances && typeof instances.values === 'function') {
+      const byHome = new Map();
+      for (const inst of instances.values()) {
+        if (inst?.driver !== 'codex' || !inst.homePath) continue;
+        const hKey = normalizeFsKey(inst.homePath);
+        const prev = byHome.get(hKey);
+        if (!prev || (inst.enabled && !prev.enabled)) {
+          byHome.set(hKey, inst);
+        }
+      }
+      for (const inst of byHome.values()) {
+        addDir(join(inst.homePath, 'sessions'), inst.instanceId);
+        addDir(join(inst.homePath, 'archived_sessions'), inst.instanceId);
+      }
+    }
+
+    return roots;
+  }
 
   function rebuildRateLimitsFromCache() {
     rateLimitsByAccount.clear();
@@ -477,15 +531,85 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
     }
   }
 
+  function hydrateRolloutFile(filePath, { stamp, guessedId, defaultAccountId, threadIndex }) {
+    let rawText = null;
+    try { rawText = readRolloutText(filePath); } catch { return { status: 'error' }; }
+    if (rawText === null) return { status: 'skipped-zst' };
+
+    const threadLink = guessedId ? threadIndex.nativeToThread.get(guessedId) : null;
+    const parsed = parseCodexRolloutContent(rawText, { filePath, pricing, threadLink });
+    const resolvedId = parsed.nativeThreadId || guessedId;
+    const finalLink = (!threadLink && resolvedId) ? threadIndex.nativeToThread.get(resolvedId) : threadLink;
+    const accountId = finalLink?.accountId || defaultAccountId || parsed.accountId || 'codex';
+    for (const r of parsed.requests) {
+      if (finalLink) {
+        r.t3ThreadId = finalLink.threadId || r.t3ThreadId;
+        r.t3ThreadTitle = finalLink.title || r.t3ThreadTitle;
+      }
+      r.accountId = accountId;
+    }
+    if (parsed.latestContext) parsed.latestContext.accountId = accountId;
+
+    const usageCount = parsed.requests.filter(r => r.status !== 'error').length;
+    const meta = {
+      stamp,
+      sessionId: resolvedId,
+      accountId,
+      defaultAccountId: defaultAccountId || 'codex',
+      requestCount: parsed.requests.length,
+      usageCount,
+      latestContext: parsed.latestContext,
+      rateLimitWindows: parsed.rateLimitWindows,
+      hydrated: true
+    };
+    rolloutMetaCache.set(filePath, meta);
+    return { status: 'ok', parsed, meta };
+  }
+
   function syncRollouts(threadIndex) {
-    const walked = walkFilesChecked(paths.codexSessionsDir, name => /\.(jsonl|jsonl\.zst)$/i.test(name));
-    if (!walked.ok) {
-      return { enumerated: false, coveredFiles: new Set(), coveredSessionIds: new Set(), coverageHash: 'unenumerated' };
+    const roots = resolveRolloutRoots();
+    const discovered = [];
+    const seenFiles = new Set();
+    let existingDirCount = 0;
+
+    for (const root of roots) {
+      if (!existsSync(root.dir)) continue;
+      existingDirCount++;
+      const walked = walkFilesChecked(root.dir, name => /\.(jsonl|jsonl\.zst)$/i.test(name));
+      if (!walked.ok) {
+        return {
+          enumerated: false,
+          coveredFiles: new Set(),
+          coveredRolloutNames: new Set(),
+          coveredSessionIds: new Set(),
+          coverageHash: 'unenumerated'
+        };
+      }
+      for (const fp of walked.files) {
+        const key = normalizeFsKey(fp);
+        if (seenFiles.has(key)) continue;
+        seenFiles.add(key);
+        discovered.push({ filePath: fp, defaultAccountId: root.defaultAccountId });
+      }
+    }
+
+    lastRolloutDirsCount = existingDirCount;
+    lastRolloutFilesCount = discovered.length;
+
+    if (existingDirCount === 0) {
+      return {
+        enumerated: false,
+        coveredFiles: new Set(),
+        coveredRolloutNames: new Set(),
+        coveredSessionIds: new Set(),
+        coverageHash: 'unenumerated'
+      };
     }
 
     const activeSources = new Set();
-    const activeFiles = new Set(walked.files);
+    const activeFiles = new Set(discovered.map(d => d.filePath));
     const coveredFiles = new Set();
+    const coveredRolloutNames = new Set();
     const coveredSessionIds = new Set();
     let skippedZst = 0;
     let rateLimitsDirty = false;
@@ -497,7 +621,11 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
       }
     }
 
-    for (const filePath of walked.files) {
+    const entries = [];
+    const coldUnchanged = [];
+
+    for (const item of discovered) {
+      const { filePath, defaultAccountId } = item;
       const sourceKey = `codex-rollout:${filePath}`;
       // Always keep enumerated existing file in activeSources so transient read failures never prune its rows (fixes P2 #16)
       activeSources.add(sourceKey);
@@ -505,10 +633,46 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
       let stat;
       try { stat = statSync(filePath); } catch { continue; }
       const stamp = `${stat.mtimeMs}:${stat.size}`;
+      const fileIdMatch = filePath.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i);
+      const guessedId = fileIdMatch?.[1] || '';
 
       const cachedMeta = rolloutMetaCache.get(filePath);
       const needStoreSync = store.getSourceStamp(sourceKey) !== stamp;
       const needMetaRefresh = cachedMeta?.stamp !== stamp;
+
+      const entry = { filePath, sourceKey, defaultAccountId, stamp, mtimeMs: stat.mtimeMs, guessedId, cachedMeta, needStoreSync, needMetaRefresh };
+      entries.push(entry);
+      if (!needStoreSync && needMetaRefresh) {
+        coldUnchanged.push(entry);
+      }
+    }
+
+    // On daemon restart when SQLite is already populated, avoid decompressing hundreds of old archived files at boot:
+    // hydrate only the newest files (for live rate limits) + files without a UUID in their filename, and defer the rest to lazy readLiveContext().
+    const eagerColdHydrate = new Set();
+    let sourceUsageCounts = null;
+    if (coldUnchanged.length > 0 && typeof store.getSourceUsageCounts === 'function') {
+      sourceUsageCounts = store.getSourceUsageCounts('codex-rollout:');
+      const sortedCold = coldUnchanged.slice().sort((a, b) => b.mtimeMs - a.mtimeMs);
+      let budgeted = 0;
+      for (const e of sortedCold) {
+        if (!e.guessedId) {
+          eagerColdHydrate.add(e.filePath);
+        } else if (budgeted < COLD_HYDRATE_LIMIT) {
+          eagerColdHydrate.add(e.filePath);
+          budgeted++;
+        }
+      }
+    }
+
+    function markCovered(filePath) {
+      coveredFiles.add(filePath);
+      const canon = canonicalRolloutFileName(filePath);
+      if (canon) coveredRolloutNames.add(canon);
+    }
+
+    for (const entry of entries) {
+      const { filePath, sourceKey, defaultAccountId, stamp, guessedId, cachedMeta, needStoreSync, needMetaRefresh } = entry;
 
       if (!needStoreSync && !needMetaRefresh) {
         // Reconcile account attribution if T3 mapping resolved a new accountId (fixes P1 #3 & #8)
@@ -519,54 +683,45 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
           rateLimitsDirty = true;
         }
         if (cachedMeta.usageCount > 0) {
-          coveredFiles.add(filePath);
+          markCovered(filePath);
         }
         continue;
       }
 
-      let rawText = null;
-      try { rawText = readRolloutText(filePath); } catch { continue; }
-      if (rawText === null) {
+      if (!needStoreSync && sourceUsageCounts && !eagerColdHydrate.has(filePath)) {
+        const linked = guessedId ? threadIndex.nativeToThread.get(guessedId) : null;
+        const usageCount = sourceUsageCounts.get(sourceKey) || 0;
+        rolloutMetaCache.set(filePath, {
+          stamp,
+          sessionId: guessedId,
+          accountId: linked?.accountId || defaultAccountId || 'codex',
+          defaultAccountId: defaultAccountId || 'codex',
+          requestCount: usageCount,
+          usageCount,
+          latestContext: null,
+          rateLimitWindows: [],
+          hydrated: false
+        });
+        if (usageCount > 0) {
+          markCovered(filePath);
+        }
+        continue;
+      }
+
+      const res = hydrateRolloutFile(filePath, { stamp, guessedId, defaultAccountId, threadIndex });
+      if (res.status === 'skipped-zst') {
         skippedZst++;
         continue;
       }
+      if (res.status !== 'ok') continue;
 
-      const fileIdMatch = filePath.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i);
-      const guessedId = fileIdMatch?.[1] || '';
-      const threadLink = guessedId ? threadIndex.nativeToThread.get(guessedId) : null;
-
-      const parsed = parseCodexRolloutContent(rawText, { filePath, pricing, threadLink });
-      const resolvedId = parsed.nativeThreadId || guessedId;
-      const finalLink = (!threadLink && resolvedId) ? threadIndex.nativeToThread.get(resolvedId) : threadLink;
-      if (finalLink && finalLink !== threadLink) {
-        for (const r of parsed.requests) {
-          r.t3ThreadId = finalLink.threadId || r.t3ThreadId;
-          r.t3ThreadTitle = finalLink.title || r.t3ThreadTitle;
-          r.accountId = finalLink.accountId || r.accountId;
-        }
-      }
-
-      const accountId = finalLink?.accountId || parsed.accountId || 'codex';
-      if (parsed.latestContext) parsed.latestContext.accountId = accountId;
-
-      const usageCount = parsed.requests.filter(r => r.status !== 'error').length;
-      rolloutMetaCache.set(filePath, {
-        stamp,
-        sessionId: resolvedId,
-        accountId,
-        requestCount: parsed.requests.length,
-        usageCount,
-        latestContext: parsed.latestContext,
-        rateLimitWindows: parsed.rateLimitWindows
-      });
       rateLimitsDirty = true;
-
       if (needStoreSync) {
-        store.replaceSourceRequests(sourceKey, stamp, parsed.requests);
+        store.replaceSourceRequests(sourceKey, stamp, res.parsed.requests);
       }
       // Only mark as covered when this rollout actually imported usage rows (never let error-only files suppress cached usage) (fixes P1 #7)
-      if (usageCount > 0) {
-        coveredFiles.add(filePath);
+      if (res.meta.usageCount > 0) {
+        markCovered(filePath);
       }
     }
 
@@ -580,7 +735,7 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
       .digest('hex')
       .slice(0, 16);
 
-    return { enumerated: true, coveredFiles, coveredSessionIds, coverageHash: covHash };
+    return { enumerated: true, coveredFiles, coveredRolloutNames, coveredSessionIds, coverageHash: covHash };
   }
 
   /**
@@ -607,7 +762,12 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
     const rows = [];
     for (const [fp, entry] of Object.entries(filesObj)) {
       const driver = String(entry?.p || 'unknown');
-      if (driver === 'codex' && (rolloutCoverage.coveredFiles.has(fp) || rolloutCoverage.coveredFiles.has(`${fp}.zst`))) {
+      const canonName = driver === 'codex' ? canonicalRolloutFileName(fp) : '';
+      if (driver === 'codex' && (
+        rolloutCoverage.coveredFiles.has(fp) ||
+        rolloutCoverage.coveredFiles.has(`${fp}.zst`) ||
+        (canonName && rolloutCoverage.coveredRolloutNames?.has(canonName))
+      )) {
         continue;
       }
 
@@ -694,12 +854,30 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
 
   function readLiveContext(nativeSessionId) {
     if (!nativeSessionId) return null;
-    for (const meta of rolloutMetaCache.values()) {
-      if (meta.sessionId === nativeSessionId && meta.latestContext) {
-        return meta.latestContext;
+    let latest = null;
+    let hydratedAny = false;
+    for (const [filePath, meta] of rolloutMetaCache.entries()) {
+      if (meta.sessionId !== nativeSessionId) continue;
+      let resolvedMeta = meta;
+      if (meta.hydrated === false) {
+        const res = hydrateRolloutFile(filePath, {
+          stamp: meta.stamp,
+          guessedId: meta.sessionId,
+          defaultAccountId: meta.defaultAccountId,
+          threadIndex: t3State.readThreadIndex()
+        });
+        if (res.status === 'ok') {
+          resolvedMeta = res.meta;
+          if (res.meta.rateLimitWindows?.length) hydratedAny = true;
+        }
+      }
+      if (resolvedMeta.latestContext &&
+          (!latest || resolvedMeta.latestContext.lastRequestAtMs > latest.lastRequestAtMs)) {
+        latest = resolvedMeta.latestContext;
       }
     }
-    return null;
+    if (hydratedAny) rebuildRateLimitsFromCache();
+    return latest;
   }
 
   function getRateLimitWindows(accountId = 'codex') {
@@ -714,6 +892,11 @@ export function createCodexAdapter({ paths, store, pricing, t3State }) {
     syncAll,
     readLiveContext,
     getRateLimitWindows,
-    getDiagnostics: () => ({ hasNativeZstd: HAS_NATIVE_ZSTD, skippedZstCount })
+    getDiagnostics: () => ({
+      hasNativeZstd: HAS_NATIVE_ZSTD,
+      skippedZstCount,
+      rolloutDirsCount: lastRolloutDirsCount,
+      rolloutFilesCount: lastRolloutFilesCount
+    })
   };
 }

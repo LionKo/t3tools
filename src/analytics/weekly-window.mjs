@@ -1,5 +1,30 @@
-const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
 const WEEK_MS = 7 * DAY_MS;
+
+function parseLocalDateTimeSpec(spec, { isEnd = false } = {}) {
+  const m = String(spec || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?$/);
+  if (!m) return NaN;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const base = new Date(y, mo - 1, d, 0, 0, 0, 0);
+  if (base.getFullYear() !== y || base.getMonth() !== mo - 1 || base.getDate() !== d) return NaN;
+
+  if (m[4] == null) {
+    if (isEnd) base.setDate(base.getDate() + 1);
+    return +base;
+  }
+  const hh = Number(m[4]);
+  const mm = Number(m[5]);
+  if (hh === 24 && mm === 0) {
+    base.setDate(base.getDate() + 1);
+    return +base;
+  }
+  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return NaN;
+  base.setHours(hh, mm, 0, 0);
+  return +base;
+}
 
 function requestPoolKey(req) {
   if (req.providerDriver === 'codex') return 'codex';
@@ -135,46 +160,75 @@ export function resolveDateRange(preset = 'weeklyQuota', { now = Date.now(), cus
 
   let start = +startOfToday;
   let end = now;
+  let status = 'calendar';
+  let exclusiveEnd = false;
+  const rawPreset = String(preset || '');
+  const hoursMatch = rawPreset.match(/^last:(\d+)h$/);
+  const rangeIdx = rawPreset.indexOf('..');
 
-  if (preset === 'today') {
+  if (rawPreset === 'today') {
     start = +startOfToday;
-  } else if (preset === '24h') {
+  } else if (rawPreset === '24h') {
     start = now - DAY_MS;
-  } else if (preset === 'week') {
+    status = 'rolling';
+  } else if (rawPreset === 'week') {
     const d = new Date(startOfToday);
     d.setDate(d.getDate() - ((d.getDay() + 6) % 7));
     start = +d;
-  } else if (preset === '7d') {
+  } else if (rawPreset === '7d') {
     start = now - WEEK_MS;
-  } else if (preset === '30d') {
+    status = 'rolling';
+  } else if (rawPreset === '30d') {
     const d = new Date(startOfToday);
     d.setDate(d.getDate() - 29);
     start = +d;
-  } else if (preset === 'all') {
+  } else if (rawPreset === 'all') {
     start = 0;
-  } else if (preset === 'custom' && customStart && customEnd) {
-    const a = Date.parse(`${customStart}T00:00:00`);
-    const bDate = new Date(`${customEnd}T00:00:00`);
-    bDate.setDate(bDate.getDate() + 1);
-    const b = +bDate;
+  } else if (hoursMatch) {
+    const hours = Number(hoursMatch[1]);
+    if (Number.isInteger(hours) && hours >= 1 && hours <= 720) {
+      start = now - hours * HOUR_MS;
+      status = 'rolling';
+    } else {
+      start = now - DAY_MS;
+      status = 'rolling';
+    }
+  } else if (rangeIdx > 0) {
+    const fromSpec = rawPreset.slice(0, rangeIdx);
+    const toSpec = rawPreset.slice(rangeIdx + 2);
+    const a = parseLocalDateTimeSpec(fromSpec, { isEnd: false });
+    const b = parseLocalDateTimeSpec(toSpec, { isEnd: true });
     if (Number.isFinite(a) && Number.isFinite(b) && a < b) {
       start = a;
       end = b;
+      status = 'custom';
+      exclusiveEnd = true;
+    } else {
+      start = now - DAY_MS;
+    }
+  } else if (rawPreset === 'custom' && customStart && customEnd) {
+    const a = parseLocalDateTimeSpec(customStart, { isEnd: false });
+    const b = parseLocalDateTimeSpec(customEnd, { isEnd: true });
+    if (Number.isFinite(a) && Number.isFinite(b) && a < b) {
+      start = a;
+      end = b;
+      status = 'custom';
+      exclusiveEnd = true;
     } else {
       start = now - DAY_MS;
     }
   }
 
   return {
-    preset,
-    status: 'calendar',
+    preset: rawPreset,
+    status,
     start,
     end,
     resetsAtMs: null,
     pools: [],
     match: req => {
       const ts = Number.isFinite(req?.billingTsMs) ? req.billingTsMs : req?.timestampMs;
-      return Number.isFinite(ts) && ts >= start && ts <= end;
+      return Number.isFinite(ts) && ts >= start && (exclusiveEnd ? ts < end : ts <= end);
     }
   };
 }

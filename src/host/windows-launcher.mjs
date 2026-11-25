@@ -5,12 +5,27 @@ import { spawnSync, spawn } from 'node:child_process';
 import { atomicWriteJson } from '../core/settings.mjs';
 
 export const DEBUG_FLAG = '--remote-debugging-port=0';
-const HAS_DEBUG_RE = /(?:^|\s)--remote-debugging-port(?:=(\d+)|\s+(\d+)|\b)/i;
+const DEBUG_TOKEN = /^--remote-debugging-port(?:=(\d+))?$/i;
+function shortcutTokens(args) {
+  const tokens = [];
+  for (let pos = 0; pos < args.length;) {
+    if (/\s/.test(args[pos])) { pos++; continue; }
+    const start = pos;
+    let quoted = false, slashes = 0;
+    while (pos < args.length && (quoted || !/\s/.test(args[pos]))) {
+      const ch = args[pos++];
+      if (ch === '"' && slashes % 2 === 0) quoted = !quoted;
+      slashes = ch === '\\' ? slashes + 1 : 0;
+    }
+    tokens.push(args.slice(start, pos));
+  }
+  return tokens;
+}
 const DEFAULT_CLI_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 't3tools.mjs');
 
 export function injectDebugArg(args = '') {
   const trimmed = String(args || '').trim();
-  if (HAS_DEBUG_RE.test(trimmed)) return trimmed;
+  if (hasDebugArg(trimmed)) return trimmed;
   return trimmed ? `${trimmed} ${DEBUG_FLAG}` : DEBUG_FLAG;
 }
 
@@ -23,72 +38,26 @@ export function removeDebugArg(args = '', flag = DEBUG_FLAG) {
   const target = String(flag || '').toLowerCase();
   if (!target) return src.trim();
 
-  let out = '';
-  let i = 0;
-  while (i < src.length) {
-    if (/\s/.test(src[i])) {
-      let wsEnd = i;
-      while (wsEnd < src.length && /\s/.test(src[wsEnd])) wsEnd++;
-      const ws = src.slice(i, wsEnd);
-      if (wsEnd < src.length && src[wsEnd] !== '"') {
-        let tokEnd = wsEnd;
-        while (tokEnd < src.length && !/\s/.test(src[tokEnd])) tokEnd++;
-        if (src.slice(wsEnd, tokEnd).toLowerCase() === target) {
-          i = tokEnd;
-          continue;
-        }
-      }
-      out += ws;
-      i = wsEnd;
-      continue;
+  let from = 0;
+  for (const token of shortcutTokens(src)) {
+    const start = src.indexOf(token, from);
+    from = start + token.length;
+    if (token.toLowerCase() === target) {
+      return (src.slice(0, start).trimEnd() + src.slice(from)).trim();
     }
-
-    if (src[i] === '"') {
-      let j = i + 1;
-      while (j < src.length) {
-        if (src[j] === '\\' && j + 1 < src.length) { j += 2; continue; }
-        if (src[j] === '"') { j++; break; }
-        j++;
-      }
-      out += src.slice(i, j);
-      i = j;
-      continue;
-    }
-
-    let tokEnd = i;
-    while (tokEnd < src.length && !/\s/.test(src[tokEnd])) {
-      if (src[tokEnd] === '"') {
-        tokEnd++;
-        while (tokEnd < src.length && src[tokEnd] !== '"') {
-          if (src[tokEnd] === '\\' && tokEnd + 1 < src.length) tokEnd += 2;
-          else tokEnd++;
-        }
-        if (tokEnd < src.length) tokEnd++;
-      } else {
-        tokEnd++;
-      }
-    }
-    const tok = src.slice(i, tokEnd);
-    if (tok.toLowerCase() === target) {
-      i = tokEnd;
-      if (i < src.length && src[i] === ' ') i++;
-      continue;
-    }
-    out += tok;
-    i = tokEnd;
   }
-
-  return out.replace(/^\s+|\s+$/g, '');
+  return src.trim();
 }
 
 export function hasDebugArg(args = '') {
-  return HAS_DEBUG_RE.test(String(args || ''));
+  return parseDebugPortFromArgs(args) !== null;
 }
 
 export function parseDebugPortFromArgs(args = '') {
-  const m = String(args || '').match(HAS_DEBUG_RE);
-  if (!m) return null;
-  const n = Number(m[1] || m[2]);
+  const tokens = shortcutTokens(args);
+  const i = tokens.findIndex(t => DEBUG_TOKEN.test(t));
+  if (i < 0) return null;
+  const n = Number(DEBUG_TOKEN.exec(tokens[i])[1] ?? tokens[i + 1]);
   return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0;
 }
 
@@ -167,10 +136,14 @@ export function isVerifiedT3Target(targetPath = '') {
 /**
  * Check whether a shortcut points to any launch-t3.vbs silent wrapper (current or legacy path).
  */
+function wrapperScriptPath(args) {
+  const script = shortcutTokens(String(args || '')).find(t => !t.startsWith('//')) || '';
+  return script.replace(/^"|"$/g, '');
+}
+
 export function isAnyWrapperShortcut(targetPath = '', args = '') {
-  const exeName = basename(String(targetPath || '').trim()).toLowerCase();
-  if (exeName !== 'wscript.exe') return false;
-  return String(args || '').toLowerCase().includes('launch-t3.vbs');
+  if (basename(String(targetPath || '').trim()).toLowerCase() !== 'wscript.exe') return false;
+  return basename(wrapperScriptPath(args)).toLowerCase() === 'launch-t3.vbs';
 }
 
 /**
@@ -178,9 +151,9 @@ export function isAnyWrapperShortcut(targetPath = '', args = '') {
  */
 export function isWrapperShortcut(targetPath = '', args = '', vbsPath = '') {
   if (!isAnyWrapperShortcut(targetPath, args)) return false;
-  const normArgs = String(args || '').toLowerCase();
+  const script = wrapperScriptPath(args).toLowerCase();
   if (vbsPath) {
-    return normArgs.includes(String(vbsPath).toLowerCase());
+    return script === String(vbsPath).toLowerCase();
   }
   return true;
 }
@@ -190,10 +163,9 @@ export function isWrapperShortcut(targetPath = '', args = '', vbsPath = '') {
  */
 export function extractExtraArgsFromWrapper(args = '', vbsPath = '') {
   const raw = String(args || '');
-  const needle = vbsPath ? `"${vbsPath}"` : 'launch-t3.vbs"';
-  const idx = raw.toLowerCase().indexOf(needle.toLowerCase());
-  if (idx < 0) return '';
-  return raw.slice(idx + needle.length).replace(/^\s+/, '');
+  const token = shortcutTokens(raw).find(t => !t.startsWith('//'));
+  if (!token || (vbsPath && wrapperScriptPath(raw).toLowerCase() !== vbsPath.toLowerCase())) return '';
+  return raw.slice(raw.indexOf(token) + token.length).trimStart();
 }
 
 /**
@@ -208,10 +180,26 @@ export function buildWrapperVbsContent({ nodeExe = process.execPath, cliPath = D
     'Set shell = CreateObject("WScript.Shell")',
     `cmd = """${escVbs(nodeExe)}"" ""${escVbs(cliPath)}"" launch"`,
     'For i = 0 To WScript.Arguments.Count - 1',
-    '  arg = Replace(WScript.Arguments(i), """", """""")',
-    '  cmd = cmd & " """ & arg & """"',
+    '  arg = WScript.Arguments(i)',
+    '  cmd = cmd & " " & QuoteArg(arg)',
     'Next',
-    'shell.Run cmd, 0, False',
+    'shell.Environment("Process")("T3TOOLS_WRAPPER_CMD") = cmd',
+    'shell.Run "%T3TOOLS_WRAPPER_CMD%", 0, False',
+    'Function QuoteArg(value)',
+    '  Dim j, ch, slashes, result',
+    '  result = Chr(34): slashes = 0',
+    '  For j = 1 To Len(value)',
+    '    ch = Mid(value, j, 1)',
+    '    If ch = Chr(92) Then',
+    '      slashes = slashes + 1',
+    '    Else',
+    '      If ch = Chr(34) Then slashes = 2 * slashes + 1',
+    '      result = result & String(slashes, Chr(92)) & ch',
+    '      slashes = 0',
+    '    End If',
+    '  Next',
+    '  QuoteArg = result & String(2 * slashes, Chr(92)) & Chr(34)',
+    'End Function',
     ''
   ].join('\r\n');
 }
@@ -219,7 +207,7 @@ export function buildWrapperVbsContent({ nodeExe = process.execPath, cliPath = D
 export function writeWrapperVbs(paths, opts = {}) {
   const vbsPath = paths.launcherVbsPath || join(paths.pluginDataDir, 'launch-t3.vbs');
   mkdirSync(dirname(vbsPath), { recursive: true });
-  writeFileSync(vbsPath, buildWrapperVbsContent(opts), 'utf8');
+  writeFileSync(vbsPath, '\uFEFF' + buildWrapperVbsContent(opts), 'utf16le');
   return vbsPath;
 }
 
@@ -364,8 +352,8 @@ export function patchT3Launchers(paths, { runner = runPowerShell, sandbox = fals
       workingDirectory: sc.workingDirectory || dirname(originalTarget),
       originalTarget,
       originalArguments: cleanedArgs,
-      originalIconLocation: prevEntry?.originalIconLocation || (sc.isLegacyWrapper ? `${originalTarget},0` : (sc.iconLocation || '')),
-      originalWorkingDirectory: prevEntry?.originalWorkingDirectory || sc.workingDirectory || dirname(originalTarget)
+      originalIconLocation: prevEntry?.originalIconLocation ?? (sc.isLegacyWrapper ? `${originalTarget},0` : (sc.iconLocation || '')),
+      originalWorkingDirectory: prevEntry?.originalWorkingDirectory ?? sc.workingDirectory ?? dirname(originalTarget)
     });
   }
 
@@ -398,6 +386,18 @@ foreach ($item in $items) {
 }
 Write-Output $count
 `;
+  for (const item of toUpdate) {
+    backup.managed[item.path] = {
+      mode: 'wrapper',
+      previousArg: backup.managed[item.path]?.mode === 'arg' ? backup.managed[item.path].addedFlag : backup.managed[item.path]?.previousArg,
+      vbsPath,
+      originalTarget: item.originalTarget,
+      originalIconLocation: item.originalIconLocation,
+      originalWorkingDirectory: item.originalWorkingDirectory,
+      patchedAtMs: Date.now()
+    };
+  }
+  atomicWriteJson(paths.launcherBackupPath, backup);
   const res = runner(ps, { T3TOOLS_UPDATES: JSON.stringify(toUpdate) });
   if (!res.ok) {
     return { ok: false, patched: 0, alreadyPatched: 0, vbsPath, error: res.stderr || '写入快捷方式失败', shortcuts };
@@ -409,19 +409,8 @@ Write-Output $count
 
   for (const item of toUpdate) {
     const after = verifiedMap.get(item.path);
-    if (after?.isWrapper) {
-      backup.managed[item.path] = {
-        mode: 'wrapper',
-        vbsPath,
-        originalTarget: item.originalTarget,
-        originalIconLocation: item.originalIconLocation,
-        originalWorkingDirectory: item.originalWorkingDirectory,
-        patchedAtMs: Date.now()
-      };
-      verifiedPatched++;
-    }
+    if (after?.isWrapper) verifiedPatched++;
   }
-  atomicWriteJson(paths.launcherBackupPath, backup);
 
   return {
     ok: verifiedPatched === toUpdate.length,
@@ -447,23 +436,24 @@ export function restoreT3Launchers(paths, { runner = runPowerShell, sandbox = fa
   const vbsPath = paths.launcherVbsPath || join(paths.pluginDataDir || '', 'launch-t3.vbs');
   const fallbackExe = findT3Executable(paths);
   const toRestore = [];
+  let missingTarget = false;
 
   for (const sc of inspected.shortcuts) {
     const entry = backup.managed[sc.path];
     if (sc.isWrapper || sc.isLegacyWrapper) {
       const targetExe = entry?.originalTarget || fallbackExe;
-      if (!targetExe) continue;
+      if (!targetExe || !isVerifiedT3Target(targetExe)) { missingTarget = true; continue; }
       const preservedArgs = extractExtraArgsFromWrapper(sc.arguments || '', sc.isWrapper ? (entry?.vbsPath || vbsPath) : '');
       toRestore.push({
         path: sc.path,
         mode: 'wrapper',
         target: targetExe,
         arguments: preservedArgs,
-        iconLocation: entry?.originalIconLocation || `${targetExe},0`,
-        workingDirectory: entry?.originalWorkingDirectory || dirname(targetExe)
+        iconLocation: entry?.originalIconLocation ?? `${targetExe},0`,
+        workingDirectory: entry?.originalWorkingDirectory ?? dirname(targetExe)
       });
-    } else if (entry?.mode === 'arg') {
-      const nextArgs = removeDebugArg(sc.arguments || '', entry.addedFlag || DEBUG_FLAG);
+    } else if (entry?.mode === 'arg' || entry?.previousArg) {
+      const nextArgs = removeDebugArg(sc.arguments || '', entry.addedFlag || entry.previousArg || DEBUG_FLAG);
       if (nextArgs !== (sc.arguments || '').trim()) {
         toRestore.push({
           path: sc.path,
@@ -477,12 +467,14 @@ export function restoreT3Launchers(paths, { runner = runPowerShell, sandbox = fa
       } else {
         delete backup.managed[sc.path];
       }
+    } else if (entry?.mode === 'wrapper' && sc.target === entry.originalTarget) {
+      delete backup.managed[sc.path];
     }
   }
 
   if (!toRestore.length) {
     atomicWriteJson(paths.launcherBackupPath, backup);
-    return { ok: true, restored: 0, error: '', shortcuts: inspected.shortcuts };
+    return { ok: !missingTarget, restored: 0, error: missingTarget ? '无法确定原始快捷方式目标' : '', shortcuts: inspected.shortcuts };
   }
 
   const ps = `
@@ -495,8 +487,8 @@ foreach ($item in $items) {
     $sc = $ws.CreateShortcut($item.path)
     $sc.TargetPath = $item.target
     $sc.Arguments = $item.arguments
-    if ($item.iconLocation) { $sc.IconLocation = $item.iconLocation }
-    if ($item.workingDirectory) { $sc.WorkingDirectory = $item.workingDirectory }
+    $sc.IconLocation = $item.iconLocation
+    $sc.WorkingDirectory = $item.workingDirectory
     $sc.Save()
     $count++
   }
@@ -515,8 +507,8 @@ Write-Output $count
   for (const item of toRestore) {
     const after = verifiedMap.get(item.path);
     const ok = item.mode === 'wrapper'
-      ? (after && !after.isWrapper && !after.isLegacyWrapper && isVerifiedT3Target(after.target))
-      : (after && !after.arguments.includes(item.addedFlag));
+      ? (after && isVerifiedT3Target(after.target) && after.target.toLowerCase() === item.target.toLowerCase() && after.arguments === item.arguments)
+      : (after && after.arguments === item.arguments);
     if (ok) {
       delete backup.managed[item.path];
       verifiedRestored++;
@@ -524,14 +516,14 @@ Write-Output $count
   }
   atomicWriteJson(paths.launcherBackupPath, backup);
 
-  if (Object.keys(backup.managed).length === 0) {
+  if (!missingTarget && Object.keys(backup.managed).length === 0) {
     try { unlinkSync(vbsPath); } catch {}
   }
 
   return {
-    ok: verifiedRestored === toRestore.length,
+    ok: !missingTarget && verifiedRestored === toRestore.length,
     restored: verifiedRestored,
-    error: verifiedRestored === toRestore.length ? '' : '部分快捷方式未通过还原校验',
+    error: !missingTarget && verifiedRestored === toRestore.length ? '' : '部分快捷方式未通过还原校验',
     shortcuts: verified.shortcuts
   };
 }
@@ -539,10 +531,10 @@ Write-Output $count
 export function findT3Executable(paths) {
   if (!paths.t3InstallDir || !existsSync(paths.t3InstallDir)) return '';
   try {
-    const exe = readdirSync(paths.t3InstallDir).find(
-      name => isVerifiedT3Target(join(paths.t3InstallDir, name))
+    const exe = readdirSync(paths.t3InstallDir, { withFileTypes: true }).find(
+      entry => entry.isFile() && isVerifiedT3Target(entry.name)
     );
-    return exe ? join(paths.t3InstallDir, exe) : '';
+    return exe ? join(paths.t3InstallDir, exe.name) : '';
   } catch {
     return '';
   }
@@ -563,13 +555,329 @@ export function isT3ProcessRunning({ runner = spawnSync } = {}) {
   }
 }
 
-export function launchT3WithDebugPort(paths, extraArgs = []) {
+export async function launchT3WithDebugPort(paths, extraArgs = []) {
   const exe = findT3Executable(paths);
   if (!exe) return { ok: false, error: '未找到 T3 Code 可执行文件' };
-  const cleanArgs = Array.isArray(extraArgs) ? extraArgs.filter(a => typeof a === 'string' && a.length > 0) : [];
-  const hasFlag = cleanArgs.some(a => hasDebugArg(a));
+  const cleanArgs = Array.isArray(extraArgs) ? extraArgs.filter(a => typeof a === 'string') : [];
+  const hasFlag = cleanArgs.some(a => DEBUG_TOKEN.test(a));
   const finalArgs = hasFlag ? cleanArgs : [DEBUG_FLAG, ...cleanArgs];
   const child = spawn(exe, finalArgs, { detached: true, stdio: 'ignore', windowsHide: false });
+  try {
+    await new Promise((resolve, reject) => {
+      child.once('error', reject);
+      child.once('spawn', resolve);
+    });
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
   child.unref();
   return { ok: true, exe, pid: child.pid, args: finalArgs };
+}
+
+/**
+ * Clean Debug-Arg Shortcut Mode (for standalone Magpie-style Tray App):
+ * Appends `--remote-debugging-port=0` directly to T3 Code shortcuts without replacing
+ * `TargetPath` with wscript.exe, preserving native Windows taskbar pinning & icons.
+ * Fully reversible via `restoreT3Launchers`.
+ */
+export function patchT3ShortcutsDebugArg(paths, { runner = runPowerShell, sandbox = false } = {}) {
+  const inspected = inspectShortcuts(paths, { runner, sandbox });
+  if (!inspected.ok) {
+    return { ok: false, patched: 0, alreadyPatched: 0, error: inspected.error, shortcuts: [] };
+  }
+  const shortcuts = inspected.shortcuts;
+  if (!shortcuts.length) {
+    return {
+      ok: false,
+      patched: 0,
+      alreadyPatched: 0,
+      error: '未在桌面、开始菜单或任务栏找到指向 T3 Code 可执行文件的快捷方式',
+      shortcuts: []
+    };
+  }
+
+  const backup = loadBackup(paths.launcherBackupPath);
+  const toUpdate = [];
+  let alreadyPatched = 0;
+
+  for (const sc of shortcuts) {
+    if (sc.isWrapper || sc.isLegacyWrapper || sc.hasDebugFlag) {
+      alreadyPatched++;
+      continue;
+    }
+    const nextArgs = injectDebugArg(sc.arguments || '');
+    toUpdate.push({
+      path: sc.path,
+      target: sc.target,
+      arguments: nextArgs,
+      iconLocation: sc.iconLocation || '',
+      workingDirectory: sc.workingDirectory || dirname(sc.target)
+    });
+  }
+
+  if (toUpdate.length === 0) {
+    return { ok: true, patched: 0, alreadyPatched, error: '', shortcuts };
+  }
+
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$items = $env:T3TOOLS_UPDATES | ConvertFrom-Json
+$ws = New-Object -ComObject WScript.Shell
+$count = 0
+foreach ($item in $items) {
+  if (Test-Path -LiteralPath $item.path) {
+    $sc = $ws.CreateShortcut($item.path)
+    $sc.Arguments = $item.arguments
+    if ($item.workingDirectory) { $sc.WorkingDirectory = $item.workingDirectory }
+    $sc.Save()
+    $count++
+  }
+}
+Write-Output $count
+`;
+  for (const item of toUpdate) {
+    backup.managed[item.path] = {
+      mode: 'arg',
+      addedFlag: DEBUG_FLAG,
+      patchedAtMs: Date.now()
+    };
+  }
+  atomicWriteJson(paths.launcherBackupPath, backup);
+  const res = runner(ps, { T3TOOLS_UPDATES: JSON.stringify(toUpdate) });
+  if (!res.ok) {
+    return { ok: false, patched: 0, alreadyPatched, error: res.stderr || '写入快捷方式失败', shortcuts };
+  }
+
+  const verified = inspectShortcuts(paths, { runner, sandbox });
+  const verifiedMap = new Map(verified.shortcuts.map(s => [s.path, s]));
+  let verifiedPatched = 0;
+
+  for (const item of toUpdate) {
+    const after = verifiedMap.get(item.path);
+    if (after?.hasDebugFlag) verifiedPatched++;
+  }
+
+  return {
+    ok: verifiedPatched === toUpdate.length,
+    patched: verifiedPatched,
+    alreadyPatched,
+    error: verifiedPatched === toUpdate.length ? '' : '部分快捷方式未通过写入校验',
+    shortcuts: verified.shortcuts
+  };
+}
+
+/**
+ * Inspect whether the T3 Code desktop UI main process is running and whether it has
+ * a CDP remote debugging port flag. Excludes renderer/gpu/utility children and acp-mcp-bridge helpers.
+ */
+export function inspectT3ProcessState({ runner = runPowerShell } = {}) {
+  if (process.platform !== 'win32') {
+    return { ok: true, running: false, mainPid: null, hasDebugFlag: false, exePath: '', debugPort: null };
+  }
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$procs = Get-CimInstance Win32_Process -Filter "Name LIKE 'T3%Code%.exe' OR Name LIKE 't3code%.exe'" -ErrorAction SilentlyContinue
+$mains = @()
+foreach ($p in $procs) {
+  $cmd = [string]$p.CommandLine
+  if ($cmd -match '--type=' -or $cmd -match 'acp-mcp-bridge' -or $cmd -match 'server\\.asar') { continue }
+  $mains += [PSCustomObject]@{
+    pid = [int]$p.ProcessId
+    exe = [string]$p.ExecutablePath
+    cmd = $cmd
+  }
+}
+$mains | ConvertTo-Json -Compress -Depth 3
+`;
+  const res = runner(ps, {});
+  if (!res.ok) {
+    return { ok: false, running: isT3ProcessRunning(), mainPid: null, hasDebugFlag: false, exePath: '', debugPort: null, error: res.stderr };
+  }
+  if (!res.stdout) {
+    return { ok: true, running: false, mainPid: null, hasDebugFlag: false, exePath: '', debugPort: null };
+  }
+  try {
+    const parsed = JSON.parse(res.stdout);
+    const list = Array.isArray(parsed) ? parsed : [parsed];
+    const first = list.find(item => item && item.pid);
+    if (!first) {
+      return { ok: true, running: false, mainPid: null, hasDebugFlag: false, exePath: '', debugPort: null };
+    }
+    const hasFlag = list.some(item => hasDebugArg(item.cmd || ''));
+    const port = list.map(item => parseDebugPortFromArgs(item.cmd || '')).find(p => p !== null) ?? null;
+    return {
+      ok: true,
+      running: true,
+      mainPid: Number(first.pid),
+      hasDebugFlag: hasFlag,
+      exePath: first.exe || '',
+      debugPort: port
+    };
+  } catch (err) {
+    return { ok: false, running: isT3ProcessRunning(), mainPid: null, hasDebugFlag: false, exePath: '', debugPort: null, error: err?.message };
+  }
+}
+
+/**
+ * Gracefully close the main T3 Code Electron UI window (leaving unrelated acp-mcp-bridge
+ * helpers untouched) and relaunch T3 Code with `--remote-debugging-port=0`.
+ */
+export function relaunchT3WithDebugPort(paths, extraArgs = [], { runner = runPowerShell, launchImpl = launchT3WithDebugPort } = {}) {
+  const exe = findT3Executable(paths);
+  if (!exe) return { ok: false, error: '未找到 T3 Code 可执行文件' };
+
+  if (process.platform === 'win32') {
+    const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$procs = Get-CimInstance Win32_Process -Filter "Name LIKE 'T3%Code%.exe' OR Name LIKE 't3code%.exe'" -ErrorAction SilentlyContinue
+$mainPids = @()
+foreach ($p in $procs) {
+  if ($p.ExecutablePath -ne $env:T3TOOLS_TARGET_EXE) { continue }
+  $cmd = [string]$p.CommandLine
+  if ($cmd -match '--type=' -or $cmd -match 'acp-mcp-bridge' -or $cmd -match 'server\\.asar') { continue }
+  $mainPids += [int]$p.ProcessId
+}
+foreach ($procId in $mainPids) {
+  try {
+    $gp = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($gp -and $gp.Path -eq $env:T3TOOLS_TARGET_EXE) {
+      [void]$gp.CloseMainWindow()
+    }
+  } catch {}
+}
+$deadline = [DateTime]::UtcNow.AddSeconds(8)
+while ([DateTime]::UtcNow -lt $deadline) {
+  $alive = @()
+  foreach ($procId in $mainPids) {
+    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) { $alive += $procId }
+  }
+  if ($alive.Count -eq 0) { break }
+  Start-Sleep -Milliseconds 250
+}
+foreach ($procId in $mainPids) {
+  try {
+    $gp = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if ($gp -and $gp.Path -eq $env:T3TOOLS_TARGET_EXE) {
+      $gp | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+  } catch {}
+}
+Start-Sleep -Milliseconds 300
+Write-Output ($mainPids -join ',')
+`;
+    const closeRes = runner(ps, { T3TOOLS_TARGET_EXE: exe });
+    if (!closeRes.ok) {
+      return { ok: false, error: closeRes.stderr || '关闭 T3 Code 主窗口失败' };
+    }
+  }
+
+  return launchImpl(paths, extraArgs);
+}
+
+const AUTOSTART_REG_KEY = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const AUTOSTART_REG_NAME = 'T3Tools';
+
+export function getTrayAutoStartStatus({ runner = runPowerShell } = {}) {
+  if (process.platform !== 'win32') return { ok: true, enabled: false, command: '' };
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$val = (Get-ItemProperty -Path '${AUTOSTART_REG_KEY}' -Name '${AUTOSTART_REG_NAME}' -ErrorAction SilentlyContinue).'${AUTOSTART_REG_NAME}'
+if ($null -eq $val) { Write-Output '' } else { Write-Output ([string]$val) }
+`;
+  const res = runner(ps, {});
+  if (!res.ok) return { ok: false, enabled: false, command: '', error: res.stderr };
+  const cmd = (res.stdout || '').trim();
+  return { ok: true, enabled: cmd.length > 0, command: cmd };
+}
+
+export function setTrayAutoStart(enabled, exePath, { runner = runPowerShell } = {}) {
+  if (process.platform !== 'win32') return { ok: false, enabled: false, error: '仅支持 Windows' };
+  const want = Boolean(enabled);
+  if (want && !exePath) {
+    return { ok: false, enabled: false, error: '缺少 T3Tools.exe 路径' };
+  }
+  const ps = want
+    ? `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+if (-not (Test-Path '${AUTOSTART_REG_KEY}')) { New-Item -Path '${AUTOSTART_REG_KEY}' -Force | Out-Null }
+Set-ItemProperty -Path '${AUTOSTART_REG_KEY}' -Name '${AUTOSTART_REG_NAME}' -Value $env:T3TOOLS_RUN_CMD
+Write-Output 'OK'
+`
+    : `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+Remove-ItemProperty -Path '${AUTOSTART_REG_KEY}' -Name '${AUTOSTART_REG_NAME}' -ErrorAction SilentlyContinue
+Write-Output 'OK'
+`;
+  const res = runner(ps, want ? { T3TOOLS_RUN_CMD: `"${exePath}" --tray` } : {});
+  if (!res.ok) return { ok: false, enabled: !want, error: res.stderr || '更新开机自启失败' };
+  return { ok: true, enabled: want, command: want ? `"${exePath}" --tray` : '' };
+}
+
+export function createT3ToolsTrayShortcuts(paths, { exePath, runner = runPowerShell, sandbox = false } = {}) {
+  if (!exePath) return { ok: false, created: [], error: '缺少 T3Tools.exe 路径' };
+  const dirs = resolveShortcutSearchDirs(paths, { runner, sandbox });
+  const targetDirs = [];
+  const seen = new Set();
+  for (const d of dirs) {
+    if (!d || !existsSync(d)) continue;
+    // Only Desktop and Start Menu Programs (not TaskBar pinned)
+    if (/User Pinned\\TaskBar/i.test(d)) continue;
+    const norm = d.toLowerCase();
+    if (seen.has(norm)) continue;
+    seen.add(norm);
+    if (/desktop$/i.test(d) || /Start Menu\\Programs$/i.test(d)) {
+      targetDirs.push(d);
+    }
+  }
+  if (!targetDirs.length) return { ok: true, created: [], error: '' };
+
+  const items = targetDirs.map(d => ({
+    path: join(d, 'T3Tools.lnk'),
+    target: exePath,
+    workingDirectory: dirname(exePath),
+    iconLocation: `${exePath},0`,
+    description: 'T3Tools - T3 Code 自动吸附与系统托盘增强工具'
+  }));
+
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$items = $env:T3TOOLS_TRAY_SHORTCUTS | ConvertFrom-Json
+$ws = New-Object -ComObject WScript.Shell
+$created = @()
+foreach ($item in $items) {
+  $sc = $ws.CreateShortcut($item.path)
+  $sc.TargetPath = $item.target
+  $sc.Arguments = ''
+  $sc.WorkingDirectory = $item.workingDirectory
+  $sc.IconLocation = $item.iconLocation
+  $sc.Description = $item.description
+  $sc.Save()
+  $created += $item.path
+}
+$created | ConvertTo-Json -Compress
+`;
+  const res = runner(ps, { T3TOOLS_TRAY_SHORTCUTS: JSON.stringify(items) });
+  if (!res.ok) return { ok: false, created: [], error: res.stderr || '创建 T3Tools 快捷方式失败' };
+  let created = [];
+  try {
+    const parsed = JSON.parse(res.stdout || '[]');
+    created = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {}
+  return { ok: true, created, error: '' };
+}
+
+export function removeT3ToolsTrayShortcuts(paths, { runner = runPowerShell, sandbox = false } = {}) {
+  const dirs = resolveShortcutSearchDirs(paths, { runner, sandbox });
+  const removed = [];
+  for (const d of dirs) {
+    if (!d) continue;
+    const lnk = join(d, 'T3Tools.lnk');
+    if (existsSync(lnk)) {
+      try {
+        unlinkSync(lnk);
+        removed.push(lnk);
+      } catch {}
+    }
+  }
+  return { ok: true, removed };
 }

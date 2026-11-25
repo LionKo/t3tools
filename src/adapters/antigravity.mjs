@@ -27,9 +27,10 @@ function dbStamp(dbPath) {
 export function classifyErrorCode(raw = '') {
   const text = String(raw || '').replace(/\s+/g, ' ').trim();
   if (!text) return '';
+  if (/\b429\b|resource_exhausted|rate\s*limit|too\s+many\s+requests|quota/i.test(text)) return 'rate-limit';
+  if (/\b403\b|permission_denied|permission denied|权限受限/i.test(text)) return 'region';
   if (/unexpected\s+eof|\beof\b|connection\s+reset|broken\s+pipe/i.test(text)) return 'eof';
   if (/context\s+deadline\s+exceeded|timeout|timed\s*out/i.test(text)) return 'timeout';
-  if (/\b429\b|resource_exhausted|rate\s*limit|too\s+many\s+requests|quota/i.test(text)) return 'rate-limit';
   if (/\b503\b|\b502\b|\b504\b|unavailable|overloaded|capacity|high\s+demand/i.test(text)) return 'unavailable';
   if (/\b403\b|region|location|country|not\s+available|unsupported/i.test(text)) return 'region';
   if (/econnrefused|proxy|tls|handshake|dns|no\s+such\s+host|network/i.test(text)) return 'connection';
@@ -320,7 +321,7 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
             outputTokens: g.outputTokens
           });
 
-          const primaryError = g.error || g.retryErrors[0] || '';
+          const primaryError = g.error || g.retryErrors.join(' | ') || '';
           const status = g.error ? 'error' : 'success';
 
           rows.push({
@@ -354,9 +355,9 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
             savedUsd: cost.savedUsd,
             status,
             outcomeKnown: true,
-            retries: g.retries,
+            retries: Math.max(g.retries, g.retryErrors.length),
             errorCode: classifyErrorCode(primaryError),
-            errorText: primaryError.slice(0, 220),
+            errorText: primaryError.slice(0, 1000),
             compactionBefore
           });
         }
@@ -374,7 +375,7 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
   }
 
   function readLiveContext(accountId, nativeSessionId) {
-    if (!nativeSessionId) return null;
+    if (typeof nativeSessionId !== 'string' || !nativeSessionId || /[\\/:\x00]/.test(nativeSessionId)) return null;
     const hash = antigravityInstanceHash(accountId || 'antigravity');
     const dbPath = join(paths.t3AntigravityProvidersDir, hash, 'antigravity-acp', 'conversations', `${nativeSessionId}.db`);
     const parsed = readAntigravityConversationDb(dbPath);

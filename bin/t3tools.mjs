@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -8,9 +8,15 @@ import { createRuntimeContext, probeRunningDaemon, startDaemon, PLUGIN_VERSION }
 import {
   inspectShortcuts,
   patchT3Launchers,
+  patchT3ShortcutsDebugArg,
   restoreT3Launchers,
   findT3Executable,
-  launchT3WithDebugPort
+  launchT3WithDebugPort,
+  relaunchT3WithDebugPort,
+  inspectT3ProcessState,
+  getTrayAutoStartStatus,
+  setTrayAutoStart,
+  removeT3ToolsTrayShortcuts
 } from '../src/host/windows-launcher.mjs';
 import { collectDevToolsPortCandidates } from '../src/host/cdp-host.mjs';
 import { HAS_NATIVE_ZSTD } from '../src/adapters/codex.mjs';
@@ -35,15 +41,21 @@ async function cmdStart() {
   const portOverride = portRaw ? Number(portRaw) : null;
   const enableCdp = !args.includes('--no-cdp');
   const autoPatchLauncher = args.includes('--patch-launcher');
+  const autoPatchDebugArg = args.includes('--patch-debug-arg') || args.includes('--tray-host');
   const autoExitWhenT3Gone = args.includes('--auto-exit');
 
   const daemon = await startDaemon({
     portOverride,
     enableCdp,
     autoPatchLauncher,
+    autoPatchDebugArg,
     autoExitWhenT3Gone,
     onAutoExit: () => {
       console.log('[T3Tools] 检测到 T3 Code 已关闭，守护进程自动退出。');
+      process.exit(0);
+    },
+    onShutdownRequest: () => {
+      console.log('[T3Tools] 收到托盘退出指令，守护进程已优雅停止。');
       process.exit(0);
     }
   });
@@ -85,18 +97,23 @@ async function cmdLaunch() {
   const existing = await probeRunningDaemon(paths.runtimeFilePath);
   if (!existing) {
     mkdirSync(paths.pluginDataDir, { recursive: true });
-    const outFd = openSync(join(paths.pluginDataDir, 'daemon.out.log'), 'a');
-    const errFd = openSync(join(paths.pluginDataDir, 'daemon.err.log'), 'a');
-    const selfPath = fileURLToPath(import.meta.url);
-    const child = spawn(process.execPath, [selfPath, 'start', '--auto-exit'], {
-      detached: true,
-      windowsHide: true,
-      stdio: ['ignore', outFd, errFd]
-    });
-    child.unref();
+    const logFds = [];
+    try {
+      logFds.push(openSync(join(paths.pluginDataDir, 'daemon.out.log'), 'a'));
+      logFds.push(openSync(join(paths.pluginDataDir, 'daemon.err.log'), 'a'));
+      const selfPath = fileURLToPath(import.meta.url);
+      const child = spawn(process.execPath, [selfPath, 'start', '--auto-exit'], {
+        detached: true,
+        windowsHide: true,
+        stdio: ['ignore', ...logFds]
+      });
+      child.unref();
+    } finally {
+      for (const fd of logFds) closeSync(fd);
+    }
   }
 
-  const launched = launchT3WithDebugPort(paths, extraArgs);
+  const launched = await launchT3WithDebugPort(paths, extraArgs);
   if (!launched.ok) {
     console.error('启动 T3 Code 失败：', launched.error);
     process.exitCode = 1;
@@ -137,6 +154,52 @@ async function cmdInstall() {
   console.log('提示：以后直接双击桌面或开始菜单的 T3 Code 图标即可自动启动并挂载插件，关闭 T3 Code 后守护进程自动退出（零后台常驻）。');
 }
 
+async function cmdPatchDebug() {
+  const paths = resolvePaths();
+  const res = patchT3ShortcutsDebugArg(paths);
+  if (!res.ok) {
+    console.error('快捷方式调试参数配置失败：', res.error);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`[T3Tools v${PLUGIN_VERSION}] 已为 T3 Code 快捷方式配置自动吸附调试参数 (--remote-debugging-port=0)`);
+  console.log(`  - 新配置快捷方式: ${res.patched}`);
+  console.log(`  - 已具备调试参数: ${res.alreadyPatched}`);
+  for (const sc of res.shortcuts) {
+    console.log(`  - ${sc.path} [${sc.hasDebugFlag ? '可自动吸附 OK' : '未生效'}]`);
+  }
+}
+
+async function cmdTray() {
+  const paths = resolvePaths();
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+  const candidates = [
+    join(repoRoot, 'dist', 'T3Tools.exe'),
+    paths.trayExePath
+  ];
+  const exePath = candidates.find(p => p && existsSync(p));
+  if (!exePath) {
+    console.error('未找到 T3Tools.exe，请先运行 powershell -ExecutionPolicy Bypass -File .\\scripts\\build-tray.ps1');
+    process.exitCode = 1;
+    return;
+  }
+  const passArgs = args.slice(1);
+  const child = spawn(exePath, passArgs, { detached: true, stdio: 'ignore', windowsHide: false });
+  child.unref();
+  console.log(`已启动 T3Tools 托盘程序: ${exePath}`);
+}
+
+async function cmdRelaunchT3() {
+  const paths = resolvePaths();
+  const res = await relaunchT3WithDebugPort(paths, args.slice(1));
+  if (!res.ok) {
+    console.error('重启 T3 Code 失败：', res.error);
+    process.exitCode = 1;
+    return;
+  }
+  console.log(`已重新启动 T3 Code (PID ${res.pid}) 并开启本地调试端口，T3Tools 将自动吸附。`);
+}
+
 async function cmdUninstall() {
   const paths = resolvePaths();
   const res = restoreT3Launchers(paths);
@@ -145,7 +208,11 @@ async function cmdUninstall() {
     process.exitCode = 1;
     return;
   }
-  console.log(`[T3Tools] 已无损还原 ${res.restored} 个 T3 Code 快捷方式并清理静默启动器。`);
+  if (process.platform === 'win32') {
+    setTrayAutoStart(false, '');
+    removeT3ToolsTrayShortcuts(paths);
+  }
+  console.log(`[T3Tools] 已无损还原 ${res.restored} 个 T3 Code 快捷方式并清理托盘快捷方式与自启配置。`);
 }
 
 async function cmdStatus() {
@@ -167,6 +234,11 @@ async function cmdDoctor() {
   const devPorts = collectDevToolsPortCandidates(paths, fixedPorts);
   const exe = findT3Executable(paths);
   const daemonRunning = await probeRunningDaemon(paths.runtimeFilePath);
+  const t3Process = process.platform === 'win32' ? inspectT3ProcessState() : { running: false, mainPid: null, hasDebugFlag: false };
+  const trayAutoStart = process.platform === 'win32' ? getTrayAutoStartStatus() : { enabled: false };
+  const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+  const trayExeCandidates = [join(repoRoot, 'dist', 'T3Tools.exe'), paths.trayExePath];
+  const trayExe = trayExeCandidates.find(p => existsSync(p)) || null;
 
   const report = {
     version: PLUGIN_VERSION,
@@ -174,6 +246,13 @@ async function cmdDoctor() {
     nodeOk: major > 22 || (major === 22 && minor >= 13),
     hasNativeZstd: HAS_NATIVE_ZSTD,
     t3Executable: exe || null,
+    trayExecutable: trayExe,
+    trayAutoStartEnabled: Boolean(trayAutoStart.enabled),
+    t3Process: {
+      running: Boolean(t3Process.running),
+      mainPid: t3Process.mainPid || null,
+      hasDebugFlag: Boolean(t3Process.hasDebugFlag)
+    },
     wrapperVbsExists: existsSync(paths.launcherVbsPath),
     daemonRunning: daemonRunning ? { pid: daemonRunning.pid, url: daemonRunning.url, autoExitWhenT3Gone: Boolean(daemonRunning.autoExitWhenT3Gone) } : null,
     stateDbExists: existsSync(paths.stateDbPath),
@@ -241,6 +320,9 @@ async function cmdSnapshot() {
 try {
   if (command === 'start') await cmdStart();
   else if (command === 'launch') await cmdLaunch();
+  else if (command === 'tray') await cmdTray();
+  else if (command === 'patch-debug') await cmdPatchDebug();
+  else if (command === 'relaunch-t3') await cmdRelaunchT3();
   else if (command === 'stop') await cmdStop();
   else if (command === 'install') await cmdInstall();
   else if (command === 'uninstall') await cmdUninstall();
@@ -248,7 +330,7 @@ try {
   else if (command === 'doctor') await cmdDoctor();
   else if (command === 'snapshot') await cmdSnapshot();
   else {
-    console.log('用法: node bin/t3tools.mjs <start|launch|stop|install|uninstall|status|doctor|snapshot>');
+    console.log('用法: node bin/t3tools.mjs <tray|start|launch|patch-debug|relaunch-t3|stop|install|uninstall|status|doctor|snapshot>');
     process.exitCode = 1;
   }
 } catch (err) {

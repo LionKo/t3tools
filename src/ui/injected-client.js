@@ -56,19 +56,31 @@
       if (!j.ok) throw new Error(j.error || '请求失败');
       return j.data;
     }
+    if (action === 'exportRequestsCsv') {
+      const res = await fetch(apiBase + '/api/requests.csv?' + new URLSearchParams(params));
+      if (!res.ok) throw new Error('CSV HTTP ' + res.status);
+      return { csv: '\uFEFF' + await res.text(), filename: 't3tools-requests.csv' };
+    }
     if (action === 'getDashboard') {
       const sp = new URLSearchParams();
-      const skip = new Set(['force', 'tab', 'heatmapMetric', 'quotaDriver', 'quotaSort', 'quotaView', 'hideEmail']);
+      const skip = new Set(['force', 'tab', 'heatmapMetric', 'quotaDriver', 'quotaSort', 'quotaView', 'hideEmail', 'detailId', 'ledgerScroll', 'ledgerFocus', 'speedSort', 'speedDir', 'modelSort', 'modelSortDir', '_chartW']);
       for (const [k, v] of Object.entries(params || {})) {
         if (!skip.has(k) && v !== undefined && v !== null && v !== '') sp.set(k, String(v));
       }
       if (params.force) {
-        await fetch(`${apiBase}/api/sync`, { method: 'POST', headers }).catch(() => {});
+        await callRpc('forceSync');
       }
       const r = await fetch(`${apiBase}/api/dashboard?${sp.toString()}`);
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || '请求失败');
       return j.data;
+    }
+    if (['focusThread','ackErrors','testAlert'].includes(action)) {
+      const path = action === 'focusThread' ? '/api/t3/focus-thread' : action === 'testAlert' ? '/api/alerts/test' : '/api/errors/ack';
+      const res = await fetch(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error);
+      return json.data;
     }
     if (action === 'updateSettings') {
       const r = await fetch(`${apiBase}/api/settings`, {
@@ -81,8 +93,12 @@
       return j.data;
     }
     if (action === 'forceSync') {
-      await fetch(`${apiBase}/api/sync`, { method: 'POST', headers });
-      return { ok: true };
+      const response = await fetch(apiBase + '/api/sync', {
+        method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: '{}'
+      });
+      const result = await response.json();
+      if (!result.ok) throw new Error(result.error || '刷新失败');
+      return result.data;
     }
     const r = await fetch(`${apiBase}/api/status`);
     return (await r.json()).data;
@@ -151,7 +167,23 @@
     return fallback ? { mode: 'below-card', anchor: fallback } : null;
   }
 
+  function isNonThreadRoutePath(pathname = '') {
+    return /^\/(draft|settings|usage|projects?|themes?|login|auth)(?:\/|$)/i.test(String(pathname || ''));
+  }
+
+  function normalizeThreadIdCandidate(raw) {
+    const val = String(raw || '').trim();
+    if (!val || val === 'true' || val === '1') return '';
+    // T3 Code sidebar data-thread-item uses "<envUuid>:<threadId>"
+    const envPrefixMatch = val.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(.+)$/i);
+    if (envPrefixMatch && envPrefixMatch[1]) {
+      return envPrefixMatch[1].trim();
+    }
+    return val;
+  }
+
   function matchRouteThreadId(pathname, search = '') {
+    if (isNonThreadRoutePath(pathname)) return '';
     const pathAndQuery = `${pathname || ''}${search || ''}`;
     for (const pattern of selectors.routeThreadPatterns || []) {
       try {
@@ -160,7 +192,7 @@
         const m = target.match(re);
         if (m && m[1]) {
           const decoded = decodeURIComponent(m[1]).trim();
-          if (decoded && !/^(new|settings|usage|projects|themes|home)$/i.test(decoded)) {
+          if (decoded && !/^(new|draft|settings|usage|projects|themes|home)$/i.test(decoded)) {
             return decoded;
           }
         }
@@ -176,11 +208,14 @@
       const qIdx = rawHash.indexOf('?');
       const hashPath = qIdx >= 0 ? rawHash.slice(0, qIdx) : rawHash;
       const hashSearch = qIdx >= 0 ? rawHash.slice(qIdx) : '';
-      const fromHash = matchRouteThreadId(hashPath.startsWith('/') ? hashPath : `/${hashPath}`, hashSearch);
+      const normalizedHashPath = hashPath.startsWith('/') ? hashPath : `/${hashPath}`;
+      if (isNonThreadRoutePath(normalizedHashPath)) return '';
+      const fromHash = matchRouteThreadId(normalizedHashPath, hashSearch);
       if (fromHash) return fromHash;
     }
 
     // 2. Standard browser path routing: http://127.0.0.1:3773/<envId>/<threadId>
+    if (isNonThreadRoutePath(location.pathname)) return '';
     const fromRoute = matchRouteThreadId(location.pathname, location.search);
     if (fromRoute) return fromRoute;
 
@@ -188,8 +223,10 @@
     const activeEl = findAnchor('activeThreadItem');
     if (activeEl) {
       const container = activeEl.closest?.('[data-thread-item]') || activeEl;
-      const attr = container.getAttribute?.('data-thread-id') || container.getAttribute?.('data-thread-item');
-      if (attr && attr !== 'true' && attr !== '1') return attr;
+      const attr = normalizeThreadIdCandidate(
+        container.getAttribute?.('data-thread-id') || container.getAttribute?.('data-thread-item')
+      );
+      if (attr) return attr;
 
       const link = activeEl.tagName === 'A' ? activeEl : (container.querySelector?.('a[href]') || activeEl.closest?.('a[href]'));
       const href = link?.getAttribute?.('href') || '';
@@ -209,6 +246,8 @@
   themeSync.start();
 
   function destroyMount(mount) {
+    mount?.contentEl?._ledResize?.disconnect();
+    mount?.contentEl?._ovResize?.disconnect();
     if (!mount) return;
     themeSync.unregister(mount.host);
     try { mount.host.remove(); } catch {}
@@ -231,22 +270,43 @@
 
   let disposed = false;
   let lastLive = null;
+  let lastLiveThreadId = '';
+  let lastSettings = null;
+  let activeThreadId = detectActiveThreadId();
+  let lastRouteHref = String(location.href || '');
+  let consecutiveLiveErrors = 0;
   let lastDash = null;
+  let lastStatus = null;
   let dashLoading = false;
   let dashError = '';
+  let dashSideCollapsed = false;
+  try { dashSideCollapsed = localStorage.getItem('t3tools.sideCollapsed') === '1'; } catch {}
+  let overlayToastText = '';
+  let overlayToastTimer = null;
   let overviewCollapsed = false;
   let showAllSteps = false;
   let dashboardOpen = false;
   let dashRequestSeq = 0;
+  let initialDashPreset = 'weeklyQuota';
+  try {
+    const storedPreset = localStorage.getItem('t3tools.usagePeriod');
+    if (storedPreset && isKeptPeriod(storedPreset)) initialDashPreset = storedPreset;
+  } catch {}
+  let initialHeatmapMetric = 'tokens';
+  try {
+    const storedHm = localStorage.getItem('t3tools.heatmapMetric');
+    if (storedHm) initialHeatmapMetric = normalizeHeatmapMetric(storedHm);
+  } catch {}
+
   let dashState = {
     tab: 'overview',
-    preset: 'weeklyQuota',
+    preset: initialDashPreset,
     account: 'all',
     model: 'all',
     status: 'all',
     session: '',
     onlyAnomalies: false,
-    heatmapMetric: 'tokens',
+    heatmapMetric: initialHeatmapMetric,
     quotaDriver: 'all',
     quotaSort: 'remaining',
     quotaView: 'cards',
@@ -297,7 +357,7 @@
           anchor.insertAdjacentElement('afterend', composerMount.host);
         }
       }
-      if (recreatedComposer && lastLive) {
+      if (recreatedComposer) {
         renderLiveWidgets();
       }
     }
@@ -315,9 +375,9 @@
         destroyMount(sidebarMount);
         sidebarMount = createShadowMount('t3tools-sidebar-btn', 'display:block;width:100%;flex:none;');
         sidebarMount.contentEl.innerHTML = `
-          <button class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="打开 T3Tools 用量与缓存看板">
-            <span>⚡ 用量 & 缓存看板</span>
-            <span class="pt-muted" style="font-size:10.5px;">T3Tools</span>
+          <button class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="打开 T3Tools">
+            <span>⚡ T3Tools</span>
+            <span class="pt-muted" style="font-size:10.5px;">看板</span>
           </button>
         `;
         sidebarMount.contentEl.addEventListener('click', onWidgetClick);
@@ -328,27 +388,84 @@
     }
   }
 
+  function hasMatchingLiveForThread(live, threadId) {
+    return Boolean(
+      threadId &&
+      live &&
+      !live?.thread?.unresolved &&
+      live?.thread?.threadId === threadId &&
+      lastLiveThreadId === threadId
+    );
+  }
+
   function renderLiveWidgets() {
-    if (!lastLive) return;
+    const currentThreadId = detectActiveThreadId();
+    const cfg = lastLive?.settings || lastSettings || {};
+    const matched = hasMatchingLiveForThread(lastLive, currentThreadId);
+    const effectiveLive = matched
+      ? lastLive
+      : (lastLive && !currentThreadId && lastLive?.thread?.unresolved
+          ? lastLive
+          : {
+              settings: cfg,
+              thread: {
+                unresolved: true,
+                reason: currentThreadId ? '正在加载会话...' : '打开会话后显示',
+                steps: []
+              },
+              context: null,
+              quotas: { groups: [] }
+            });
+
     if (composerMount) {
-      const hidden = Boolean(lastLive?.thread?.unresolved);
+      const hidden = cfg.enabled === false || cfg.showComposerBar === false || !matched;
       const isInline = composerMountMode === 'footer-inline';
       const nextDisplay = hidden ? 'none' : (isInline ? 'inline-flex' : 'block');
       if (composerMount.host.style.display !== nextDisplay) {
         composerMount.host.style.display = nextDisplay;
       }
-      const nextComposerHtml = renderComposerBarHtml(lastLive, { hideWhenUnresolved: true, inline: isInline });
+      const nextComposerHtml = renderComposerBarHtml(effectiveLive, { hideWhenUnresolved: true, inline: isInline });
       if (nextComposerHtml !== lastComposerHtml) {
         composerMount.contentEl.innerHTML = nextComposerHtml;
         lastComposerHtml = nextComposerHtml;
       }
     }
+    if (sidebarMount) sidebarMount.host.style.display = cfg.enabled === false ? 'none' : 'block';
     if (overviewMount) {
-      overviewMount.contentEl.innerHTML = renderOverviewCardHtml(lastLive, overviewCollapsed, showAllSteps);
+      overviewMount.host.style.display = cfg.enabled === false || cfg.showOverviewCard === false ? 'none' : 'block';
+      if (cfg.overviewPosition) {
+        overviewMount.host.style.top = cfg.overviewPosition.top + 'px';
+        overviewMount.host.style.right = cfg.overviewPosition.right + 'px';
+      }
+      overviewMount.contentEl.innerHTML = renderOverviewCardHtml(effectiveLive, overviewCollapsed, showAllSteps);
     }
   }
 
-  function renderDashboardOverlay({ partialRequestsOnly = false } = {}) {
+  function showOverlayToast(message) {
+    overlayToastText = String(message || '');
+    const toastEl = overlayMount?.contentEl?.querySelector('[data-pt-overlay-toast]');
+    if (toastEl) toastEl.textContent = overlayToastText;
+    clearTimeout(overlayToastTimer);
+    if (overlayToastText) {
+      overlayToastTimer = setTimeout(() => {
+        overlayToastText = '';
+        const el = overlayMount?.contentEl?.querySelector('[data-pt-overlay-toast]');
+        if (el) el.textContent = '';
+      }, 2800);
+    }
+  }
+
+  async function fetchOverlayStatus() {
+    try {
+      const st = await callRpc('getStatus');
+      if (disposed) return;
+      lastStatus = st;
+      if (st?.settings) lastSettings = st.settings;
+      if (dashboardOpen) renderDashboardOverlay();
+    } catch {}
+  }
+
+  function renderDashboardOverlay({ partialRequestsOnly = false, resetScroll = false } = {}) {
     if (!dashboardOpen) {
       destroyMount(overlayMount);
       overlayMount = null;
@@ -364,33 +481,62 @@
       partialRequestsOnly = false;
     }
 
-    // Preserve search input focus when only request results changed (fixes P2 #20)
-    if (partialRequestsOnly && dashState.tab === 'requests') {
-      const card = overlayMount.contentEl.querySelector('[data-pt-requests-card]');
-      if (card) {
-        card.innerHTML = renderRequestsTableCardHtml(lastDash);
-        const anomCount = lastDash?.anomalySummary?.total || 0;
-        const c1 = overlayMount.contentEl.querySelector('[data-pt-anomaly-count]');
-        const c2 = overlayMount.contentEl.querySelector('[data-pt-tab-anom-count]');
-        const cn = overlayMount.contentEl.querySelector('[data-pt-compaction-note]');
-        if (c1) c1.textContent = String(anomCount);
-        if (c2) c2.textContent = String(anomCount);
-        if (cn) cn.textContent = `已排除冷启动及 ${lastDash?.anomalySummary?.excludedCompactions || 0} 次上下文压缩误报`;
-        return;
-      }
+    function wireLedger() {
+      bindLedger(overlayMount.contentEl,lastDash,dashState,refreshDashboard,renderDashboardOverlay,async ()=>{
+        const result=await callRpc('exportRequestsCsv',dashState);
+        ledgerDownload(new Blob([result.csv],{type:'text/csv;charset=utf-8'}),result.filename);
+      },showOverlayToast);
+    }
+    if (partialRequestsOnly && dashState.tab==='requests' && refreshLedgerResults(overlayMount.contentEl,lastDash,dashState)){
+      const badge=overlayMount.contentEl.querySelector('[data-pt-tab-anom-count]');
+      if(badge)badge.textContent=lastDash.anomalySummary.total;
+      wireLedger();
+      return;
     }
 
-    const bodyContent = (!lastDash && dashLoading)
-      ? `<div class="pt-dashboard"><div class="pt-dash-header"><strong>⚡ T3Tools</strong><button class="pt-btn" data-pt-action="close-dashboard">关闭 ✕</button></div><div class="pt-dash-body"><div class="pt-card" style="text-align:center;padding:36px;">正在同步并加载本轮周限额用量数据...</div></div></div>`
-      : (!lastDash && dashError)
-        ? `<div class="pt-dashboard"><div class="pt-dash-header"><strong>⚡ T3Tools</strong><div class="pt-dash-controls"><button class="pt-btn" data-pt-action="refresh">重试</button><button class="pt-btn" data-pt-action="close-dashboard">关闭 ✕</button></div></div><div class="pt-dash-body"><div class="pt-card"><div class="pt-text-danger" style="font-weight:600;margin-bottom:6px;">无法获取本地守护进程数据</div><div class="pt-muted">${esc(dashError)}</div></div></div></div>`
-        : renderDashboardHtml(lastDash, dashState, { standalone: false });
+    const prevViewport = overlayMount.contentEl.querySelector('.app-viewport');
+    const prevScrollTop = (!resetScroll && prevViewport) ? prevViewport.scrollTop : 0;
 
+    const bodyContent = renderDashboardHtml(lastDash, dashState, {
+      standalone: false,
+      version: VERSION,
+      sideCollapsed: dashSideCollapsed,
+      statusData: lastStatus,
+      fallbackSettings: lastLive?.settings || lastSettings,
+      loading: dashLoading,
+      error: dashError,
+      toastText: overlayToastText
+    });
+
+    overlayMount.contentEl._ledResize?.disconnect();
+    overlayMount.contentEl._ovResize?.disconnect();
     overlayMount.contentEl.innerHTML = `
       <div class="pt-overlay-backdrop" data-pt-backdrop="1">
         ${bodyContent}
       </div>
     `;
+    const nextViewport = overlayMount.contentEl.querySelector('.app-viewport');
+    if (nextViewport && prevScrollTop > 0) nextViewport.scrollTop = prevScrollTop;
+    positionSegsThumb(overlayMount.contentEl, { animate: false });
+    if (lastDash && dashState.tab === 'overview') {
+      bindOverview(overlayMount.contentEl, lastDash, dashState, {
+        render: renderDashboardOverlay,
+        applyAccount: nextAcc => {
+          closePtPopMenu();
+          dashState.account = nextAcc || 'all';
+          dashState.page = 1;
+          refreshDashboard();
+        },
+        openView: (view, { fetch: shouldFetch = false } = {}) => {
+          closePtPopMenu();
+          dashState.tab = view;
+          if (view === 'settings') fetchOverlayStatus();
+          if (shouldFetch) refreshDashboard();
+          else renderDashboardOverlay({ resetScroll: true });
+        }
+      });
+    }
+    if(lastDash && dashState.tab==='requests')wireLedger();
   }
 
   async function refreshDashboard({ force = false, partialRequestsOnly = false } = {}) {
@@ -403,13 +549,14 @@
       // Discard stale out-of-order responses (fixes P2 #20)
       if (seq !== dashRequestSeq || !dashboardOpen) return;
       lastDash = data;
+      resolveLedgerStep(lastDash,dashState);
       dashLoading = false;
       dashError = '';
       renderDashboardOverlay({ partialRequestsOnly });
     } catch (err) {
       if (seq !== dashRequestSeq || !dashboardOpen) return;
       dashLoading = false;
-      dashError = err?.message || '与本地守护进程通信失败（请确认守护进程正在运行）';
+      dashError = err?.message || '连接本地服务失败，请确认 T3Tools 正在运行';
       renderDashboardOverlay();
     }
   }
@@ -427,32 +574,119 @@
       renderLiveWidgets();
     } else if (action === 'open-dashboard') {
       dashboardOpen = true;
-      renderDashboardOverlay();
+      renderDashboardOverlay({ resetScroll: true });
+      fetchOverlayStatus();
       refreshDashboard({ force: true });
     } else if (action === 'open-quotas') {
       dashState.tab = 'quotas';
       dashboardOpen = true;
-      renderDashboardOverlay();
+      renderDashboardOverlay({ resetScroll: true });
+      fetchOverlayStatus();
       refreshDashboard({ force: true });
     }
   }
 
-  function onDashboardClick(e) {
+  async function onDashboardClick(e) {
+    // Capture the inner element before the first await retargets the Shadow DOM event.
+    const target = e.target;
+    const toast = showOverlayToast;
+    try {
+      if (await handleErrorClick(e,dashState,{toast,rpc:callRpc,current:()=>dashState.tab,
+        close:()=>{dashboardOpen=false;renderDashboardOverlay();},
+        open:async view=>{
+          dashState.tab = view;
+          await refreshDashboard();
+          if (view === 'models') overlayMount?.contentEl.querySelector('[data-error-center]')?.scrollIntoView();
+        }})) return;
+    } catch (err) { toast(err.message); return; }
     // Only close when clicking the backdrop itself, NEVER when clicking inside the dashboard (fixes P1 #1)
-    if (e.target?.getAttribute?.('data-pt-backdrop') === '1') {
+    if (target?.getAttribute?.('data-pt-backdrop') === '1') {
+      closePtPopMenu();
       dashboardOpen = false;
       renderDashboardOverlay();
       return;
     }
-    const actionEl = e.target.closest?.('[data-pt-action]');
+    const applyDashPeriod = nextPreset => {
+      if (!nextPreset) return;
+      closePtPopMenu();
+      dashState.preset = nextPreset;
+      dashState.day = '';
+      dashState.page = 1;
+      if (isKeptPeriod(nextPreset)) {
+        try { localStorage.setItem('t3tools.usagePeriod', nextPreset); } catch {}
+      }
+      const rootEl = overlayMount?.contentEl;
+      if (rootEl) {
+        const isCustom = !PT_PERIOD_PRESET_KEYS.has(nextPreset);
+        for (const b of rootEl.querySelectorAll('[data-pt-period]')) {
+          const on = b.getAttribute('data-pt-period') === nextPreset;
+          b.classList.toggle('on', on);
+          b.setAttribute('aria-selected', on ? 'true' : 'false');
+        }
+        const rb = rootEl.querySelector('[data-pt-range-trigger]');
+        if (rb) {
+          rb.classList.toggle('on', isCustom);
+          rb.setAttribute('aria-selected', isCustom ? 'true' : 'false');
+          const sp = rb.querySelector('span');
+          if (sp) sp.textContent = isCustom ? formatPeriodRangeLabel(nextPreset) : '自定义';
+        }
+        positionSegsThumb(rootEl, { animate: true });
+      }
+      refreshDashboard();
+    };
+    const periodEl = target.closest?.('[data-pt-period]');
+    if (periodEl) {
+      applyDashPeriod(periodEl.getAttribute('data-pt-period'));
+      return;
+    }
+    const rangeEl = target.closest?.('[data-pt-range-trigger]');
+    if (rangeEl) {
+      openPtRangeMenu(rangeEl, dashState.preset, applyDashPeriod);
+      return;
+    }
+    const accEl = target.closest?.('[data-pt-account-trigger]');
+    if (accEl) {
+      openPtAccountMenu(accEl, lastDash?.facets?.accounts || [], dashState.account, nextAcc => {
+        closePtPopMenu();
+        dashState.account = nextAcc || 'all';
+        dashState.page = 1;
+        refreshDashboard();
+      });
+      return;
+    }
+    const actionEl = target.closest?.('[data-pt-action]');
     if (actionEl) {
       const action = actionEl.getAttribute('data-pt-action');
       if (action === 'close-dashboard') {
+        closePtPopMenu();
         dashboardOpen = false;
         renderDashboardOverlay();
         return;
       }
+      if (action === 'toggle-sidebar') {
+        dashSideCollapsed = !dashSideCollapsed;
+        try { localStorage.setItem('t3tools.sideCollapsed', dashSideCollapsed ? '1' : '0'); } catch {}
+        const shellEl = overlayMount?.contentEl?.querySelector('.app-shell');
+        if (shellEl) {
+          shellEl.setAttribute('data-side-collapsed', dashSideCollapsed ? 'true' : 'false');
+          setTimeout(() => positionSegsThumb(overlayMount?.contentEl, { animate: false }), 200);
+        } else {
+          renderDashboardOverlay();
+        }
+        return;
+      }
+      if (action === 'test-alert') {
+        try {
+          await callRpc('testAlert', {});
+          showOverlayToast('已发送测试告警');
+        } catch (err) {
+          showOverlayToast(err?.message || '发送测试告警失败');
+        }
+        return;
+      }
       if (action === 'refresh') {
+        actionEl.classList?.add('busy');
+        fetchOverlayStatus();
         refreshDashboard({ force: true });
         return;
       }
@@ -462,19 +696,19 @@
         return;
       }
     }
-    const driverEl = e.target.closest?.('[data-pt-quota-driver]');
+    const driverEl = target.closest?.('[data-pt-quota-driver]');
     if (driverEl) {
       dashState.quotaDriver = driverEl.getAttribute('data-pt-quota-driver') || 'all';
       renderDashboardOverlay();
       return;
     }
-    const qViewEl = e.target.closest?.('[data-pt-quota-view]');
+    const qViewEl = target.closest?.('[data-pt-quota-view]');
     if (qViewEl) {
       dashState.quotaView = qViewEl.getAttribute('data-pt-quota-view') || 'cards';
       renderDashboardOverlay();
       return;
     }
-    const inspectEl = e.target.closest?.('[data-pt-inspect-account]');
+    const inspectEl = target.closest?.('[data-pt-inspect-account]');
     if (inspectEl) {
       dashState.account = inspectEl.getAttribute('data-pt-inspect-account') || 'all';
       dashState.tab = 'overview';
@@ -482,40 +716,110 @@
       refreshDashboard();
       return;
     }
-    const tabEl = e.target.closest?.('[data-pt-tab]');
+    const modelSortEl = target.closest?.('[data-pt-model-sort]');
+    if (modelSortEl) {
+      const key = modelSortEl.getAttribute('data-pt-model-sort');
+      const prev = dashState.modelSort || 'totalTokens';
+      dashState.modelSortDir = prev === key ? -(dashState.modelSortDir || -1) : (key === 'modelId' ? 1 : -1);
+      dashState.modelSort = key;
+      renderDashboardOverlay();
+      return;
+    }
+    const modelReqEl = target.closest?.('[data-pt-model-requests]');
+    if (modelReqEl) {
+      Object.assign(dashState, {
+        model: modelReqEl.getAttribute('data-pt-model-requests') || 'all',
+        driver: 'all',
+        sourceGroup: 'all',
+        errorCode: 'all',
+        status: 'all',
+        onlyAnomalies: false,
+        day: '',
+        session: '',
+        detailId: '',
+        requestId: '',
+        page: 1,
+        tab: 'requests'
+      });
+      refreshDashboard();
+      return;
+    }
+    const tabEl = target.closest?.('[data-pt-tab]');
     if (tabEl) {
+      closePtPopMenu();
       dashState.tab = tabEl.getAttribute('data-pt-tab');
-      renderDashboardOverlay();
+      if (dashState.tab === 'settings') fetchOverlayStatus();
+      renderDashboardOverlay({ resetScroll: true });
       return;
     }
-    const hmEl = e.target.closest?.('[data-pt-heatmap]');
+    const hmEl = target.closest?.('[data-pt-heatmap]');
     if (hmEl) {
-      dashState.heatmapMetric = hmEl.getAttribute('data-pt-heatmap');
+      dashState.heatmapMetric = normalizeHeatmapMetric(hmEl.getAttribute('data-pt-heatmap'));
+      try { localStorage.setItem('t3tools.heatmapMetric', dashState.heatmapMetric); } catch {}
       renderDashboardOverlay();
       return;
     }
-    const pageEl = e.target.closest?.('[data-pt-page]');
+    const pageEl = target.closest?.('[data-pt-page]');
     if (pageEl && !pageEl.disabled) {
       dashState.page = Number(pageEl.getAttribute('data-pt-page')) || 1;
       refreshDashboard({ partialRequestsOnly: true });
     }
   }
 
-  function onDashboardChange(e) {
-    const sortEl = e.target.closest?.('[data-pt-quota-sort]');
+  async function onDashboardChange(e) {
+    const target = e.target;
+    if (target?.dataset?.alertSetting) {
+      const key = target.dataset.alertSetting;
+      const value = target.type === 'number'
+        ? target.valueAsNumber * (key.endsWith('Ms') ? 1000 : 1)
+        : key === 'mode'
+          ? target.value
+          : Boolean(target.checked);
+      try {
+        const updated = await callRpc('updateSettings', { alertConfig: { [key]: value } });
+        if (updated) {
+          lastSettings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+        }
+        showOverlayToast('设置已保存');
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
+    const settingEl = target.closest?.('[data-pt-setting]');
+    if (settingEl) {
+      const key = settingEl.getAttribute('data-pt-setting');
+      const val = Boolean(settingEl.checked);
+      try {
+        const updated = await callRpc('updateSettings', { [key]: val });
+        if (updated) {
+          lastSettings = updated;
+          if (lastLive) lastLive.settings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+          renderLiveWidgets();
+        }
+        showOverlayToast('设置已保存');
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
+    const sortEl = target.closest?.('[data-pt-quota-sort]');
     if (sortEl) {
       dashState.quotaSort = sortEl.value || 'remaining';
       renderDashboardOverlay();
       return;
     }
-    const el = e.target.closest?.('[data-pt-filter]');
+    const el = target.closest?.('[data-pt-filter]');
     if (!el) return;
     const key = el.getAttribute('data-pt-filter');
-    if (key === 'onlyAnomalies') dashState.onlyAnomalies = Boolean(el.checked);
+    if (key === 'session') return;
+    if (key === 'onlyAnomalies' || key === 'includeRetried' || key === 'errorOnlyToday') dashState[key] = Boolean(el.checked);
     else dashState[key] = el.value;
     dashState.page = 1;
     // Keep account selectors in header & filter bar synced; partial update only for table-local filters
-    const partial = dashState.tab === 'requests' && (key === 'model' || key === 'status' || key === 'onlyAnomalies');
+    const partial = dashState.tab === 'requests' && (key === 'model' || key === 'status' || key === 'errorCode' || key === 'onlyAnomalies');
     refreshDashboard({ partialRequestsOnly: partial });
   }
 
@@ -528,52 +832,128 @@
     // Immediately invalidate any in-flight full refresh so it cannot replace the active search input during debounce (fixes P2 #20)
     dashRequestSeq++;
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => refreshDashboard({ partialRequestsOnly: true }), 260);
+    searchTimer = setTimeout(() => refreshDashboard({ partialRequestsOnly: true }), 250);
   }
 
-  let pollInFlight = false;
+  let inFlightPolls = 0;
   let liveRequestSeq = 0;
-  async function pollLive() {
-    if (disposed || pollInFlight) return;
-    pollInFlight = true;
+
+  function syncActiveThread({ triggerPoll = true } = {}) {
+    if (disposed) return false;
+    const nextHref = String(location.href || '');
+    const nextThreadId = detectActiveThreadId();
+    const hrefChanged = nextHref !== lastRouteHref;
+    const threadChanged = nextThreadId !== activeThreadId;
+    if (!hrefChanged && !threadChanged) return false;
+    lastRouteHref = nextHref;
+    activeThreadId = nextThreadId;
+    if (threadChanged) {
+      // Immediately drop stale snapshot so old TPS/TTFT/cache/context never leak into the new conversation
+      if (lastLiveThreadId !== nextThreadId) {
+        lastLive = null;
+        lastLiveThreadId = '';
+      }
+      renderLiveWidgets();
+      if (triggerPoll) {
+        pollLive({ force: true });
+      }
+    }
+    return threadChanged;
+  }
+
+  async function pollLive({ force = false } = {}) {
+    if (disposed) return;
+    if (!force && inFlightPolls > 0) return;
     const reqSeq = ++liveRequestSeq;
+    inFlightPolls++;
     try {
       ensureMounts();
       const threadId = detectActiveThreadId();
+      activeThreadId = threadId;
+      lastRouteHref = String(location.href || '');
       const live = await callRpc('getLive', { threadId });
-      // Discard delayed responses if the user navigated to a different thread while in flight (fixes P2 #2)
-      if (disposed || reqSeq !== liveRequestSeq || detectActiveThreadId() !== threadId) return;
-      if (!lastLive && live?.settings && typeof live.settings.overviewCollapsed === 'boolean') {
-        overviewCollapsed = live.settings.overviewCollapsed;
+      // Discard delayed responses if a newer request was issued
+      if (disposed || reqSeq !== liveRequestSeq) return;
+      // If user navigated to another thread while this request was in flight, immediately refetch the new thread
+      if (detectActiveThreadId() !== threadId) {
+        syncActiveThread({ triggerPoll: true });
+        return;
       }
+      consecutiveLiveErrors = 0;
+      if (live?.settings) {
+        if (!lastSettings && typeof live.settings.overviewCollapsed === 'boolean') {
+          overviewCollapsed = live.settings.overviewCollapsed;
+        }
+        lastSettings = live.settings;
+      }
+      if (dashboardOpen && dashState.tab === 'models' && lastLive?.globalAlerts?.unreadCount !== live.globalAlerts?.unreadCount) refreshDashboard();
       lastLive = live;
+      lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
-    } catch {} finally {
-      pollInFlight = false;
+    } catch {
+      if (disposed || reqSeq !== liveRequestSeq) return;
+      consecutiveLiveErrors++;
+      const nowThreadId = detectActiveThreadId();
+      if (nowThreadId !== activeThreadId) {
+        syncActiveThread({ triggerPoll: true });
+        return;
+      }
+      // Clear stale snapshot on daemon disconnect/timeout or when switching to a thread that fails to load
+      if (consecutiveLiveErrors >= 2 || lastLiveThreadId !== nowThreadId) {
+        lastLive = null;
+        lastLiveThreadId = '';
+        renderLiveWidgets();
+      }
+    } finally {
+      inFlightPolls = Math.max(0, inFlightPolls - 1);
     }
   }
 
   const domObserver = new MutationObserver(() => {
-    if (!disposed) ensureMounts();
+    if (disposed) return;
+    syncActiveThread({ triggerPoll: true });
+    ensureMounts();
   });
   domObserver.observe(document.body, { childList: true, subtree: true });
 
   const onKeyDown = e => {
     if (e.key === 'Escape' && dashboardOpen) {
+      if (closePtPopMenu()) { e.preventDefault(); return; }
+      const back = overlayMount?.contentEl.querySelector('[data-pt-led-back]');
+      if (back) { e.preventDefault(); back.click(); return; }
       dashboardOpen = false;
       renderDashboardOverlay();
     }
   };
   const onRouteChange = () => {
-    if (!disposed) pollLive();
+    if (disposed) return;
+    if (!syncActiveThread({ triggerPoll: true })) {
+      pollLive({ force: true });
+    }
+  };
+  const onClickNavHint = () => {
+    if (disposed) return;
+    Promise.resolve().then(() => {
+      if (!disposed) syncActiveThread({ triggerPoll: true });
+    });
   };
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('hashchange', onRouteChange);
   window.addEventListener('popstate', onRouteChange);
+  window.addEventListener('focus', onRouteChange);
+  window.addEventListener('click', onClickNavHint, true);
 
   ensureMounts();
-  pollLive();
-  const pollTimer = setInterval(pollLive, 2500);
+  pollLive({ force: true });
+  let pollTimer;
+  function schedulePoll() {
+    if (disposed) return;
+    pollTimer = setTimeout(async () => {
+      await pollLive();
+      schedulePoll();
+    }, (lastLive?.settings || lastSettings)?.pollIntervalMs || 2500);
+  }
+  schedulePoll();
 
   globalThis.__t3Tools = {
     version: VERSION,
@@ -581,7 +961,8 @@
     healthy: true,
     openDashboard() {
       dashboardOpen = true;
-      renderDashboardOverlay();
+      renderDashboardOverlay({ resetScroll: true });
+      fetchOverlayStatus();
       refreshDashboard({ force: true });
     },
     diagnoseAnchors() {
@@ -589,12 +970,19 @@
       for (const key of Object.keys(selectors.anchors || {})) {
         report[key] = Boolean(findAnchor(key));
       }
-      return { threadId: detectActiveThreadId(), anchors: report };
+      return { threadId: detectActiveThreadId(), lastLiveThreadId, anchors: report };
     },
     dispose() {
       disposed = true;
-      clearInterval(pollTimer);
+      dashboardOpen = false;
+      dashRequestSeq++;
+      liveRequestSeq++;
+      lastLive = null;
+      lastLiveThreadId = '';
+      closePtPopMenu();
+      clearTimeout(pollTimer);
       clearTimeout(searchTimer);
+      clearTimeout(overlayToastTimer);
       for (const entry of pendingRpc.values()) {
         clearTimeout(entry.timer);
         entry.reject(new Error('实例已重载'));
@@ -604,6 +992,8 @@
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('hashchange', onRouteChange);
       window.removeEventListener('popstate', onRouteChange);
+      window.removeEventListener('focus', onRouteChange);
+      window.removeEventListener('click', onClickNavHint, true);
       destroyMount(composerMount);
       destroyMount(overviewMount);
       destroyMount(sidebarMount);

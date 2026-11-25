@@ -1,6 +1,4 @@
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-function formatLocalDay(ms) {
+export function formatLocalDay(ms) {
   const d = new Date(ms);
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, '0');
@@ -17,11 +15,12 @@ export function build53WeekHeatmap(requests = [], now = Date.now()) {
   const startDate = new Date(endDate);
   startDate.setDate(startDate.getDate() - startDate.getDay() - 52 * 7);
   const startMs = +startDate;
-  const endMs = +endDate + DAY_MS;
+  const nextDay = new Date(endDate);
+  const endMs = nextDay.setDate(nextDay.getDate() + 1);
 
   const byDay = new Map();
   for (const r of requests) {
-    const ts = Number.isFinite(r.billingTsMs) ? r.billingTsMs : r.timestampMs;
+    const ts = r.timestampMs;
     if (!Number.isFinite(ts) || ts < startMs || ts >= endMs) continue;
     const key = formatLocalDay(ts);
     let bucket = byDay.get(key);
@@ -38,6 +37,7 @@ export function build53WeekHeatmap(requests = [], now = Date.now()) {
   const days = [];
   let maxRequests = 0;
   let maxTokens = 0;
+  let maxErrors = 0;
   let maxCost = 0;
   let activeDays = 0;
 
@@ -49,6 +49,7 @@ export function build53WeekHeatmap(requests = [], now = Date.now()) {
     if (data.requests > 0) activeDays++;
     if (data.requests > maxRequests) maxRequests = data.requests;
     if (data.tokens > maxTokens) maxTokens = data.tokens;
+    maxErrors = Math.max(maxErrors, data.errors);
     if (data.costUsd > maxCost) maxCost = data.costUsd;
     days.push(data);
   }
@@ -61,6 +62,7 @@ export function build53WeekHeatmap(requests = [], now = Date.now()) {
     maxRequests,
     maxTokens,
     maxCost,
+    maxErrors,
     days
   };
 }
@@ -90,7 +92,7 @@ export function summarizeAnalytics(requests = [], range, anomalyMap = new Map())
   let anomalyCount = 0;
 
   const modelMap = new Map();
-  const errorBreakdown = {};
+  const errorBreakdown = Object.create(null);
 
   function getOrCreateModel(modelId) {
     let m = modelMap.get(modelId);
@@ -121,7 +123,8 @@ export function summarizeAnalytics(requests = [], range, anomalyMap = new Map())
         ttftSum: 0,
         ttftCount: 0,
         anomalies: 0,
-        errorCodes: {}
+        errorCodes: Object.create(null),
+        retryErrorCodes: Object.create(null)
       };
       modelMap.set(modelId, m);
     }
@@ -172,6 +175,10 @@ export function summarizeAnalytics(requests = [], range, anomalyMap = new Map())
       retryRequests++;
       m.retryRequests++;
       m.retries += r.retries;
+      if (r.status !== 'error') {
+        const rCode = r.errorCode || 'other';
+        m.retryErrorCodes[rCode] = (m.retryErrorCodes[rCode] || 0) + 1;
+      }
     }
 
     if (Number.isFinite(r.costUsd)) {
@@ -260,6 +267,7 @@ export function summarizeAnalytics(requests = [], range, anomalyMap = new Map())
         retryRate,
         healthStatus,
         errorCodes: m.errorCodes,
+        retryErrorCodes: m.retryErrorCodes,
         inputTokens: m.inputTokens,
         cacheReadTokens: m.cacheReadTokens,
         cacheWriteTokens: m.cacheWriteTokens,

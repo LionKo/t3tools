@@ -63,14 +63,14 @@ function friendlyStepMeta(item) {
 
   let phase = 'working';
   let phaseLabel = '执行中';
-  if (type === 'reasoning') { phase = 'thinking'; phaseLabel = '深度思考'; }
-  else if (type === 'command_execution') { phase = 'command'; phaseLabel = '执行命令'; }
-  else if (type === 'file_change') { phase = 'edit'; phaseLabel = '修改文件'; }
-  else if (type === 'file_search' || /search|find|grep/i.test(toolName)) { phase = 'search'; phaseLabel = '检索代码'; }
-  else if (type === 'dynamic_tool') { phase = 'tool'; phaseLabel = toolName ? `工具: ${toolName}` : '调用工具'; }
-  else if (type === 'assistant_message') { phase = 'responding'; phaseLabel = '生成回复'; }
-  else if (type === 'user_message') { phase = 'user'; phaseLabel = '用户输入'; }
-  else if (type === 'subagent' || /subagent|delegate/i.test(type)) { phase = 'subagent'; phaseLabel = '子任务协同'; }
+  if (type === 'reasoning') { phase = 'thinking'; phaseLabel = '思考'; }
+  else if (type === 'command_execution') { phase = 'command'; phaseLabel = '命令'; }
+  else if (type === 'file_change') { phase = 'edit'; phaseLabel = '编辑'; }
+  else if (type === 'file_search' || /search|find|grep/i.test(toolName)) { phase = 'search'; phaseLabel = '检索'; }
+  else if (type === 'dynamic_tool') { phase = 'tool'; phaseLabel = toolName ? `工具: ${toolName}` : '工具'; }
+  else if (type === 'assistant_message') { phase = 'responding'; phaseLabel = '回复'; }
+  else if (type === 'user_message') { phase = 'user'; phaseLabel = '输入'; }
+  else if (type === 'subagent' || /subagent|delegate/i.test(type)) { phase = 'subagent'; phaseLabel = '子任务'; }
 
   return {
     id: item.turn_item_id,
@@ -101,7 +101,8 @@ export function readProviderInstances(settingsPath) {
           driver: cfg.driver || instanceId,
           displayName: cfg.displayName || instanceId,
           accentColor: cfg.accentColor || '',
-          enabled: cfg.enabled !== false
+          enabled: cfg.enabled !== false,
+          homePath: typeof cfg.config?.homePath === 'string' ? cfg.config.homePath.trim() : ''
         });
       }
     }
@@ -115,6 +116,7 @@ export function createT3StateAdapter(paths) {
   let cachedIndexStamp = '';
   let cachedIndex = null;
 
+  let previousUndatedFailures = null;
   function openReadOnly() {
     if (!paths.stateDbPath || !existsSync(paths.stateDbPath)) return null;
     const db = new DatabaseSync(paths.stateDbPath, { readOnly: true });
@@ -157,8 +159,11 @@ export function createT3StateAdapter(paths) {
       const tables = getExistingTables(db);
 
       if (tables.has('orchestration_v2_projection_threads')) {
+        const cols = getTableColumns(db, 'orchestration_v2_projection_threads');
+        const env = cols.has('environment_id') ? 'environment_id' : 'NULL';
+        const project = cols.has('project_id') ? 'project_id' : 'NULL';
         const rows = db.prepare(`
-          SELECT thread_id, title, default_provider, provider_instance_id, updated_at, archived_at, deleted_at
+          SELECT ${env} AS environment_id, ${project} AS project_id, thread_id, title, default_provider, provider_instance_id, updated_at, archived_at, deleted_at
           FROM orchestration_v2_projection_threads
           WHERE deleted_at IS NULL
           ORDER BY updated_at DESC
@@ -167,6 +172,7 @@ export function createT3StateAdapter(paths) {
           threadsById.set(r.thread_id, {
             threadId: r.thread_id,
             title: r.title || '未命名会话',
+            environmentId: r.environment_id, projectId: r.project_id,
             defaultProvider: r.default_provider || '',
             providerInstanceId: r.provider_instance_id || r.default_provider || '',
             updatedAtMs: isoToMs(r.updated_at) || 0,
@@ -292,7 +298,7 @@ export function createT3StateAdapter(paths) {
       } else if (!allowFallback) {
         return {
           unresolved: true,
-          reason: '未在 T3 Code 数据库中匹配到当前会话',
+          reason: '打开会话后显示',
           requestedThreadId: trimmedReq,
           recentThreads: index.recentThreads
         };
@@ -304,7 +310,7 @@ export function createT3StateAdapter(paths) {
     } else {
       return {
         unresolved: true,
-        reason: '当前页面未选中具体会话',
+        reason: '打开会话后显示',
         requestedThreadId: '',
         recentThreads: index.recentThreads
       };
@@ -447,24 +453,24 @@ export function createT3StateAdapter(paths) {
       let phaseLabel = '空闲';
       if (pendingApproval) {
         phase = 'waiting_approval';
-        phaseLabel = pendingApproval.kind === 'user_input' ? '等待用户输入' : '等待权限确认';
+        phaseLabel = pendingApproval.kind === 'user_input' ? '等待输入' : '等待确认';
       } else if (runStatus === 'running' || runStatus === 'starting') {
         if (runningStep) {
           phase = runningStep.phase;
           phaseLabel = runningStep.phaseLabel;
         } else if (streamingInfo.active) {
           phase = 'responding';
-          phaseLabel = '流式生成中';
+          phaseLabel = '生成中';
         } else {
           phase = 'thinking';
-          phaseLabel = '模型思考中';
+          phaseLabel = '思考中';
         }
       } else if (runStatus === 'queued') {
         phase = 'queued';
-        phaseLabel = '排队等待中';
+        phaseLabel = '排队中';
       } else if (runStatus === 'failed') {
         phase = 'error';
-        phaseLabel = '运行失败';
+        phaseLabel = '已结束';
       } else if (runStatus === 'cancelled' || runStatus === 'interrupted') {
         phase = 'stopped';
         phaseLabel = '已中断';
@@ -509,6 +515,22 @@ export function createT3StateAdapter(paths) {
   }
 
   return {
+    readFailedRuns(sinceMs) {
+      const db = openReadOnly();
+      try {
+        if (!db || !getExistingTables(db).has('orchestration_v2_projection_runs')) return [];
+        const rows = db.prepare(`SELECT run_id, thread_id, provider_instance_id, completed_at, payload_json
+          FROM orchestration_v2_projection_runs WHERE status='failed' AND (completed_at >= ? OR completed_at IS NULL)`).all(new Date(sinceMs).toISOString());
+        const undated = new Set(rows.filter(r => !r.completed_at).map(r => r.run_id));
+        const fresh = rows.filter(r => r.completed_at || (previousUndatedFailures && !previousUndatedFailures.has(r.run_id)));
+        previousUndatedFailures = undated;
+        if (!fresh.length) return [];
+        const index = readThreadIndex();
+        return fresh.map(r => ({ id: 'run:' + r.run_id, timestampMs: isoToMs(r.completed_at) || Date.now(),
+          modelId: parseJsonSafe(r.payload_json, {})?.modelSelection?.model, errorCode: 'failed',
+          t3ThreadId: r.thread_id, t3ThreadTitle: index.threadsById.get(r.thread_id)?.title, accountId: r.provider_instance_id }));
+      } finally { db?.close(); }
+    },
     readThreadIndex,
     readThreadExecution,
     readProviderInstances: () => readProviderInstances(paths.settingsPath)

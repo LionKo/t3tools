@@ -5,13 +5,20 @@ import { randomUUID } from 'node:crypto';
 export const DEFAULT_SETTINGS = {
   enabled: true,
   port: 17373,
+  theme: 'dark',
   autoPatchLauncher: true,
+  autoAttachT3: true,
+  minimizeToTray: true,
+  startMinimizedToTray: false,
+  launchOnStartup: false,
   showComposerBar: true,
   showOverviewCard: true,
   overviewCollapsed: false,
   overviewPosition: { right: 18, top: 56 },
   defaultRangePreset: 'weeklyQuota',
   pollIntervalMs: 2500,
+  alertConfig: { enabled: true, desktopNotification: true, injectedBanner: false, mode: 'smart',
+    burstThreshold: 2, burstWindowMs: 300000, cooldownMs: 120000 },
   anomalyConfig: {
     maxGapMs: 180000,
     minPrevCache: 4000,
@@ -23,6 +30,7 @@ export const DEFAULT_SETTINGS = {
 };
 
 const VALID_PRESETS = new Set(['weeklyQuota', 'today', '24h', 'week', '7d', '30d', 'all']);
+const VALID_THEMES = new Set(['dark', 'light']);
 
 function clampInt(val, min, max, fallback) {
   const n = Number(val);
@@ -45,7 +53,17 @@ export function sanitizeSettingsPatch(patch) {
     throw new Error('配置格式必须为 JSON 对象');
   }
   const clean = {};
-  for (const boolKey of ['enabled', 'autoPatchLauncher', 'showComposerBar', 'showOverviewCard', 'overviewCollapsed']) {
+  for (const boolKey of [
+    'enabled',
+    'autoPatchLauncher',
+    'autoAttachT3',
+    'minimizeToTray',
+    'startMinimizedToTray',
+    'launchOnStartup',
+    'showComposerBar',
+    'showOverviewCard',
+    'overviewCollapsed'
+  ]) {
     if (Object.prototype.hasOwnProperty.call(patch, boolKey)) {
       if (typeof patch[boolKey] !== 'boolean') throw new Error(`${boolKey} 必须为布尔值`);
       clean[boolKey] = patch[boolKey];
@@ -62,6 +80,10 @@ export function sanitizeSettingsPatch(patch) {
   if (Object.prototype.hasOwnProperty.call(patch, 'defaultRangePreset')) {
     if (!VALID_PRESETS.has(patch.defaultRangePreset)) throw new Error('不支持的 defaultRangePreset');
     clean.defaultRangePreset = patch.defaultRangePreset;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'theme')) {
+    if (!VALID_THEMES.has(patch.theme)) throw new Error('theme 必须为 dark 或 light');
+    clean.theme = patch.theme;
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'overviewPosition')) {
     const pos = patch.overviewPosition;
@@ -81,6 +103,26 @@ export function sanitizeSettingsPatch(patch) {
     if (Object.prototype.hasOwnProperty.call(ac, 'minMissedInput')) clean.anomalyConfig.minMissedInput = clampInt(ac.minMissedInput, 0, 1000000, 16000);
     if (Object.prototype.hasOwnProperty.call(ac, 'minKeepRatio')) clean.anomalyConfig.minKeepRatio = clampFloat(ac.minKeepRatio, 0.1, 1, 0.6);
   }
+  if (Object.hasOwn(patch, 'alertConfig')) {
+    const config = patch.alertConfig;
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw new Error('alertConfig 必须为对象');
+    const cleanConfig = {};
+    for (const key of ['enabled', 'desktopNotification', 'injectedBanner']) {
+      if (!Object.hasOwn(config, key)) continue;
+      if (typeof config[key] !== 'boolean') throw new Error(key + ' 必须为布尔值');
+      cleanConfig[key] = config[key];
+    }
+    if (Object.hasOwn(config, 'mode')) {
+      if (!['smart','every','quiet'].includes(config.mode)) throw new Error('告警模式无效');
+      cleanConfig.mode = config.mode;
+    }
+    for (const [key, min, max] of [['burstThreshold',1,20], ['burstWindowMs',60000,1800000], ['cooldownMs',15000,1800000]]) {
+      if (!Object.hasOwn(config,key)) continue;
+      if (!Number.isInteger(config[key]) || config[key] < min || config[key] > max) throw new Error(key + ' 数值无效');
+      cleanConfig[key] = config[key];
+    }
+    clean.alertConfig = cleanConfig;
+  }
   return clean;
 }
 
@@ -94,6 +136,7 @@ function mergeSettings(base, rawPatch) {
   return {
     ...base,
     ...safePatch,
+    alertConfig: { ...base.alertConfig, ...safePatch.alertConfig },
     overviewPosition: {
       ...base.overviewPosition,
       ...(safePatch.overviewPosition || {})
@@ -117,10 +160,13 @@ export function atomicWriteJson(filePath, value) {
 }
 
 export function createSettingsStore(filePath) {
-  let current = { ...DEFAULT_SETTINGS };
+  let current = mergeSettings(DEFAULT_SETTINGS, {});
 
   function load() {
-    if (!existsSync(filePath)) return current;
+    if (!existsSync(filePath)) {
+      current = mergeSettings(DEFAULT_SETTINGS, {});
+      return current;
+    }
     try {
       const parsed = JSON.parse(readFileSync(filePath, 'utf8'));
       current = mergeSettings(DEFAULT_SETTINGS, parsed);

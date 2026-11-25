@@ -77,8 +77,37 @@ test('assembled client bundle has valid JS syntax and handles desktop Requests t
   assert.ok(html.includes('93.3%'));
   assert.equal(html.includes('>Antigravity<'), false);
   assert.equal(html.includes('>Codex<'), false);
-  // Floating card includes shortcut button to All Quotas panel
+  // Floating card includes shortcut button to All Quotas panel and never renders warning icons or error banners
   assert.ok(html.includes('data-pt-action="open-quotas"'));
+  assert.ok(code.includes('<span>⚡ T3Tools</span>'));
+  assert.equal(code.includes('用量 & 缓存看板'), false);
+  assert.equal(code.includes('⚠'), false);
+
+  const noisyLive = {
+    settings: { alertConfig: { enabled: true, injectedBanner: true } },
+    globalAlerts: { otherUnreadCount: 4, unreadIncidents: 7 },
+    threadErrors: [{ timestampMs: Date.now(), modelId: 'gemini-4-neon', errorCode: 'eof', errorText: 'upstream EOF error' }],
+    thread: {
+      unresolved: false,
+      accountId: 'work',
+      selectedModel: 'gemini-4-neon',
+      phase: 'error',
+      phaseLabel: '已结束',
+      run: { status: 'failed' },
+      steps: []
+    },
+    context: { accountId: 'work', modelId: 'gemini-4-neon', decodeSpeed: 90, ttftMs: 500, cacheHitPercent: 75, usedPercent: 20 },
+    quotas: {
+      groups: [{ accountId: 'work', displayName: 'work', driver: 'antigravity', windows: [], unavailable: { message: 'HTTP 503 upstream failure' } }]
+    }
+  };
+  const noisyComposerHtml = renderComposerBar(noisyLive, { hideWhenUnresolved: true, inline: true });
+  const noisyOverviewHtml = renderOverview(noisyLive, false, false);
+  for (const forbidden of ['⚠', 'thread-errors', '点击排查', '会话失败', '运行失败', 'upstream EOF error', 'HTTP 503']) {
+    assert.equal(noisyComposerHtml.includes(forbidden), false, `composer bar should not contain ${forbidden}`);
+    assert.equal(noisyOverviewHtml.includes(forbidden), false, `overview card should not contain ${forbidden}`);
+  }
+  assert.ok(noisyOverviewHtml.includes('暂无额度'));
 
   // Dashboard renders All-Accounts Quotas panel (cards view, matrix table view, provider filter & email masking)
   const renderDashboard = new Function(`${sharedViewsSrc}\nreturn renderDashboardHtml;`)();
@@ -159,12 +188,25 @@ test('assembled client bundle has valid JS syntax and handles desktop Requests t
     }
   };
 
-  // Overview tab contains the quick all-accounts strip + Quotas tab button
+  // Overview tab uses the unified sidebar App Shell layout + quick all-accounts strip + Quotas nav badge
   const overviewDashHtml = renderDashboard(sampleDash, { tab: 'overview' });
-  assert.ok(overviewDashHtml.includes('账号额度 (3)'));
-  assert.ok(overviewDashHtml.includes('全账号额度速览'));
+  assert.ok(overviewDashHtml.includes('class="app-shell"'));
+  assert.ok(overviewDashHtml.includes('class="app-side"'));
+  assert.ok(overviewDashHtml.includes('class="app-top"'));
+  assert.ok(overviewDashHtml.includes('<span>账号额度</span>'));
+  assert.ok(overviewDashHtml.includes('data-tone="warning">3</span>'));
+  assert.ok(overviewDashHtml.includes('pt-quota-strip'));
   assert.ok(overviewDashHtml.includes('work'));
   assert.ok(overviewDashHtml.includes('codex'));
+  assert.equal(overviewDashHtml.includes('实时监控'), false);
+
+  // Settings tab in embedded overlay exposes T3 widget & alert controls
+  const embeddedSettingsHtml = renderDashboard(sampleDash, { tab: 'settings' }, {
+    statusData: { pid: 1234, httpUrl: 'http://127.0.0.1:17373', cdp: { connected: true, devToolsPort: 9222 }, settings: { showComposerBar: true, showOverviewCard: true } }
+  });
+  assert.ok(embeddedSettingsHtml.includes('data-pt-setting="showComposerBar"'));
+  assert.ok(embeddedSettingsHtml.includes('data-pt-setting="showOverviewCard"'));
+  assert.ok(embeddedSettingsHtml.includes('已吸附 T3 Code (:9222)'));
 
   // Quotas tab (cards view + email masked)
   const quotasCardsHtml = renderDashboard(sampleDash, { tab: 'quotas', quotaDriver: 'all', quotaSort: 'remaining', quotaView: 'cards', hideEmail: true });
@@ -184,6 +226,88 @@ test('assembled client bundle has valid JS syntax and handles desktop Requests t
   assert.ok(quotasTableHtml.includes('alice123@example.com'));
   assert.ok(quotasTableHtml.includes('模型额度池'));
   assert.equal(quotasTableHtml.includes('data-pt-inspect-account="work"'), false);
+
+  // Requests tab renders first-token latency (TTFT) column with measured values and "-" fallback
+  const requestsDashHtml = renderDashboard({
+    ...sampleDash,
+    requests: {
+      total: 3,
+      page: 1,
+      totalPages: 1,
+      items: [
+        {
+          id: 'req-1',
+          timestampMs: Date.now() - 5000,
+          accountId: 'work',
+          modelId: 'gemini-4-neon',
+          t3ThreadTitle: '首字测试会话',
+          nativeSessionId: 'sess-1',
+          inputTokens: 1200,
+          cacheReadTokens: 8000,
+          outputTokens: 320,
+          cacheHitPercent: 87.0,
+          ttftMs: 1460,
+          streamingMs: 2500,
+          durationMs: 3960,
+          tps: 128,
+          tpsKind: 'generation',
+          status: 'success',
+          outcomeKnown: true,
+          retries: 0
+        },
+        {
+          id: 'req-2',
+          timestampMs: Date.now() - 3000,
+          accountId: 'work',
+          modelId: 'gemini-4-neon',
+          t3ThreadTitle: '极速首字',
+          nativeSessionId: 'sess-2',
+          inputTokens: 500,
+          cacheReadTokens: 0,
+          outputTokens: 120,
+          cacheHitPercent: 0,
+          ttftMs: 420,
+          streamingMs: 800,
+          durationMs: 1220,
+          tps: 150,
+          tpsKind: 'generation',
+          status: 'success',
+          outcomeKnown: true,
+          retries: 0
+        },
+        {
+          id: 'req-3',
+          timestampMs: Date.now() - 1000,
+          accountId: 'codex',
+          modelId: 'gpt-6.2-astra',
+          t3ThreadTitle: '无首字计时',
+          nativeSessionId: 'sess-3',
+          inputTokens: 900,
+          cacheReadTokens: 3000,
+          outputTokens: 200,
+          cacheHitPercent: 76.9,
+          ttftMs: null,
+          streamingMs: null,
+          durationMs: 2400,
+          tps: 83.3,
+          tpsKind: 'e2e-estimate',
+          status: 'success',
+          outcomeKnown: true,
+          retries: 0
+        }
+      ]
+    }
+  }, { tab: 'requests' });
+  assert.ok(requestsDashHtml.includes('<th class="n ttft lc-opt2">首字响应</th>'));
+  assert.ok(requestsDashHtml.includes('title="首字响应 1.5s · 流式生成 2.5s">1.5s<'));
+  assert.ok(requestsDashHtml.includes('title="首字响应 420ms · 流式生成 800ms">420ms<'));
+  assert.ok(requestsDashHtml.includes('title="当前数据源无首字计时">-<'));
+
+  const emptyRequestsHtml = renderDashboard({
+    ...sampleDash,
+    requests: { total: 0, page: 1, totalPages: 1, items: [] }
+  }, { tab: 'requests' });
+  assert.ok(emptyRequestsHtml.includes('colspan="15"'));
 });
 
 test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop state, HTTP auth/origin guards, and Fallback HTML', async () => {
@@ -217,6 +341,8 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
       usageLimits: {
         checkedAt: new Date().toISOString(),
         windows: [
+          null,
+          { id: 'gemini-unknown', label: 'Gemini', usedPercent: null, resetsAt: '1796000000' },
           { id: 'gemini-5h', label: 'Gemini · 5-hour', kind: 'session', usedPercent: 10, resetsAt: new Date(Date.now() + 3600000).toISOString(), windowDurationMins: 300 },
           { id: 'gemini-weekly', label: 'Gemini · Weekly', kind: 'weekly', usedPercent: 25, resetsAt: futureReset, windowDurationMins: 10080 }
         ]
@@ -259,6 +385,7 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
     const ts1 = new Date(Date.now() - 50000).toISOString();
     const ts2 = new Date(Date.now() - 20000).toISOString();
     writeFileSync(join(codexDir, `rollout-${resolvedNativeId}.jsonl`), [
+      'null',
       JSON.stringify({ timestamp: ts1, type: 'session_meta', payload: { id: resolvedNativeId } }),
       JSON.stringify({ timestamp: ts1, type: 'turn_context', payload: { model: 'gpt-6.2-astra' } }),
       JSON.stringify({
@@ -298,6 +425,9 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
     assert.equal(dashRes.data.quotas.summary.readyAccounts, 1);
     assert.equal(dashRes.data.quotas.groups.find(g => g.accountId === 'work').pools.length, 1);
     assert.equal(dashRes.data.accountUsage.codex.requests, 2);
+    const unknown = dashRes.data.quotas.flatWindows.find(w => w.windowId === 'gemini-unknown');
+    assert.equal(unknown.remainingPercent, null);
+    assert.equal(unknown.resetsAtMs, 1796000000000);
 
     // 4. Negative authorization tests (fixes P1 #5)
     const badOrigin = await fetch(`${daemon.url}/api/status`, { headers: { Origin: 'http://evil.localhost:9999' } });
@@ -324,6 +454,13 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
     });
     assert.equal(badSyncMediaType.status, 415);
 
+    for (const [body, expected] of [['{', 400], ['null', 400], ['[]', 400], ['a'.repeat(65537), 413]]) {
+      const result = await fetch(daemon.url + '/api/sync', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-T3Tools-Token': daemon.authToken }, body
+      });
+      assert.equal(result.status, expected);
+      assert.equal((await result.json()).ok, false);
+    }
     // /api/bundle.js must NOT embed the daemon's mutation token (fixes P2 #5)
     const bundleText = await (await fetch(`${daemon.url}/api/bundle.js`)).text();
     assert.equal(bundleText.includes(daemon.authToken), false);
@@ -335,19 +472,51 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
     });
     assert.equal(badSchema.status, 400);
 
-    // Valid token + JSON + schema succeeds
+    const badTheme = await fetch(`${daemon.url}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-T3Tools-Token': daemon.authToken },
+      body: JSON.stringify({ theme: 'blue' })
+    });
+    assert.equal(badTheme.status, 400);
+
+    // Valid token + JSON + schema succeeds (including theme persistence)
     const okPost = await fetch(`${daemon.url}/api/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-T3Tools-Token': daemon.authToken },
-      body: JSON.stringify({ overviewCollapsed: true })
+      body: JSON.stringify({ overviewCollapsed: true, theme: 'light' })
     });
     assert.equal(okPost.status, 200);
-    assert.equal((await okPost.json()).data.overviewCollapsed, true);
+    const updatedCfg = (await okPost.json()).data;
+    assert.equal(updatedCfg.overviewCollapsed, true);
+    assert.equal(updatedCfg.theme, 'light');
 
-    // 5. Fallback HTML uses safe JSON boot config & thread picker
-    const html = await (await fetch(`${daemon.url}/`)).text();
+    // 5. Fallback HTML reflects persisted light theme on first paint (no dark flash) and has valid inline JS syntax
+    const fallback = await fetch(daemon.url + '/');
+    assert.equal(fallback.headers.get('X-Frame-Options'), 'DENY');
+    const html = await fallback.text();
+    assert.ok(html.includes('<html lang="zh-CN" class="light" data-theme="light">'));
+    assert.ok(html.includes('html[data-theme="light"]'));
+    assert.ok(html.includes('"theme":"light"'));
     assert.ok(html.includes('id="pt-boot-config"'));
-    assert.ok(html.includes('id="live-thread-picker"'));
+    assert.equal(html.includes('id="live-thread-picker"'), false);
+    assert.equal(html.includes('id="view-live"'), false);
+    assert.equal(html.includes('实时监控'), false);
+    for (const viewId of ['view-overview', 'view-quotas', 'view-models', 'view-requests', 'view-settings']) {
+      assert.ok(html.includes(`id="${viewId}"`), `missing ${viewId}`);
+    }
+    const scriptMatches = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)];
+    assert.ok(scriptMatches.length >= 1);
+    assert.doesNotThrow(() => new Function(scriptMatches[0][1]));
+
+    // Switching back to dark theme updates initial HTML theme as well
+    const backToDark = await fetch(`${daemon.url}/api/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-T3Tools-Token': daemon.authToken },
+      body: JSON.stringify({ theme: 'dark' })
+    });
+    assert.equal(backToDark.status, 200);
+    const darkHtml = await (await fetch(`${daemon.url}/`)).text();
+    assert.ok(darkHtml.includes('<html lang="zh-CN" class="dark" data-theme="dark">'));
 
     // 6. Fork deletion MUST NOT erase parent request from telemetry store (fixes P1 #6)
     const forkFile = join(codexDir, 'rollout-99999999-2222-3333-4444-555555555555.jsonl');
@@ -363,8 +532,281 @@ test('end-to-end daemon: pending nativeThreadRef resolution, unresolved desktop 
     daemon.ctx.engine.syncAll({ force: true });
     const afterForkDelete = await (await fetch(`${daemon.url}/api/dashboard?preset=weeklyQuota`)).json();
     assert.equal(afterForkDelete.data.summary.kpis.totalRequests, 2);
+
+    const postErrorAction = async (route, body = {}) => (await fetch(daemon.url + route, {
+      method: 'POST', headers: {'Content-Type':'application/json','X-T3Tools-Token':daemon.authToken},
+      body:JSON.stringify(body)
+    })).json();
+    assert.equal((await postErrorAction('/api/t3/focus-thread',{threadId:'th-1'})).data.focused,false);
+    const projection = new DatabaseSync(join(t3UserData,'statev2.sqlite'));
+    try {
+      projection.prepare("UPDATE orchestration_v2_projection_runs SET status='failed', completed_at=? WHERE run_id='run-1'").run(new Date().toISOString());
+    } finally { projection.close(); }
+    // Wait for the idle daemon timer. No dashboard requests drive ingestion here.
+    const deadline = Date.now() + 12000;
+    while (daemon.getStatus().alerts.latestAlert?.errorCode !== 'failed' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve,100));
+    }
+    const alerts = (await (await fetch(daemon.url + '/api/status')).json()).data.alerts;
+    assert.equal(alerts.latestAlert.errorCode,'failed');
+    assert.equal(alerts.latestAlert.t3ThreadTitle,'测试会话');
+    assert.equal(alerts.latestAlert.desktopNotify,true);
+    const synthetic = (await postErrorAction('/api/alerts/test')).data;
+    assert.equal(synthetic.seq,alerts.latestSeq+1);
+    assert.equal(synthetic.errorCode,'test');
+    const receipt = (await postErrorAction('/api/errors/ack')).data;
+    assert.equal(receipt.unreadCount,0);
+    assert.equal(Number(daemon.ctx.store.getMeta('error_ack_ts_ms')),receipt.ackTsMs);
   } finally {
     await daemon?.stop();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('injected client isolates composer TPS per conversation across SPA switches, in-flight races, drafts, and RPC disconnects', async () => {
+  const code = buildClientBundle({ version: '0.1.0', bootId: 'test-boot', transport: 'cdp' });
+
+  class FakeEl {
+    constructor(tag = 'div') {
+      this.tagName = tag.toUpperCase();
+      this.id = '';
+      this.className = '';
+      this.classList = { contains: () => false, add: () => {}, remove: () => {}, toggle: () => {} };
+      this.style = { cssText: '', display: '', setProperty: () => {} };
+      this.attrs = new Map();
+      this.children = [];
+      this.parentElement = null;
+      this.shadowRoot = null;
+      this._innerHTML = '';
+      this.listeners = new Map();
+      this.isConnected = false;
+    }
+    get innerHTML() { return this._innerHTML; }
+    set innerHTML(v) { this._innerHTML = String(v); }
+    setAttribute(k, v) { this.attrs.set(k, String(v)); }
+    getAttribute(k) { return this.attrs.has(k) ? this.attrs.get(k) : null; }
+    attachShadow() {
+      const sr = new FakeEl('shadow-root');
+      sr.isConnected = true;
+      this.shadowRoot = sr;
+      return sr;
+    }
+    append(...nodes) { for (const n of nodes) this.appendChild(n); }
+    appendChild(node) {
+      if (node.parentElement) node.parentElement.removeChild(node);
+      node.parentElement = this;
+      node.isConnected = this.isConnected;
+      this.children.push(node);
+      return node;
+    }
+    insertBefore(node, ref) {
+      if (node.parentElement) node.parentElement.removeChild(node);
+      node.parentElement = this;
+      node.isConnected = this.isConnected;
+      const idx = ref ? this.children.indexOf(ref) : -1;
+      if (idx >= 0) this.children.splice(idx, 0, node);
+      else this.children.push(node);
+      return node;
+    }
+    removeChild(node) {
+      const idx = this.children.indexOf(node);
+      if (idx >= 0) this.children.splice(idx, 1);
+      node.parentElement = null;
+      node.isConnected = false;
+    }
+    remove() { if (this.parentElement) this.parentElement.removeChild(this); }
+    get nextElementSibling() {
+      if (!this.parentElement) return null;
+      const idx = this.parentElement.children.indexOf(this);
+      return idx >= 0 ? (this.parentElement.children[idx + 1] || null) : null;
+    }
+    get previousElementSibling() {
+      if (!this.parentElement) return null;
+      const idx = this.parentElement.children.indexOf(this);
+      return idx > 0 ? (this.parentElement.children[idx - 1] || null) : null;
+    }
+    contains(node) {
+      let cur = node;
+      while (cur) { if (cur === this) return true; cur = cur.parentElement; }
+      return false;
+    }
+    closest(sel) {
+      let cur = this;
+      while (cur) {
+        if (sel === '[data-t3tools]' && cur.getAttribute('data-t3tools')) return cur;
+        if (sel === '[data-thread-item]' && cur.getAttribute('data-thread-item')) return cur;
+        cur = cur.parentElement;
+      }
+      return null;
+    }
+    querySelector() { return null; }
+    getBoundingClientRect() { return { width: 400, height: 40, x: 0, y: 0 }; }
+    addEventListener(type, fn) {
+      if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+      this.listeners.get(type).add(fn);
+    }
+    removeEventListener(type, fn) { this.listeners.get(type)?.delete(fn); }
+  }
+
+  const body = new FakeEl('body');
+  body.isConnected = true;
+  const footer = new FakeEl('div');
+  footer.setAttribute('data-chat-composer-footer', 'true');
+  body.appendChild(footer);
+  const sidebarActive = new FakeEl('li');
+  sidebarActive.setAttribute('data-thread-item', '2d40c3ef-6556-4e58-b87d-dbf308ba9990:thread-sidebar-only');
+  sidebarActive.setAttribute('aria-current', 'page');
+
+  const locationObj = {
+    href: 't3code://app/#/2d40c3ef-6556-4e58-b87d-dbf308ba9990/thread-a',
+    pathname: '/',
+    hash: '#/2d40c3ef-6556-4e58-b87d-dbf308ba9990/thread-a',
+    search: ''
+  };
+  const setHash = hash => {
+    locationObj.hash = hash;
+    locationObj.href = `t3code://app/${hash}`;
+  };
+
+  const observers = [];
+  class FakeMutationObserver {
+    constructor(cb) { this.cb = cb; observers.push(this); }
+    observe() {}
+    disconnect() {}
+  }
+
+  const windowListeners = new Map();
+  const pendingBridge = [];
+  const docObj = {
+    body,
+    documentElement: new FakeEl('html'),
+    createElement: tag => new FakeEl(tag),
+    querySelector: sel => {
+      if (sel.includes('data-thread-item') || sel.includes('aria-current')) return sidebarActive;
+      return null;
+    },
+    querySelectorAll: sel => (sel === '[data-chat-composer-footer]' ? [footer] : [])
+  };
+
+  const timers = new Set();
+  const intervals = new Set();
+  const trackedSetTimeout = (fn, ms) => { const id = setTimeout(() => { timers.delete(id); fn(); }, ms); id.unref?.(); timers.add(id); return id; };
+  const trackedClearTimeout = id => { timers.delete(id); clearTimeout(id); };
+  const trackedSetInterval = (fn, ms) => { const id = setInterval(fn, ms); id.unref?.(); intervals.add(id); return id; };
+  const trackedClearInterval = id => { intervals.delete(id); clearInterval(id); };
+
+  const sandbox = {
+    window: {
+      addEventListener(type, fn) {
+        if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+        windowListeners.get(type).add(fn);
+      },
+      removeEventListener(type, fn) { windowListeners.get(type)?.delete(fn); },
+      getComputedStyle: () => ({ display: 'block', flexDirection: 'column', backgroundColor: 'rgb(11, 12, 15)', getPropertyValue: () => '' })
+    },
+    document: docObj,
+    location: locationObj,
+    MutationObserver: FakeMutationObserver,
+    getComputedStyle: () => ({ display: 'block', flexDirection: 'column', backgroundColor: 'rgb(11, 12, 15)', getPropertyValue: () => '' }),
+    localStorage: { getItem: () => null, setItem: () => {} },
+    setTimeout: trackedSetTimeout,
+    clearTimeout: trackedClearTimeout,
+    setInterval: trackedSetInterval,
+    clearInterval: trackedClearInterval,
+    requestAnimationFrame: fn => trackedSetTimeout(fn, 0),
+    URL,
+    URLSearchParams,
+    console,
+    __t3ToolsBridge(raw) {
+      const req = JSON.parse(raw);
+      pendingBridge.push(req);
+    }
+  };
+  sandbox.globalThis = sandbox;
+
+  const runner = new Function(
+    'globalThis', 'window', 'document', 'location', 'MutationObserver', 'getComputedStyle', 'localStorage',
+    'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'URL', 'URLSearchParams', 'console',
+    code
+  );
+  runner(
+    sandbox, sandbox.window, sandbox.document, sandbox.location, sandbox.MutationObserver,
+    sandbox.getComputedStyle, sandbox.localStorage, trackedSetTimeout, trackedClearTimeout,
+    trackedSetInterval, trackedClearInterval, sandbox.requestAnimationFrame, URL, URLSearchParams, console
+  );
+
+  const makeLive = (threadId, decodeSpeed) => ({
+    settings: { enabled: true, showComposerBar: true, showOverviewCard: true, pollIntervalMs: 60000 },
+    thread: { unresolved: false, threadId, title: threadId, accountId: 'work', selectedModel: 'gemini-4-neon', phase: 'completed', phaseLabel: '已完成', steps: [] },
+    context: { decodeSpeed, ttftMs: 1200, cacheHitPercent: 88, usedPercent: 30, usedTokens: 30000, maxTokens: 100000 },
+    quotas: { groups: [] }
+  });
+
+  const composerHost = () => footer.children.find(c => c.id === 't3tools-composer');
+  const composerHtml = () => composerHost()?.shadowRoot?.children?.[1]?.innerHTML || '';
+  const flush = () => new Promise(r => setTimeout(r, 15));
+
+  try {
+    // 1. Initial boot requests thread-a
+    assert.equal(pendingBridge.length, 1);
+    assert.equal(pendingBridge[0].params.threadId, 'thread-a');
+    sandbox.__t3ToolsReceive(pendingBridge.shift().id, { ok: true, data: makeLive('thread-a', 111) });
+    await flush();
+    assert.equal(composerHost().style.display, 'inline-flex');
+    assert.ok(composerHtml().includes('111<span class="pt-usage-unit">tok/s</span>'));
+
+    // 2. Simulate an in-flight poll for thread-a, then SPA switch to thread-b WITHOUT hashchange (DOM mutation only)
+    for (const fn of windowListeners.get('popstate') || []) fn();
+    assert.equal(pendingBridge.length, 1);
+    const slowReqA = pendingBridge.shift();
+    assert.equal(slowReqA.params.threadId, 'thread-a');
+
+    setHash('#/2d40c3ef-6556-4e58-b87d-dbf308ba9990/thread-b');
+    for (const obs of observers) obs.cb();
+    // Stale thread-a TPS MUST be hidden immediately on switch and thread-b MUST be fetched even while slowReqA is in flight
+    assert.equal(composerHost().style.display, 'none');
+    assert.equal(composerHtml().includes('111<span'), false);
+    assert.equal(pendingBridge.length, 1);
+    const reqB = pendingBridge.shift();
+    assert.equal(reqB.params.threadId, 'thread-b');
+
+    // Thread-b responds with 222 tok/s; then delayed slowReqA arrives later and MUST be ignored
+    sandbox.__t3ToolsReceive(reqB.id, { ok: true, data: makeLive('thread-b', 222) });
+    await flush();
+    assert.equal(composerHost().style.display, 'inline-flex');
+    assert.ok(composerHtml().includes('222<span class="pt-usage-unit">tok/s</span>'));
+
+    sandbox.__t3ToolsReceive(slowReqA.id, { ok: true, data: makeLive('thread-a', 111) });
+    await flush();
+    assert.ok(composerHtml().includes('222<span class="pt-usage-unit">tok/s</span>'));
+
+    // 3. Switching to #/draft/<id> immediately clears threadId to '' and hides composer bar
+    setHash('#/draft/157fa5c3-0d4a-4f4e-a435-23d7ab4dd51e');
+    for (const obs of observers) obs.cb();
+    assert.equal(sandbox.__t3Tools.diagnoseAnchors().threadId, '');
+    assert.equal(composerHost().style.display, 'none');
+    const draftReq = pendingBridge.shift();
+    assert.equal(draftReq.params.threadId, '');
+    sandbox.__t3ToolsReceive(draftReq.id, { ok: true, data: { settings: { enabled: true }, thread: { unresolved: true, steps: [] }, context: null, quotas: { groups: [] } } });
+    await flush();
+    assert.equal(composerHost().style.display, 'none');
+
+    // 4. Root route falls back to sidebar data-thread-item and strips "<envUuid>:" prefix
+    setHash('#/');
+    assert.equal(sandbox.__t3Tools.diagnoseAnchors().threadId, 'thread-sidebar-only');
+
+    // 5. Switch to thread-c and simulate RPC disconnect error -> composer stays hidden (no stale TPS leaked)
+    setHash('#/2d40c3ef-6556-4e58-b87d-dbf308ba9990/thread-c');
+    for (const obs of observers) obs.cb();
+    const reqC = pendingBridge.shift();
+    assert.equal(reqC.params.threadId, 'thread-c');
+    sandbox.__t3ToolsReceive(reqC.id, { ok: false, error: 'RPC getLive 超时' });
+    await flush();
+    assert.equal(composerHost().style.display, 'none');
+    assert.equal(composerHtml().includes('222<span'), false);
+  } finally {
+    sandbox.__t3Tools?.dispose?.();
+    for (const id of timers) clearTimeout(id);
+    for (const id of intervals) clearInterval(id);
   }
 });

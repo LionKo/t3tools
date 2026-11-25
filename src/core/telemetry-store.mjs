@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const TELEMETRY_SCHEMA_VERSION = 2;
+export const TELEMETRY_SCHEMA_VERSION = 3;
 
 /**
  * Own persistent SQLite cache & history store (~/.t3tools/telemetry.sqlite).
@@ -12,10 +12,22 @@ export const TELEMETRY_SCHEMA_VERSION = 2;
 export function createTelemetryStore(dbPath) {
   mkdirSync(dirname(dbPath), { recursive: true });
   const db = new DatabaseSync(dbPath);
+  try {
+    const store = initializeStore(db);
+    db.exec('COMMIT');
+    return store;
+  } catch (err) {
+    db.close(); // Rolls back schema changes if DDL or statement preparation fails.
+    throw err;
+  }
+}
+
+function initializeStore(db) {
   db.exec(`
+    PRAGMA busy_timeout = 3000;
     PRAGMA journal_mode = WAL;
     PRAGMA synchronous = NORMAL;
-    PRAGMA busy_timeout = 3000;
+    BEGIN IMMEDIATE;
 
     CREATE TABLE IF NOT EXISTS store_meta (
       key TEXT PRIMARY KEY,
@@ -25,6 +37,7 @@ export function createTelemetryStore(dbPath) {
 
   const curSchemaRow = db.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get();
   const curSchemaVersion = curSchemaRow ? Number(curSchemaRow.value) : 0;
+  if (curSchemaVersion > TELEMETRY_SCHEMA_VERSION) throw new Error('Unsupported newer telemetry schema');
   if (curSchemaVersion !== TELEMETRY_SCHEMA_VERSION) {
     db.exec(`
       DROP TABLE IF EXISTS requests;
@@ -79,6 +92,8 @@ export function createTelemetryStore(dbPath) {
       compaction_before INTEGER NOT NULL DEFAULT 0
     );
 
+    CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests(status, timestamp_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_requests_errcode_ts ON requests(error_code, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source_key);
     CREATE INDEX IF NOT EXISTS idx_requests_thread_ts ON requests(t3_thread_id, timestamp_ms DESC);
@@ -191,6 +206,7 @@ export function createTelemetryStore(dbPath) {
   const recentByThreadStmt = db.prepare('SELECT * FROM requests WHERE t3_thread_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
   const recentBySessionStmt = db.prepare('SELECT * FROM requests WHERE native_session_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
   const listRolloutDedupeStmt = db.prepare("SELECT dedupe_key FROM requests WHERE source_key LIKE 'codex-rollout:%' AND dedupe_key IS NOT NULL");
+  const sourceUsageCountsStmt = db.prepare("SELECT source_key, COUNT(*) AS cnt FROM requests WHERE source_key LIKE ? AND status != 'error' GROUP BY source_key");
   const allQuotasStmt = db.prepare('SELECT * FROM quota_snapshots ORDER BY account_id, kind, window_id');
 
   function getRevision() {
@@ -302,6 +318,14 @@ export function createTelemetryStore(dbPath) {
     const out = new Set();
     for (const row of listRolloutDedupeStmt.all()) {
       if (row.dedupe_key) out.add(row.dedupe_key);
+    }
+    return out;
+  }
+
+  function getSourceUsageCounts(prefix = '') {
+    const out = new Map();
+    for (const row of sourceUsageCountsStmt.all(`${prefix}%`)) {
+      out.set(row.source_key, Number(row.cnt) || 0);
     }
     return out;
   }
@@ -435,15 +459,25 @@ export function createTelemetryStore(dbPath) {
   }
 
   return {
+    getMeta: key => db.prepare('SELECT value FROM store_meta WHERE key=?').get(key)?.value,
+    setMeta: (key, value) => db.prepare('INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)').run(key, String(value)),
     getRevision,
     getSourceStamp,
     replaceSourceRequests,
     syncThreadLinks,
     pruneMissingSources,
     getIngestedCodexDedupeKeys,
+    getSourceUsageCounts,
     saveQuotaSnapshots,
     listAllRequests,
     getLatestRequestForThread,
+    countThreadUnread: (id, ts) => db.prepare("SELECT COUNT(*) AS n FROM requests WHERE t3_thread_id=? AND status='error' AND timestamp_ms>?").get(id, ts).n,
+    listThreadIncidents(id, natives, since) {
+      const ids = [...new Set(natives.filter(Boolean))];
+      const native = ids.length ? ' OR native_session_id IN (' + ids.map(() => '?').join(',') + ')' : '';
+      return db.prepare("SELECT * FROM requests WHERE (t3_thread_id=?" + native + ") AND timestamp_ms>=? AND (status='error' OR retries>0) ORDER BY timestamp_ms DESC LIMIT 50")
+        .all(id,...ids,since).map(mapRow);
+    },
     listRecentRequestsForThread,
     listQuotaSnapshots,
     close

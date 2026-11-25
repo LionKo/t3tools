@@ -12,8 +12,11 @@
   },
   "scripts": {
     "start": "node ./bin/t3tools.mjs start",
+    "tray": "node ./bin/t3tools.mjs tray",
+    "build-tray": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-tray.ps1",
     "status": "node ./bin/t3tools.mjs status",
     "doctor": "node ./bin/t3tools.mjs doctor",
+    "patch-debug": "node ./bin/t3tools.mjs patch-debug",
     "install-launcher": "node ./bin/t3tools.mjs install",
     "uninstall-launcher": "node ./bin/t3tools.mjs uninstall",
     "test": "node --test tests/*.test.mjs"

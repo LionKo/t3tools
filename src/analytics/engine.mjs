@@ -1,9 +1,53 @@
+import { createErrorAlerts } from './error-alerts.mjs';
+import { buildErrorInsights } from './error-insights.mjs';
+import { buildRequestLedger } from './request-ledger.mjs';
 import { resolveDateRange } from './weekly-window.mjs';
 import { detectCacheAnomalies } from './cache-anomalies.mjs';
-import { build53WeekHeatmap, summarizeAnalytics } from './heatmap-health.mjs';
+import { build53WeekHeatmap, formatLocalDay, summarizeAnalytics } from './heatmap-health.mjs';
 import { computeTurnCacheHit, isUsageStale, summarizeThreadUsageMetrics } from './usage-metrics.mjs';
 
 export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter }) {
+  const started = Date.now();
+  const monitor = createErrorAlerts(started);
+  let ackTsMs = Number(store.getMeta?.('error_ack_ts_ms')) || 0;
+  let counts = { unreadCount: 0, unreadRecoveredCount: 0, unreadIncidents: 0, activeBrokenThreads: 0 };
+  let countRevision = -1;
+  let countDay = '';
+  function tickAlerts(now = Date.now()) {
+    syncAll();
+    const cfg = settings.get();
+    const { allRequests } = getCachedHistory(cfg.anomalyConfig);
+    const revision = store.getRevision();
+    const todayKey = formatLocalDay(now);
+    if (revision !== countRevision || countDay !== todayKey) {
+      const { summary } = buildErrorInsights(allRequests, { match: () => true }, { errorOnlyToday: true, includeRetried: true }, [], ackTsMs, now);
+      counts = {
+        unreadCount: summary.unreadCount,
+        unreadRecoveredCount: summary.unreadRecoveredCount,
+        unreadIncidents: summary.unreadIncidents,
+        activeBrokenThreads: summary.activeBrokenThreads
+      };
+      countRevision = revision;
+      countDay = todayKey;
+    }
+    const since = Math.max(started, now - 1800000);
+    const events = [];
+    for (const row of allRequests) {
+      if (row.timestampMs < since) break;
+      if (row.status === 'error' || (row.retries > 0 && ['region','rate-limit'].includes(row.errorCode))) events.push(row);
+    }
+    let runs = [];
+    try { runs = t3State.readFailedRuns?.(since) || []; } catch { /* T3 may be replacing its projection database. */ }
+    monitor.evaluate(events.concat(runs), cfg.alertConfig, now);
+  }
+  function acknowledgeErrors(ts = Date.now()) {
+    ackTsMs = Math.max(ts, ackTsMs);
+    store.setMeta('error_ack_ts_ms', ackTsMs);
+    countRevision = -1;
+    tickAlerts();
+    return { ackTsMs, unreadCount: counts.unreadCount };
+  }
+  const getAlerts = () => ({ ...counts, ...monitor.snapshot() });
   let lastSyncAtMs = 0;
   const SYNC_MIN_INTERVAL_MS = 1500;
 
@@ -57,6 +101,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       }
     }
     cachedFacets = {
+      drivers: [...new Set(cachedAllRequests.map(r => r.providerDriver).filter(Boolean))].sort(),
       accounts: [...accountsSet].sort(),
       models: [...modelsSet].sort(),
       sessions: [...sessionsMap.values()].slice(0, 100)
@@ -217,9 +262,16 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       liveContext.cacheRemainingMs = Math.max(0, liveContext.cacheWindowMs - ageMs);
     }
 
+    const threadErrors = execution?.threadId && !execution.unresolved
+      ? store.listThreadIncidents?.(execution.threadId, (execution.natives || []).map(n => n.nativeSessionId), now - 1800000) || []
+      : [];
+    const currentUnread = execution?.threadId && !execution.unresolved
+      ? store.countThreadUnread?.(execution.threadId, Math.max(ackTsMs, new Date(now).setHours(0, 0, 0, 0) - 1)) || 0 : 0;
     return {
       updatedAtMs: now,
       settings: settings.get(),
+      globalAlerts: { ...counts, otherUnreadCount: Math.max(0, counts.unreadCount - currentUnread), latestAlert: monitor.snapshot().latestAlert },
+      threadErrors,
       thread: execution,
       context: liveContext,
       quotas
@@ -231,7 +283,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
    * Anomaly detection runs over full chronological history for accurate baselines,
    * while badge counts (`anomalySummary`) are scoped to the currently selected filter! (fixes P3)
    */
-  function getDashboardData(query = {}, { now = Date.now(), forceSync = false } = {}) {
+  function getDashboardData(query = {}, { now = Date.now(), forceSync = false, csvOnly = false } = {}) {
     syncAll({ force: forceSync });
     const cfg = settings.get();
     const quotas = quotaAdapter.readAllQuotas(now);
@@ -239,12 +291,8 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
 
     const preset = query.preset || cfg.defaultRangePreset || 'weeklyQuota';
     const accountFilter = query.account || 'all';
-    const modelFilter = query.model || 'all';
-    const statusFilter = query.status || 'all';
-    const sessionFilter = String(query.session || '').trim().toLowerCase();
-    const onlyAnomalies = query.onlyAnomalies === true || query.onlyAnomalies === '1' || query.onlyAnomalies === 'true';
-    const page = Math.max(1, Number(query.page) || 1);
-    const pageSize = Math.min(200, Math.max(10, Number(query.pageSize) || 50));
+    const requestedPage = Math.max(1, Math.trunc(Number(query.page)) || 1);
+    const pageSize = Math.min(200, Math.max(10, Math.trunc(Number(query.pageSize)) || 50));
 
     const accountScoped = accountFilter !== 'all'
       ? allRequests.filter(r => r.accountId === accountFilter)
@@ -258,6 +306,28 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       accountId: accountFilter
     });
 
+    const siblingRange = accountFilter === 'all' ? range : resolveDateRange(preset, {
+      now, customStart: query.start, customEnd: query.end, quotaWindows: quotas.flatWindows, accountId: 'all'
+    });
+    const result = buildRequestLedger(allRequests, range, query, anomalyResult, csvOnly, siblingRange);
+    if (csvOnly) return result;
+    const { filtered, ledger, anomalies } = result;
+
+    const hasRequestScopedFilter = Boolean(
+      (query.model && query.model !== 'all') ||
+      (query.driver && query.driver !== 'all') ||
+      (query.sourceGroup && query.sourceGroup !== 'all') ||
+      (query.status && query.status !== 'all') ||
+      (query.errorCode && query.errorCode !== 'all') ||
+      [true, 'true', '1'].includes(query.onlyAnomalies) ||
+      String(query.session || query.q || '').trim() ||
+      query.day ||
+      query.requestId
+    );
+    const overviewLedger = hasRequestScopedFilter
+      ? buildRequestLedger(allRequests, range, { account: accountFilter }, anomalyResult, false, siblingRange).ledger
+      : ledger;
+
     const poolSig = (range.pools || []).map(p => `${p.key}:${p.state}:${p.startMs}:${p.resetsAtMs}`).join('|');
     const sumKey = `${store.getRevision()}::${accountFilter}::${range.preset}::${range.start}::${Math.floor(range.end / 10000)}::${poolSig}`;
     let summary = summaryCache.get(sumKey);
@@ -267,53 +337,22 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       if (summaryCache.size > 16) summaryCache.delete(summaryCache.keys().next().value);
     }
 
-    const dayKey = new Date(now).toISOString().slice(0, 10);
+    const dayKey = formatLocalDay(now);
     const hmKey = `${store.getRevision()}::${accountFilter}::${dayKey}`;
     let heatmap = heatmapCache.get(hmKey);
     if (!heatmap) {
       heatmap = build53WeekHeatmap(accountScoped, now);
       heatmapCache.set(hmKey, heatmap);
+      if (heatmapCache.size > 16) heatmapCache.delete(heatmapCache.keys().next().value);
     }
 
-    // Filter without onlyAnomalies first to compute exact scoped anomaly badge counts (fixes P3)
-    const baseFiltered = accountScoped.filter(r => {
-      if (!range.match(r)) return false;
-      if (modelFilter !== 'all' && r.modelId !== modelFilter) return false;
-      if (statusFilter === 'success' && r.status !== 'success') return false;
-      if (statusFilter === 'error' && r.status !== 'error') return false;
-      if (statusFilter === 'retried' && !(r.retries > 0)) return false;
-      if (sessionFilter) {
-        const hay = `${r.t3ThreadTitle || ''} ${r.t3ThreadId || ''} ${r.nativeSessionId || ''}`.toLowerCase();
-        if (!hay.includes(sessionFilter)) return false;
-      }
-      return true;
-    });
-
-    let scopedCleared = 0, scopedDropped = 0, scopedMissed = 0, scopedExcluded = 0;
-    for (const r of baseFiltered) {
-      const a = anomalyResult.anomalies.get(r.id);
-      if (a) {
-        if (a.kind === 'cleared') scopedCleared++;
-        else if (a.kind === 'dropped') scopedDropped++;
-        else if (a.kind === 'missed') scopedMissed++;
-      }
-      if (anomalyResult.excludedCompactions.has(r.id)) scopedExcluded++;
-    }
-
-    const filteredRequests = onlyAnomalies
-      ? baseFiltered.filter(r => anomalyResult.anomalies.has(r.id))
-      : baseFiltered;
-
-    const totalFiltered = filteredRequests.length;
+    const totalFiltered = filtered.length;
+    const page = Math.min(requestedPage, Math.max(1, Math.ceil(totalFiltered / pageSize)));
     const startIdx = (page - 1) * pageSize;
-    const pageItems = filteredRequests.slice(startIdx, startIdx + pageSize).map(r => ({
-      ...r,
-      cacheAnomaly: anomalyResult.anomalies.get(r.id) || null,
-      excludedCompaction: anomalyResult.excludedCompactions.has(r.id)
-    }));
+    const pageItems = filtered.slice(startIdx, startIdx + pageSize);
 
     // Per-account usage totals within the currently selected range (for Account Quota cards)
-    const accountUsage = {};
+    const accountUsage = Object.create(null);
     for (const r of allRequests) {
       if (!range.match(r)) continue;
       const aid = r.accountId || 'unknown';
@@ -328,6 +367,23 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       if (r.status === 'error') bucket.errors++;
     }
 
+    const errorInsights = buildErrorInsights(accountScoped, range, query, summary.models, ackTsMs, now);
+    const effectiveDay = errorInsights.summary.scopeDay;
+    const failedRuns = monitor.snapshot().recentAlerts.filter(a => a.errorCode === 'failed');
+    // A failed run may never have produced a provider request, including before daemon startup.
+    if (query.errorSession && !failedRuns.some(a => a.t3ThreadId === query.errorSession)) {
+      const thread = t3State.readThreadExecution?.(query.errorSession, now, { allowFallback: false });
+      if (thread?.run?.status === 'failed') failedRuns.push({
+        modelId: thread.selectedModel, accountId: thread.accountId, t3ThreadId: thread.threadId,
+        t3ThreadTitle: thread.title, createdAtMs: thread.run.completedAtMs || thread.run.startedAtMs
+      });
+    }
+    errorInsights.failedRuns = failedRuns.filter(a =>
+      (effectiveDay ? effectiveDay === formatLocalDay(a.createdAtMs) : range.match({ timestampMs:a.createdAtMs, accountId:a.accountId, modelId:a.modelId })) &&
+      (accountFilter === 'all' || accountFilter === a.accountId) &&
+      (!query.errorSession || a.t3ThreadId === query.errorSession) &&
+      (!query.errorModel || query.errorModel === 'all' || query.errorModel === a.modelId) &&
+      (!query.errorCode || query.errorCode === 'all' || query.errorCode === 'failed'));
     return {
       updatedAtMs: now,
       range: {
@@ -339,18 +395,18 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
         pools: range.pools
       },
       quotas,
+      errorInsights,
       accountUsage,
       summary,
       heatmap,
       anomalySummary: {
-        total: scopedCleared + scopedDropped + scopedMissed,
-        cleared: scopedCleared,
-        dropped: scopedDropped,
-        missed: scopedMissed,
-        excludedCompactions: scopedExcluded,
+        ...anomalies,
+        total: anomalies.cleared + anomalies.dropped + anomalies.missed,
         allHistoryTotal: anomalyResult.summary.total
       },
       facets,
+      overviewLedger,
+      requestsLedger: ledger,
       requests: {
         total: totalFiltered,
         page,
@@ -367,7 +423,9 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
 
   return {
     syncAll,
+    getAlerts, tickAlerts, acknowledgeErrors, testAlert: () => monitor.test(settings.get().alertConfig),
     getLiveThreadSnapshot,
+    exportRequestsCsv: (query, options) => getDashboardData(query, { ...options, csvOnly: true }),
     getDashboardData
   };
 }

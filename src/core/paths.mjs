@@ -1,6 +1,6 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 export function resolvePaths(overrides = {}) {
@@ -27,7 +27,12 @@ export function resolvePaths(overrides = {}) {
   const devToolsPortFile = join(electronUserData, 'DevToolsActivePort');
 
   const pluginDataDir = resolve(overrides.pluginDataDir || process.env.T3TOOLS_DIR || join(home, '.t3tools'));
-  const codexSessionsDir = resolve(overrides.codexSessionsDir || join(home, '.codex', 'sessions'));
+  const codexHome = resolve(overrides.codexHome || process.env.CODEX_HOME || join(home, '.codex'));
+  const codexSessionsDir = resolve(overrides.codexSessionsDir || join(codexHome, 'sessions'));
+  const codexArchivedSessionsDir = resolve(
+    overrides.codexArchivedSessionsDir ||
+    (overrides.codexSessionsDir ? join(dirname(codexSessionsDir), 'archived_sessions') : join(codexHome, 'archived_sessions'))
+  );
   const claudeProjectsDir = resolve(overrides.claudeProjectsDir || join(home, '.claude', 'projects'));
 
   const t3InstallCandidates = [
@@ -55,14 +60,18 @@ export function resolvePaths(overrides = {}) {
     electronUserDataCandidates,
     devToolsPortFile,
     t3InstallDir,
+    codexHome,
     codexSessionsDir,
+    codexArchivedSessionsDir,
     claudeProjectsDir,
     pluginDataDir,
     pluginSettingsPath: join(pluginDataDir, 'settings.json'),
     telemetryDbPath: join(pluginDataDir, 'telemetry.sqlite'),
     runtimeFilePath: join(pluginDataDir, 'runtime.json'),
     launcherBackupPath: join(pluginDataDir, 'launcher-backup.json'),
-    launcherVbsPath: join(pluginDataDir, 'launch-t3.vbs')
+    launcherVbsPath: join(pluginDataDir, 'launch-t3.vbs'),
+    trayExePath: join(pluginDataDir, 'T3Tools.exe'),
+    trayConfigPath: join(pluginDataDir, 'tray-config.json')
   };
 }
 

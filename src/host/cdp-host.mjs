@@ -113,7 +113,9 @@ export function readT3ServerOrigin(serverRuntimePath) {
   if (!serverRuntimePath || !existsSync(serverRuntimePath)) return '';
   try {
     const rt = JSON.parse(readFileSync(serverRuntimePath, 'utf8'));
-    return typeof rt?.origin === 'string' ? rt.origin : '';
+    if (typeof rt?.origin !== 'string') return '';
+    const url = new URL(rt.origin);
+    return ['http:', 'https:'].includes(url.protocol) && url.origin === rt.origin ? url.origin : '';
   } catch {
     return '';
   }
@@ -148,6 +150,8 @@ export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket }
     socket.addEventListener('close', () => {
       clearTimeout(connectTimer);
       failAll('CDP 连接已关闭');
+      listeners.clear();
+      reject(new Error('CDP 连接已关闭'));
     });
 
     socket.addEventListener('message', event => {
@@ -181,7 +185,8 @@ export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket }
               rej(new Error(`CDP ${method} 超时`));
             }, timeoutMs);
             pending.set(id, { resolve: res, reject: rej, timer });
-            socket.send(JSON.stringify({ id, method, params }));
+            try { socket.send(JSON.stringify({ id, method, params })); }
+            catch (err) { clearTimeout(timer); pending.delete(id); rej(err); }
           });
         }
       });
@@ -203,6 +208,8 @@ export function createCdpHost({
   handleRpc,
   getFixedPorts = () => [],
   pollIntervalMs = 4000,
+  fastPollIntervalMs = 1500,
+  initialEnabled = true,
   fetchImpl = globalThis.fetch,
   connectImpl = connectCdpSocket,
   version = '0.1.0'
@@ -210,20 +217,22 @@ export function createCdpHost({
   const clients = new Map();
   const bootId = randomUUID();
   let stopped = false;
-  let polling = false;
+  let enabled = Boolean(initialEnabled);
+  let activePoll = null;
   let timer = null;
   let lastState = {
+    enabled,
     connected: false,
     devToolsPort: null,
     devToolsFile: '',
     attachedTargets: 0,
-    message: '等待 T3 Code 本地调试端口',
+    message: enabled ? '等待 T3 Code 本地调试端口' : '自动吸附已暂停',
     lastError: '',
     checkedAtMs: 0
   };
 
   async function disposePreviousIsolatedContexts(meta, keepCtxId = null) {
-    const ids = new Set(meta.knownIsolatedContextIds || []);
+    const ids = new Set([...meta.knownIsolatedContextIds].filter(([,frame]) => frame === meta.topFrameId).map(([id]) => id));
     if (Number.isInteger(meta.isolatedContextId)) ids.add(meta.isolatedContextId);
     for (const oldId of ids) {
       if (oldId === keepCtxId) continue;
@@ -238,17 +247,17 @@ export function createCdpHost({
   }
 
   async function installInTopIsolatedWorld(meta, bundleSource) {
+    const generation = ++meta.installGeneration;
     const tree = await meta.client.send('Page.getFrameTree');
     const topFrame = tree?.frameTree?.frame;
     if (!topFrame?.id) throw new Error('无法获取顶层 Frame');
-    const topOrigin = canonicalOrigin(topFrame.url || meta.url);
+    const topOrigin = canonicalOrigin(topFrame.url);
     if (!topOrigin || (meta.expectedOrigin && topOrigin !== meta.expectedOrigin)) {
       throw new Error(`顶层 Frame 来源不匹配: ${topOrigin || topFrame.url}`);
     }
 
-    await disposePreviousIsolatedContexts(meta);
-
     meta.topFrameId = topFrame.id;
+    await disposePreviousIsolatedContexts(meta);
     const world = await meta.client.send('Page.createIsolatedWorld', {
       frameId: topFrame.id,
       worldName: ISOLATED_WORLD_NAME,
@@ -256,9 +265,14 @@ export function createCdpHost({
     });
     const ctxId = world?.executionContextId;
     if (!Number.isInteger(ctxId)) throw new Error('创建隔离执行上下文失败');
+    const verified = (await meta.client.send('Page.getFrameTree'))?.frameTree?.frame;
+    if (verified?.id !== topFrame.id || verified.loaderId !== topFrame.loaderId || canonicalOrigin(verified.url) !== topOrigin) {
+      throw new Error('顶层 Frame 已切换');
+    }
     await disposePreviousIsolatedContexts(meta, ctxId);
+    if (generation !== meta.installGeneration || clients.get(meta.targetId) !== meta || stopped || !enabled) throw new Error('挂载已取消');
     meta.isolatedContextId = ctxId;
-    meta.knownIsolatedContextIds?.add(ctxId);
+    meta.knownIsolatedContextIds.set(ctxId, topFrame.id);
 
     await meta.client.send('Runtime.addBinding', {
       name: CDP_BRIDGE_BINDING,
@@ -283,9 +297,10 @@ export function createCdpHost({
       wsUrl: target.webSocketDebuggerUrl,
       title: target.title || '',
       expectedOrigin: targetOrigin === 't3code://app' ? 't3code://app' : (canonicalOrigin(serverOrigin) || targetOrigin),
+      installGeneration: 0,
       topFrameId: '',
       isolatedContextId: null,
-      knownIsolatedContextIds: new Set(),
+      knownIsolatedContextIds: new Map(),
       attachedAtMs: Date.now(),
       client
     };
@@ -296,10 +311,12 @@ export function createCdpHost({
     });
 
     client.onEvent(async evt => {
+      if (stopped || !enabled || clients.get(target.id) !== meta) return;
       if (evt.method === 'Runtime.executionContextCreated') {
         const ctx = evt.params?.context;
-        if (ctx?.name === ISOLATED_WORLD_NAME && Number.isInteger(ctx.id)) {
-          meta.knownIsolatedContextIds.add(ctx.id);
+        if (ctx?.name === ISOLATED_WORLD_NAME && Number.isInteger(ctx.id) && ctx.auxData?.frameId &&
+            canonicalOrigin(ctx.origin) === meta.expectedOrigin) {
+          meta.knownIsolatedContextIds.set(ctx.id, ctx.auxData.frameId);
         }
         return;
       }
@@ -318,7 +335,9 @@ export function createCdpHost({
       }
 
       // Re-inject into fresh isolated world after top-level navigation
-      if (evt.method === 'Page.frameNavigated' && evt.params?.frame?.id === meta.topFrameId && !evt.params?.frame?.parentId) {
+      if (evt.method === 'Page.frameNavigated' && evt.params?.frame && !evt.params.frame.parentId) {
+        meta.installGeneration++;
+        meta.isolatedContextId = null;
         try {
           const navOrigin = canonicalOrigin(evt.params.frame.url || '');
           if (navOrigin && navOrigin === meta.expectedOrigin) {
@@ -343,6 +362,7 @@ export function createCdpHost({
       try { req = JSON.parse(evt.params.payload || '{}'); } catch { return; }
       if (!req || !req.id || !req.action) return;
 
+      const callerId = meta.isolatedContextId;
       let reply;
       try {
         const data = await handleRpc(req.action, req.params || {});
@@ -351,6 +371,7 @@ export function createCdpHost({
         reply = { ok: false, error: err?.message || String(err) };
       }
 
+      if (stopped || !enabled || clients.get(target.id) !== meta || meta.isolatedContextId !== callerId) return;
       try {
         await client.send('Runtime.evaluate', {
           expression: `globalThis.__t3ToolsReceive?.(${JSON.stringify(req.id)}, ${JSON.stringify(reply)})`,
@@ -366,9 +387,13 @@ export function createCdpHost({
     await installInTopIsolatedWorld(meta, bundleSource);
   }
 
-  async function pollOnce() {
-    if (stopped || polling) return lastState;
-    polling = true;
+  function pollOnce() {
+    if (stopped || !enabled) return Promise.resolve(lastState);
+    activePoll ??= runPoll().finally(() => { activePoll = null; });
+    return activePoll;
+  }
+
+  async function runPoll() {
     const pollErrors = [];
 
     try {
@@ -386,12 +411,14 @@ export function createCdpHost({
       }
 
       if (!candidates.length) {
+        await detachAllClients();
         lastState = {
+          enabled,
           connected: false,
           devToolsPort: null,
           devToolsFile: '',
           attachedTargets: 0,
-          message: '未检测到 DevToolsActivePort（请先运行 install-launcher 并重启 T3 Code）',
+          message: '未检测到 DevToolsActivePort（请确保 T3 Code 以 --remote-debugging-port=0 启动）',
           lastError: '',
           checkedAtMs: Date.now()
         };
@@ -406,7 +433,7 @@ export function createCdpHost({
         let valid = [];
         try {
           const res = await fetchImpl(`http://127.0.0.1:${cand.port}/json/list`, {
-            signal: AbortSignal.timeout(3000)
+            redirect: 'error', signal: AbortSignal.timeout(3000)
           });
           if (!res.ok) {
             pollErrors.push(`端口 ${cand.port} 返回 ${res.status}`);
@@ -423,6 +450,7 @@ export function createCdpHost({
           continue;
         }
 
+        if (stopped || !enabled) break;
         if (!valid.length) continue;
 
         let attachedOnThisPort = 0;
@@ -470,6 +498,7 @@ export function createCdpHost({
       }
 
       lastState = {
+        enabled,
         connected: clients.size > 0,
         devToolsPort: activeCandidate?.port ?? null,
         devToolsFile: activeCandidate?.source ?? '',
@@ -485,6 +514,7 @@ export function createCdpHost({
     } catch (err) {
       lastState = {
         ...lastState,
+        enabled,
         connected: clients.size > 0,
         attachedTargets: clients.size,
         message: '等待 T3 Code 调试接口响应',
@@ -492,23 +522,10 @@ export function createCdpHost({
         checkedAtMs: Date.now()
       };
       return lastState;
-    } finally {
-      polling = false;
     }
   }
 
-  function start() {
-    stopped = false;
-    pollOnce();
-    timer = setInterval(pollOnce, pollIntervalMs);
-  }
-
-  async function stop() {
-    stopped = true;
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
+  async function detachAllClients() {
     for (const meta of clients.values()) {
       try {
         if (Number.isInteger(meta.isolatedContextId)) {
@@ -523,9 +540,144 @@ export function createCdpHost({
     clients.clear();
   }
 
-  function getStatus() {
-    return { ...lastState };
+  function clearTimer() {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   }
 
-  return { start, stop, pollOnce, getStatus };
+  function scheduleNextPoll() {
+    clearTimer();
+    if (stopped || !enabled) return;
+    const delay = clients.size > 0 ? pollIntervalMs : Math.min(fastPollIntervalMs, pollIntervalMs);
+    timer = setTimeout(async () => {
+      timer = null;
+      if (stopped || !enabled) return;
+      await pollOnce();
+      scheduleNextPoll();
+    }, Math.max(250, delay));
+    timer.unref?.();
+  }
+
+  function start() {
+    stopped = false;
+    if (!enabled) {
+      lastState = {
+        ...lastState,
+        enabled: false,
+        connected: false,
+        attachedTargets: 0,
+        message: '自动吸附已暂停',
+        checkedAtMs: Date.now()
+      };
+      return;
+    }
+    Promise.resolve(pollOnce()).finally(() => scheduleNextPoll());
+  }
+
+  async function setEnabled(nextEnabled) {
+    const target = Boolean(nextEnabled);
+    enabled = target;
+    clearTimer();
+    if (!enabled) {
+      await activePoll;
+      if (enabled) return getStatus();
+      await detachAllClients();
+      lastState = {
+        enabled: false,
+        connected: false,
+        devToolsPort: null,
+        devToolsFile: '',
+        attachedTargets: 0,
+        message: '自动吸附已暂停',
+        lastError: '',
+        checkedAtMs: Date.now()
+      };
+      return getStatus();
+    }
+    if (!stopped) {
+      await pollOnce();
+      scheduleNextPoll();
+    }
+    return getStatus();
+  }
+
+  async function reattachNow() {
+    if (stopped) return getStatus();
+    if (!enabled) enabled = true;
+    clearTimer();
+    const st = await pollOnce();
+    scheduleNextPoll();
+    return st;
+  }
+
+  async function stop() {
+    stopped = true;
+    clearTimer();
+    await activePoll;
+    await detachAllClients();
+    lastState = { ...lastState, connected: false, attachedTargets: 0 };
+  }
+
+  function getStatus() {
+    return { ...lastState, enabled };
+  }
+
+  async function focusThread({ threadId, environmentId } = {}) {
+    const fail = reason => ({ ok: false, focused: false, method: '', reason });
+    if (!clients.size) return fail('T3 Code 未处于吸附状态');
+    if (typeof threadId !== 'string' || !/^[a-zA-Z0-9_.:-]{1,220}$/.test(threadId)) return fail('无效的对话 ID');
+    function navigate(id, env, allowRoute) {
+      for (const el of document.querySelectorAll('[data-thread-id],[data-thread-item],a[href]')) {
+        const itemMatch = el.dataset.threadId === id || el.dataset.threadItem === id;
+        const target = itemMatch && !el.matches('a,button,[role="button"]')
+          ? el.querySelector('a[href],button,[role="button"]') || el : el;
+        const href = target.getAttribute('href');
+        let linkMatch = false;
+        if (href) {
+          let url;
+          try { url = new URL(href, location.href); } catch { continue; }
+          if (url.protocol !== location.protocol || url.host !== location.host) continue;
+          const path = url.hash.startsWith('#/') ? url.hash.slice(1) : url.pathname;
+          const lastSeg = path.split('?')[0].split('/').filter(Boolean).at(-1) || '';
+          let decodedSeg = lastSeg;
+          try { decodedSeg = decodeURIComponent(lastSeg); } catch {}
+          linkMatch = lastSeg === id || decodedSeg === id;
+          if (!linkMatch) continue;
+        }
+        if (itemMatch || linkMatch) {
+          target.click();
+          return 'sidebar';
+        }
+      }
+      if (!allowRoute) return '';
+      const hashed = location.hash.startsWith('#/');
+      const parts = (hashed ? location.hash.slice(1) : location.pathname).split('/');
+      if (!(parts.length === 3 || (parts.length === 4 && parts[1] === 'threads'))) return '';
+      if (!parts.at(-1) || !parts.at(-2) || ['settings','usage','project','projects','login','auth','themes'].includes(parts[1])) return '';
+      parts[parts.length - 1] = encodeURIComponent(id);
+      if (env) parts[parts.length - 2] = encodeURIComponent(env);
+      if (hashed || location.protocol === 't3code:') location.hash = parts.join('/');
+      else { history.pushState({}, '', parts.join('/')); dispatchEvent(new PopStateEvent('popstate')); }
+      return 'route';
+    }
+    for (const allowRoute of [false,true]) {
+      for (const meta of clients.values()) {
+        if (!Number.isInteger(meta.isolatedContextId)) continue;
+        try {
+          const args = [threadId, environmentId || '', allowRoute].map(v => JSON.stringify(v)).join(',');
+          const res = await meta.client.send('Runtime.evaluate', { contextId: meta.isolatedContextId,
+            expression: '(' + navigate.toString() + ')(' + args + ')', returnByValue: true });
+          const method = res?.result?.value;
+          if (method === 'sidebar' || method === 'route') {
+            await meta.client.send('Page.bringToFront');
+            return { ok: true, focused: true, method, reason: '' };
+          }
+        } catch {}
+      }
+    }
+    return fail('未找到目标对话');
+  }
+  return { focusThread, start, stop, pollOnce, reattachNow, setEnabled, getStatus };
 }

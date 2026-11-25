@@ -17,6 +17,7 @@ function sendJson(res, status, payload) {
 function sendText(res, status, contentType, text) {
   res.writeHead(status, {
     'Content-Type': contentType,
+    'X-Frame-Options': 'DENY',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff'
   });
@@ -27,19 +28,26 @@ function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
     let size = 0;
+    let oversized = false;
     req.setEncoding('utf8');
     req.on('data', chunk => {
+      if (oversized) return;
       size += Buffer.byteLength(chunk);
       if (size > MAX_BODY_BYTES) {
-        reject(new Error('请求体过大'));
-        req.destroy();
+        oversized = true;
+        reject(Object.assign(new Error('请求体过大'), { statusCode: 413 }));
         return;
       }
       raw += chunk;
     });
     req.on('end', () => {
+      if (oversized) return;
       if (!raw.trim()) return resolve({});
-      try { resolve(JSON.parse(raw)); } catch { reject(new Error('JSON 格式无效')); }
+      try {
+        const body = JSON.parse(raw);
+        if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error();
+        resolve(body);
+      } catch { reject(Object.assign(new Error('请求体必须为 JSON 对象'), { statusCode: 400 })); }
     });
     req.on('error', reject);
   });
@@ -64,11 +72,20 @@ export function createHttpServer({
   port = 17373,
   authToken = randomBytes(24).toString('hex'),
   getAllowedOrigins = () => [],
+  getActiveThreadId = () => '',
   engine,
   settings,
+  handleRpc,
   getDaemonStatus,
   buildClientBundle,
-  buildFallbackHtml
+  buildFallbackHtml,
+  onSettingsUpdated = null,
+  onReattachCdp = null,
+  onToggleCdp = null,
+  onPatchDebugShortcuts = null,
+  onLaunchT3 = null,
+  onRelaunchT3 = null,
+  onShutdown = null
 }) {
   let boundPort = port;
 
@@ -126,7 +143,12 @@ export function createHttpServer({
       const pathname = reqUrl.pathname;
 
       if (req.method === 'GET' && pathname === '/') {
-        const html = buildFallbackHtml({ apiBase: '', authToken });
+        const currentSettings = settings.get();
+        const html = buildFallbackHtml({
+          apiBase: '',
+          authToken,
+          theme: currentSettings?.theme === 'light' ? 'light' : 'dark'
+        });
         sendText(res, 200, 'text/html; charset=utf-8', html);
         return;
       }
@@ -137,10 +159,18 @@ export function createHttpServer({
       }
 
       if (req.method === 'GET' && pathname === '/api/live') {
-        const threadId = reqUrl.searchParams.get('threadId') || '';
+        const requestedThreadId = reqUrl.searchParams.get('threadId') || '';
         const allowFallback = reqUrl.searchParams.get('allowFallback') !== '0';
+        const threadId = requestedThreadId || (allowFallback ? (getActiveThreadId() || '') : '');
         const data = engine.getLiveThreadSnapshot(threadId, { allowFallback });
         sendJson(res, 200, { ok: true, data });
+        return;
+      }
+
+      if (req.method === 'GET' && pathname === '/api/requests.csv') {
+        const { csv, filename } = engine.exportRequestsCsv(Object.fromEntries(reqUrl.searchParams));
+        res.writeHead(200, { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"` });
+        res.end(csv);
         return;
       }
 
@@ -168,7 +198,18 @@ export function createHttpServer({
       }
 
       // Mutating endpoints require per-daemon token + exact application/json media type (fixes P2 #5)
-      if (req.method === 'POST' && (pathname === '/api/settings' || pathname === '/api/sync')) {
+      const mutatingPaths = new Set([
+        '/api/settings',
+        '/api/errors/ack', '/api/t3/focus-thread', '/api/alerts/test',
+        '/api/sync',
+        '/api/cdp/reattach',
+        '/api/cdp/toggle',
+        '/api/launcher/patch-debug',
+        '/api/t3/launch',
+        '/api/t3/relaunch',
+        '/api/shutdown'
+      ]);
+      if (req.method === 'POST' && mutatingPaths.has(pathname)) {
         const token = req.headers['x-t3tools-token'];
         if (!safeTokenMatch(token, authToken)) {
           sendJson(res, 401, { ok: false, error: 'Unauthorized: missing or invalid X-T3Tools-Token' });
@@ -179,10 +220,19 @@ export function createHttpServer({
           sendJson(res, 415, { ok: false, error: 'Unsupported Media Type: expected application/json' });
           return;
         }
+        const action = { '/api/errors/ack': 'ackErrors', '/api/t3/focus-thread': 'focusThread', '/api/alerts/test': 'testAlert' }[pathname];
+        if (action) {
+          const body = await readJsonBody(req);
+          sendJson(res, 200, { ok: true, data: await handleRpc(action, body) });
+          return;
+        }
         if (pathname === '/api/settings') {
           const body = await readJsonBody(req);
           try {
             const updated = settings.update(body);
+            if (typeof onSettingsUpdated === 'function') {
+              await onSettingsUpdated(updated, body);
+            }
             sendJson(res, 200, { ok: true, data: updated });
           } catch (validationErr) {
             sendJson(res, 400, { ok: false, error: validationErr?.message || '配置校验失败' });
@@ -195,11 +245,53 @@ export function createHttpServer({
           sendJson(res, 200, { ok: true, data: { syncedAtMs: Date.now() } });
           return;
         }
+        if (pathname === '/api/cdp/reattach') {
+          await readJsonBody(req);
+          const data = typeof onReattachCdp === 'function' ? await onReattachCdp() : getDaemonStatus().cdp;
+          sendJson(res, 200, { ok: true, data });
+          return;
+        }
+        if (pathname === '/api/cdp/toggle') {
+          const body = await readJsonBody(req);
+          if (typeof body?.enabled !== 'boolean') {
+            sendJson(res, 400, { ok: false, error: 'enabled 必须为布尔值' });
+            return;
+          }
+          const data = typeof onToggleCdp === 'function' ? await onToggleCdp(body.enabled) : getDaemonStatus().cdp;
+          sendJson(res, 200, { ok: true, data });
+          return;
+        }
+        if (pathname === '/api/launcher/patch-debug') {
+          await readJsonBody(req);
+          const data = typeof onPatchDebugShortcuts === 'function' ? await onPatchDebugShortcuts() : { ok: false, error: '未启用' };
+          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          return;
+        }
+        if (pathname === '/api/t3/launch') {
+          await readJsonBody(req);
+          const data = typeof onLaunchT3 === 'function' ? await onLaunchT3() : { ok: false, error: '未启用' };
+          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          return;
+        }
+        if (pathname === '/api/t3/relaunch') {
+          await readJsonBody(req);
+          const data = typeof onRelaunchT3 === 'function' ? await onRelaunchT3() : { ok: false, error: '未启用' };
+          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          return;
+        }
+        if (pathname === '/api/shutdown') {
+          await readJsonBody(req);
+          sendJson(res, 200, { ok: true, data: { shuttingDown: true } });
+          if (typeof onShutdown === 'function') {
+            setTimeout(() => { onShutdown(); }, 40);
+          }
+          return;
+        }
       }
 
       sendJson(res, 404, { ok: false, error: 'Not Found' });
     } catch (err) {
-      sendJson(res, 500, { ok: false, error: err?.message || 'Internal Server Error' });
+      sendJson(res, [400, 413].includes(err?.statusCode) ? err.statusCode : 500, { ok: false, error: err?.message || 'Internal Server Error' });
     }
   });
 

@@ -49,7 +49,7 @@
   "routeThreadPatterns": [
     "^/threads?/[^/?#]+/([^/?#]+)",
     "^/threads?/([^/?#]+)$",
-    "^/(?!settings(?:/|$)|usage(?:/|$)|projects?(?:/|$)|themes?(?:/|$)|login(?:/|$)|auth(?:/|$))[^/?#]+/([^/?#]+)",
+    "^/(?!settings(?:/|$)|usage(?:/|$)|projects?(?:/|$)|themes?(?:/|$)|login(?:/|$)|auth(?:/|$)|draft(?:/|$))[^/?#]+/([^/?#]+)",
     "^/c/([^/?#]+)",
     "[?&]thread(?:Id)?=([^&#]+)"
   ],

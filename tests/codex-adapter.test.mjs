@@ -1,8 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import zlib from 'node:zlib';
-import { parseCodexRolloutContent, HAS_NATIVE_ZSTD } from '../src/adapters/codex.mjs';
+import { createCodexAdapter, parseCodexRolloutContent, HAS_NATIVE_ZSTD } from '../src/adapters/codex.mjs';
 import { createPricingResolver } from '../src/core/pricing.mjs';
+import { createTelemetryStore } from '../src/core/telemetry-store.mjs';
+import { resolvePaths } from '../src/core/paths.mjs';
 
 test('parseCodexRolloutContent parses token_usage_record ledger, prefers native id over shared session_id, and avoids cache_write double billing', () => {
   const pricing = createPricingResolver('');
@@ -55,7 +60,7 @@ test('parseCodexRolloutContent parses token_usage_record ledger, prefers native 
       payload: {
         type: 'token_count',
         info: null,
-        rate_limits: { limit_id: 'codex', primary: null }
+        rate_limits: { limit_id: 'codex', primary: {used_percent:null} }
       }
     })
   ].join('\n');
@@ -197,4 +202,118 @@ test('parseCodexRolloutContent does not merge distinct turns/models/cache_writes
   assert.equal(parsed.requests[0].contextMaxTokens, 80000);
   assert.equal(parsed.latestContext.maxTokens, 80000);
   assert.equal(parsed.requests[1].modelId, 'gpt-6.2-astra');
+});
+
+test('createCodexAdapter scans archived_sessions (.jsonl and .jsonl.zst), survives session archival, deduplicates moved files against usage-scan-cache, and lazily hydrates on cold restart', () => {
+  const root = mkdtempSync(join(tmpdir(), 't3tools-codex-arch-'));
+  let store;
+  try {
+    const t3Root = join(root, '.t3');
+    const t3UserData = join(t3Root, 'userdata');
+    const codexHome = join(root, '.codex');
+    const sessionsDayDir = join(codexHome, 'sessions', '2026', '11', '25');
+    const archivedDir = join(codexHome, 'archived_sessions');
+    const customCodexHome = join(root, 'codex-work');
+    const customArchivedDir = join(customCodexHome, 'archived_sessions');
+    const pluginDataDir = join(root, '.t3tools');
+
+    mkdirSync(t3UserData, { recursive: true });
+    mkdirSync(sessionsDayDir, { recursive: true });
+    mkdirSync(archivedDir, { recursive: true });
+    mkdirSync(customArchivedDir, { recursive: true });
+
+    const idActive = '11111111-2222-3333-4444-555555555501';
+    const idArchived = '11111111-2222-3333-4444-555555555502';
+    const idCustom = '11111111-2222-3333-4444-555555555503';
+
+    const makeRollout = (id, model, respId, tsIso, inputTokens, usedPct = null) => [
+      JSON.stringify({ timestamp: tsIso, type: 'session_meta', payload: { id } }),
+      JSON.stringify({ timestamp: tsIso, type: 'turn_context', payload: { model } }),
+      respId
+        ? JSON.stringify({
+            timestamp: tsIso,
+            type: 'token_usage_record',
+            payload: {
+              thread_id: id,
+              response_id: respId,
+              usage: { input_tokens: inputTokens, cached_input_tokens: 1000, cache_write_input_tokens: 0, output_tokens: 200 },
+              model_context_window: 475000
+            }
+          })
+        : JSON.stringify({
+            timestamp: tsIso,
+            type: 'event_msg',
+            payload: {
+              type: 'token_count',
+              info: {
+                total_token_usage: { total_tokens: inputTokens + 200 },
+                last_token_usage: { input_tokens: inputTokens, cached_input_tokens: 1000, cache_write_input_tokens: 0, output_tokens: 200 },
+                model_context_window: 475000
+              },
+              ...(usedPct != null ? { rate_limits: { limit_id: 'codex', primary: { used_percent: usedPct, window_minutes: 10080, resets_at: 1796000000 } } } : {})
+            }
+          })
+    ].join('\n');
+
+    const activeFile = join(sessionsDayDir, `rollout-2026-11-25T10-00-00-${idActive}.jsonl`);
+    writeFileSync(activeFile, makeRollout(idActive, 'gpt-6.2-astra', 'resp_active_1', '2026-11-25T02:00:00.000Z', 5000));
+
+    // Legacy archived rollout (no response_id) + matching old path in usage-scan-cache-v17.json to verify no double-counting
+    const archivedBase = `rollout-2026-11-25T12-00-00-${idArchived}.jsonl`;
+    const archivedContent = makeRollout(idArchived, 'gpt-6.2-astra', '', '2026-11-25T04:00:00.000Z', 8000, 31);
+    const archivedFile = join(archivedDir, HAS_NATIVE_ZSTD ? `${archivedBase}.zst` : archivedBase);
+    writeFileSync(archivedFile, HAS_NATIVE_ZSTD ? zlib.zstdCompressSync(Buffer.from(archivedContent, 'utf8')) : archivedContent);
+
+    // Custom instance homePath archived rollout
+    const customFile = join(customArchivedDir, `rollout-2026-11-25T13-00-00-${idCustom}.jsonl`);
+    writeFileSync(customFile, makeRollout(idCustom, 'gpt-6.2-sol', 'resp_custom_1', '2026-11-25T05:00:00.000Z', 6000));
+
+    // Old pre-archive sessions path in T3 usage-scan-cache must NOT duplicate archived rollout
+    writeFileSync(join(t3UserData, 'usage-scan-cache-v17.json'), JSON.stringify({
+      models: ['gpt-6.2-astra'],
+      sessions: [idArchived],
+      files: {
+        [join(sessionsDayDir, archivedBase)]: {
+          p: 'codex',
+          r: [[Date.parse('2026-11-25T04:00:00.000Z'), 0, 0, 7000, 1000, 0, 200, 0, '', null]]
+        }
+      }
+    }));
+
+    const paths = resolvePaths({ home: root, appData: root, t3Root, codexHome, pluginDataDir });
+    store = createTelemetryStore(paths.telemetryDbPath);
+    const pricing = createPricingResolver('');
+    const t3State = {
+      readThreadIndex: () => ({ nativeToThread: new Map() }),
+      readProviderInstances: () => new Map([
+        ['codex', { instanceId: 'codex', driver: 'codex', enabled: true, homePath: codexHome }],
+        ['codex-work', { instanceId: 'codex-work', driver: 'codex', enabled: true, homePath: customCodexHome }]
+      ])
+    };
+
+    const adapter = createCodexAdapter({ paths, store, pricing, t3State });
+    adapter.syncAll();
+
+    const rows1 = store.listAllRequests();
+    assert.equal(rows1.length, 3, 'should ingest active + archived + custom homePath without duplicating usage-scan-cache');
+    assert.equal(rows1.find(r => r.nativeSessionId === idCustom)?.accountId, 'codex-work');
+    assert.equal(adapter.getRateLimitWindows('codex')[0]?.usedPercent, 31);
+
+    // Simulate Codex archiving the active session (moving it from sessions/ to archived_sessions/)
+    const movedFile = join(archivedDir, `rollout-2026-11-25T10-00-00-${idActive}.jsonl`);
+    renameSync(activeFile, movedFile);
+    adapter.syncAll();
+    const rows2 = store.listAllRequests();
+    assert.equal(rows2.length, 3, 'archiving a rollout must preserve its requests');
+
+    // Simulate cold daemon restart with an already-populated SQLite store (fresh adapter instance)
+    const coldAdapter = createCodexAdapter({ paths, store, pricing, t3State });
+    coldAdapter.syncAll();
+    assert.equal(store.listAllRequests().length, 3);
+    assert.equal(coldAdapter.readLiveContext(idArchived)?.usedTokens, 8000);
+    assert.equal(coldAdapter.getRateLimitWindows('codex')[0]?.usedPercent, 31);
+  } finally {
+    store?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

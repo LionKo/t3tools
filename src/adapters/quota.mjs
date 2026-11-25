@@ -6,6 +6,7 @@ function parseResetMs(value) {
     return value < 1e12 ? value * 1000 : value;
   }
   if (typeof value === 'string' && value.trim()) {
+    if (/^\d+(?:\.\d+)?$/.test(value.trim())) return parseResetMs(Number(value));
     const ms = Date.parse(value);
     return Number.isFinite(ms) ? ms : null;
   }
@@ -131,8 +132,8 @@ export function createQuotaAdapter({ paths, store, t3State, codexAdapter }) {
       const displayBase = parsed?.displayName || cfg?.displayName || driver;
       const checkedAtMs = parseResetMs(parsed?.usageLimits?.checkedAt || parsed?.checkedAt) || now;
       const rawWindows = Array.isArray(parsed?.usageLimits?.windows) ? parsed.usageLimits.windows : [];
-      const windows = rawWindows.map(w => {
-        const rawUsed = Number(w.usedPercent);
+      const windows = rawWindows.filter(w => w && typeof w === 'object' && !Array.isArray(w)).map(w => {
+        const rawUsed = w.usedPercent == null ? NaN : Number(w.usedPercent);
         const usedPercent = Number.isFinite(rawUsed) ? Math.min(100, Math.max(0, Number(rawUsed.toFixed(1)))) : null;
         const remainingPercent = usedPercent != null ? Math.max(0, Number((100 - usedPercent).toFixed(1))) : null;
         const resetsAtMs = parseResetMs(w.resetsAt);

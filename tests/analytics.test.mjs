@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { detectCacheAnomalies } from '../src/analytics/cache-anomalies.mjs';
-import { resolveWeeklyQuotaWindow } from '../src/analytics/weekly-window.mjs';
+import { resolveWeeklyQuotaWindow, resolveDateRange } from '../src/analytics/weekly-window.mjs';
 import { build53WeekHeatmap, summarizeAnalytics } from '../src/analytics/heatmap-health.mjs';
 
 test('detectCacheAnomalies excludes cold starts even when another session/time caches the same model, and clears baseline on small/failed compaction', () => {
@@ -105,4 +105,36 @@ test('summarizeAnalytics separates unknown usage-only outcomes and generation vs
   assert.equal(claude.healthStatus, 'unknown');
   assert.equal(claude.knownOutcomeCount, 0);
   assert.equal(claude.successRate, null);
+});
+
+test('resolveDateRange supports Magpie-style rolling hours and date/time ranges', () => {
+  const now = +new Date(2026, 10, 25, 15, 30, 0, 0);
+
+  const rolling = resolveDateRange('last:6h', { now });
+  assert.equal(rolling.status, 'rolling');
+  assert.equal(rolling.end, now);
+  assert.equal(rolling.start, now - 6 * 3600 * 1000);
+  assert.equal(rolling.match({ billingTsMs: now - 3 * 3600 * 1000 }), true);
+  assert.equal(rolling.match({ billingTsMs: now - 7 * 3600 * 1000 }), false);
+
+  const daySpan = resolveDateRange('2026-11-20..2026-11-22', { now });
+  assert.equal(daySpan.status, 'custom');
+  assert.equal(daySpan.start, +new Date(2026, 10, 20, 0, 0, 0, 0));
+  assert.equal(daySpan.end, +new Date(2026, 10, 23, 0, 0, 0, 0));
+  assert.equal(daySpan.match({ billingTsMs: +new Date(2026, 10, 22, 23, 59, 59, 0) }), true);
+  assert.equal(daySpan.match({ billingTsMs: +new Date(2026, 10, 23, 0, 0, 0, 0) }), false);
+
+  const intraday = resolveDateRange('2026-11-24T09:30..2026-11-24T18:00', { now });
+  assert.equal(intraday.status, 'custom');
+  assert.equal(intraday.start, +new Date(2026, 10, 24, 9, 30, 0, 0));
+  assert.equal(intraday.end, +new Date(2026, 10, 24, 18, 0, 0, 0));
+  assert.equal(intraday.match({ billingTsMs: +new Date(2026, 10, 24, 12, 0, 0, 0) }), true);
+  assert.equal(intraday.match({ billingTsMs: +new Date(2026, 10, 24, 18, 0, 0, 0) }), false);
+
+  const fullDayExplicit = resolveDateRange('2026-11-24T00:00..2026-11-24T24:00', { now });
+  assert.equal(fullDayExplicit.start, +new Date(2026, 10, 24, 0, 0, 0, 0));
+  assert.equal(fullDayExplicit.end, +new Date(2026, 10, 25, 0, 0, 0, 0));
+
+  const badRange = resolveDateRange('2026-02-31..2026-03-01', { now });
+  assert.equal(badRange.start, now - 24 * 3600 * 1000);
 });

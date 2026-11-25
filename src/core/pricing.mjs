@@ -78,7 +78,6 @@ export function createPricingResolver(modelRatesPath) {
       return;
     }
     if (stamp === cachedStamp) return;
-    cachedStamp = stamp;
     const next = new Map();
     try {
       const parsed = JSON.parse(readFileSync(modelRatesPath, 'utf8'));
@@ -86,21 +85,21 @@ export function createPricingResolver(modelRatesPath) {
       if (doc && typeof doc === 'object') {
         for (const [key, entry] of Object.entries(doc)) {
           if (!entry || typeof entry !== 'object') continue;
-          const input = Number(entry.input_cost_per_token);
-          const output = Number(entry.output_cost_per_token);
+          const input = Number(entry.input_cost_per_token ?? NaN);
+          const output = Number(entry.output_cost_per_token ?? NaN);
           if (!Number.isFinite(input) && !Number.isFinite(output)) continue;
           const normalizedKey = key.toLowerCase();
           const bareKey = normalizedKey.includes('/') ? normalizedKey.split('/').pop() : normalizedKey;
           const rate = {
             input: Number.isFinite(input) ? input : 0,
             output: Number.isFinite(output) ? output : 0,
-            cacheRead: Number.isFinite(Number(entry.cache_read_input_token_cost))
+            cacheRead: Number.isFinite(Number(entry.cache_read_input_token_cost ?? NaN))
               ? Number(entry.cache_read_input_token_cost)
               : (Number.isFinite(input) ? input * 0.1 : 0),
-            cacheWrite: Number.isFinite(Number(entry.cache_creation_input_token_cost))
+            cacheWrite: Number.isFinite(Number(entry.cache_creation_input_token_cost ?? NaN))
               ? Number(entry.cache_creation_input_token_cost)
               : (Number.isFinite(input) ? input * 1.25 : 0),
-            maxInputTokens: Number.isFinite(Number(entry.max_input_tokens)) ? Number(entry.max_input_tokens) : null,
+            maxInputTokens: Number.isFinite(Number(entry.max_input_tokens ?? NaN)) ? Number(entry.max_input_tokens) : null,
             source: 't3-rates'
           };
           next.set(normalizedKey, rate);
@@ -108,6 +107,7 @@ export function createPricingResolver(modelRatesPath) {
         }
       }
       rateIndex = next;
+      cachedStamp = stamp;
     } catch {
       // keep previous rateIndex
     }
