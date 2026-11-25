@@ -12,6 +12,7 @@ import { createRuntimeUpdatesAdapter } from '../adapters/runtime-updates.mjs';
 import { createAnalyticsEngine } from '../analytics/engine.mjs';
 import { createCdpHost, readT3ServerOrigin } from './cdp-host.mjs';
 import { createHttpServer } from './http-server.mjs';
+import { createAppUpdater } from './app-updater.mjs';
 import {
   inspectShortcuts,
   isT3ProcessRunning,
@@ -110,10 +111,20 @@ export async function startDaemon({
   checkT3Running = isT3ProcessRunning,
   fetchImpl = undefined,
   enableRemoteUpdateCheck = true,
+  enableAppUpdateCheck = enableRemoteUpdateCheck,
+  appUpdateOptions = {},
   onAutoExit = null,
   onShutdownRequest = null
 } = {}) {
   const ctx = createRuntimeContext(pathOverrides, { fetchImpl, enableRemoteUpdateCheck });
+  const appUpdater = createAppUpdater({
+    currentVersion: PLUGIN_VERSION,
+    settings: ctx.settings,
+    paths: ctx.paths,
+    fetchImpl,
+    enableBackgroundCheck: Boolean(enableAppUpdateCheck),
+    ...appUpdateOptions
+  });
   const cfg = ctx.settings.get();
   const port = Number.isInteger(portOverride) ? portOverride : (cfg.port || 17373);
   const candidateToken = String(authTokenOverride || process.env.T3TOOLS_AUTH_TOKEN || '').trim();
@@ -167,6 +178,7 @@ export async function startDaemon({
       cdp: cdpHost ? cdpHost.getStatus() : { connected: false, message: 'CDP 未启用', lastError: '' },
       alerts: ctx.engine.getAlerts(),
       runtimeUpdates: ctx.engine.getRuntimeUpdates(now),
+      appUpdate: appUpdater.getStatus(),
       todayUsage: ctx.engine.getTodayUsageSummary(now),
       sidebarUsage: ctx.engine.getSidebarUsageSummary(now, { preset: settings.sidebarUsageRange }),
       settings,
@@ -185,6 +197,7 @@ export async function startDaemon({
   async function handleRpc(action, params = {}) {
     switch (action) {
       case 'ackErrors': return ctx.engine.acknowledgeErrors();
+      case 'resolveErrors': return ctx.engine.resolveErrors(params || {});
       case 'testAlert': return ctx.engine.testAlert();
       case 'focusThread': return cdpHost?.focusThread({ threadId: params.threadId, environmentId: ctx.t3State.readThreadIndex().threadsById.get(params.threadId)?.environmentId }) || { ok: false, focused: false, reason: 'T3 Code 未处于吸附状态' };
       case 'getStatus':
@@ -194,7 +207,10 @@ export async function startDaemon({
         const reqThreadId = String(params.threadId || '').trim();
         activeCdpThreadId = reqThreadId;
         activeCdpThreadAtMs = Date.now();
-        return ctx.engine.getLiveThreadSnapshot(reqThreadId, { allowFallback: false });
+        return {
+          ...ctx.engine.getLiveThreadSnapshot(reqThreadId, { allowFallback: false }),
+          appUpdate: appUpdater.getStatus()
+        };
       }
       case 'exportRequestsCsv':
         return ctx.engine.exportRequestsCsv(params || {});
@@ -209,6 +225,12 @@ export async function startDaemon({
         return { syncedAtMs: Date.now() };
       case 'checkRuntimeUpdates':
         return ctx.engine.checkRuntimeUpdates();
+      case 'checkAppUpdate':
+        return appUpdater.checkForUpdates({ force: true });
+      case 'installAppUpdate':
+        return appUpdater.startInstall(params || {});
+      case 'skipAppUpdate':
+        return appUpdater.skipVersion(params?.version || '');
       case 'getLauncherStatus':
         return inspectShortcuts(ctx.paths);
       default:
@@ -228,6 +250,7 @@ export async function startDaemon({
     engine: ctx.engine,
     settings: ctx.settings,
     getDaemonStatus,
+    getAppUpdate: () => appUpdater.getStatus(),
     getHealth: () => ({ version: PLUGIN_VERSION, pid: process.pid, startedAtMs, state: stopped ? 'stopping' : 'running' }),
     buildClientBundle: opts => buildClientBundle({ ...opts, version: PLUGIN_VERSION }),
     buildFallbackHtml: opts => buildFallbackHtml({ ...opts, version: PLUGIN_VERSION }),
@@ -311,6 +334,7 @@ export async function startDaemon({
     // Scheme A lifecycle watchdog: exit cleanly once T3 Code has completely exited
     // (after startup grace period + 2 consecutive misses so T3 restarts/updates survive smoothly)
     ctx.engine.tickAlerts();
+    appUpdater.start();
   } catch (err) {
     await stop('startup failure');
     throw err;
@@ -331,6 +355,7 @@ export async function startDaemon({
   }
 
   async function closeResources() {
+    appUpdater.stop();
     clearInterval(alertTimer);
     if (watchdogTimer) {
       clearInterval(watchdogTimer);
@@ -378,6 +403,7 @@ export async function startDaemon({
     ctx,
     cdpHost,
     httpServer,
+    appUpdater,
     getStatus: getDaemonStatus,
     stop
   };

@@ -21,6 +21,10 @@ export const DEFAULT_SETTINGS = {
   pollIntervalMs: 2500,
   alertConfig: { enabled: true, desktopNotification: true, injectedBanner: false, mode: 'smart',
     burstThreshold: 2, burstWindowMs: 300000, cooldownMs: 120000 },
+  appUpdates: {
+    autoCheck: true,
+    skippedVersion: ''
+  },
   anomalyConfig: {
     maxGapMs: 180000,
     minPrevCache: 4000,
@@ -134,6 +138,24 @@ export function sanitizeSettingsPatch(patch) {
     }
     clean.alertConfig = cleanConfig;
   }
+  if (Object.hasOwn(patch, 'appUpdates')) {
+    const au = patch.appUpdates;
+    if (!au || typeof au !== 'object' || Array.isArray(au)) throw new Error('appUpdates 必须为对象');
+    const cleanUpdates = {};
+    if (Object.hasOwn(au, 'autoCheck')) {
+      if (typeof au.autoCheck !== 'boolean') throw new Error('autoCheck 必须为布尔值');
+      cleanUpdates.autoCheck = au.autoCheck;
+    }
+    if (Object.hasOwn(au, 'skippedVersion')) {
+      if (typeof au.skippedVersion !== 'string') throw new Error('skippedVersion 必须为字符串');
+      const trimmed = au.skippedVersion.trim().replace(/^v/i, '');
+      if (trimmed && !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(trimmed)) {
+        throw new Error('skippedVersion 版本号格式无效');
+      }
+      cleanUpdates.skippedVersion = trimmed;
+    }
+    clean.appUpdates = cleanUpdates;
+  }
   return clean;
 }
 
@@ -157,6 +179,7 @@ function mergeSettings(base, rawPatch) {
     ...base,
     ...safePatch,
     alertConfig: { ...base.alertConfig, ...safePatch.alertConfig },
+    appUpdates: { ...base.appUpdates, ...(safePatch.appUpdates || {}) },
     overviewPosition: {
       ...base.overviewPosition,
       ...(safePatch.overviewPosition || {})

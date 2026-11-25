@@ -21,7 +21,16 @@
 - **不耦合宿主混淆代码**：通过 Windows 快捷方式追加 `--remote-debugging-port=0` 并用 CDP 挂载 **Shadow DOM** 隔离 UI；所有 DOM 锚点外置在 `config/selectors.json`，优先使用 T3 Code 官方稳定 `data-*` 选择器。
 - **独立 Web Fallback 兜底**：守护进程同时提供本地 `http://127.0.0.1:17373`，即便 T3 Code 大改临时导致 DOM 锚点失效，浏览器打开该地址依然可 100% 使用全部功能。
 
-## 快速开始（Windows，Node.js >= 22.13，零 npm 依赖）
+## 快速开始（Windows）
+
+### 方式一：安装包无脑双击安装（推荐，零前置依赖）
+
+前往 [GitHub Releases](https://github.com/LionKo/t3tools/releases) 下载最新版的 `T3Tools-Setup-vX.Y.Z-win-x64.exe`（内置便携版 Node.js，无需自行安装任何运行环境）：
+- 双击一路下一步即可安装到 `%LOCALAPPDATA%\T3Tools`（免管理员权限 UAC），自动创建桌面/开始菜单快捷方式并为 T3 Code 注入调试端口参数；
+- 后续发布新版本时，托盘弹窗、主窗口顶栏与 T3 Code 左下角均会自动提醒，**点击「立即更新」即可后台下载 ~200KB 增量包、自动校验 SHA-256、无黑框原子替换并重启**（失败自动回滚，用户数据目录 `%USERPROFILE%\.t3tools` 完全保留）。
+- 也提供免安装便携版 `T3Tools-vX.Y.Z-win-x64-portable.zip`，解压后双击 `T3Tools.exe` 同样支持一键自动更新。
+
+### 方式二：源码开发者模式（Node.js >= 22.13，零 npm 依赖）
 
 默认采用 **Magpie 风格独立托盘模式（`T3Tools.exe`，右下角系统托盘 + 自动吸附 T3 Code）**：
 
@@ -42,7 +51,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -AutoStart -Start
 ### 常用命令
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\build-tray.ps1  # 单独编译 dist\T3Tools.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\build-tray.ps1      # 单独编译 dist\T3Tools.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1   # 本地构建 Release（安装包 + 便携包 + 增量包 + latest.json）
 node bin/t3tools.mjs tray              # 启动 T3Tools 托盘程序（可加 --tray 直接静默进托盘）
 node bin/t3tools.mjs patch-debug       # 仅为 T3 Code 快捷方式注入 --remote-debugging-port=0
 node bin/t3tools.mjs doctor            # 环境、托盘、进程与数据源一键诊断

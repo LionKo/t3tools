@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -778,7 +779,6 @@ namespace T3ToolsTray
     internal enum TrayBadgeState
     {
         Starting,
-        Alert,
         Waiting,
         Attached,
         NeedsRestart,
@@ -823,9 +823,6 @@ namespace T3ToolsTray
                 Color dotColor;
                 switch (state)
                 {
-                    case TrayBadgeState.Alert:
-                        dotColor = Color.FromArgb(239, 68, 68);
-                        break;
                     case TrayBadgeState.Attached:
                         dotColor = Color.FromArgb(34, 197, 94);   // --pt-success
                         break;
@@ -1480,10 +1477,24 @@ namespace T3ToolsTray
         private bool _darkTheme = true;
         private DateTime _lastLocalThemeChangeUtc = DateTime.MinValue;
         private DateTime _lastShownUtc = DateTime.MinValue;
-        private int _unreadErrors;
         private int _alertPid;
         private int _lastNotifiedAlertSeq = -1;
-        private bool _errorBalloon;
+        private string _balloonMode = "default";
+        private bool _updateHasNew;
+        private bool _updateCanAuto;
+        private bool _updateIsSkipped;
+        private string _updateLatestVersion = "";
+        private string _updateStatus = "idle";
+        private int _updateProgress;
+        private long _updateDownloadSize;
+        private string _updateReleaseUrl = "";
+        private string _updateStagedZip = "";
+        private string _updateStagedSha = "";
+        private string _updateStagedVersion = "";
+        private string _updateInstallDir = "";
+        private string _lastNotifiedUpdateVersion = "";
+        private string _lastJustUpdatedVersion = "";
+        private bool _updateSwapLaunched;
         private TrayBadgeState _currentBadge = TrayBadgeState.Starting;
 
         private Panel _webHostPanel;
@@ -1890,6 +1901,19 @@ namespace T3ToolsTray
                 {
                     SafeInvoke(delegate { ConfirmAndRelaunchT3(); });
                 }
+                else if (action == "checkAppUpdate")
+                {
+                    TriggerAppUpdateCheck();
+                }
+                else if (action == "installAppUpdate")
+                {
+                    TriggerAppUpdateInstall();
+                }
+                else if (action == "openUrl")
+                {
+                    string targetUrl = GetString(msg, "url", "");
+                    OpenAllowedExternalUrl(targetUrl);
+                }
             }
             catch { }
         }
@@ -1944,7 +1968,32 @@ namespace T3ToolsTray
             _trayIcon.Icon = TrayIconFactory.CreateStatusIcon(TrayBadgeState.Starting, 32);
             _trayIcon.Text = "T3Tools - 正在启动...";
             _trayIcon.Visible = true;
-            _trayIcon.BalloonTipClicked += delegate { ShowMainWindow(_errorBalloon ? "errors" : null); };
+            _trayIcon.BalloonTipClicked += delegate
+            {
+                if (_balloonMode == "update")
+                {
+                    if (_updateCanAuto && _updateHasNew)
+                    {
+                        ShowMainWindow("settings");
+                        if (_updateStatus == "available" || _updateStatus == "error")
+                        {
+                            TriggerAppUpdateInstall();
+                        }
+                    }
+                    else if (!string.IsNullOrEmpty(_updateReleaseUrl))
+                    {
+                        OpenAllowedExternalUrl(_updateReleaseUrl);
+                    }
+                    else
+                    {
+                        ShowMainWindow("settings");
+                    }
+                }
+                else
+                {
+                    ShowMainWindow(_balloonMode == "errors" ? "errors" : null);
+                }
+            };
             _trayIcon.MouseUp += delegate(object s, MouseEventArgs me)
             {
                 if (me.Button == MouseButtons.Right)
@@ -1987,11 +2036,41 @@ namespace T3ToolsTray
             var entries = new List<FluentTrayMenuEntry>();
             entries.Add(FluentTrayMenuEntry.Header(verLabel));
             entries.Add(FluentTrayMenuEntry.Separator());
+            if (_updateHasNew && !string.IsNullOrEmpty(_updateLatestVersion))
+            {
+                if (_updateStatus == "downloading" || _updateStatus == "verifying" || _updateStatus == "ready")
+                {
+                    string dlLabel = _updateStatus == "downloading"
+                        ? string.Format("正在下载 v{0} ({1}%)...", _updateLatestVersion, _updateProgress)
+                        : string.Format("正在准备更新 v{0}...", _updateLatestVersion);
+                    entries.Add(FluentTrayMenuEntry.Item(dlLabel, "\uE896", delegate { ShowMainWindow("settings"); }));
+                }
+                else if (_updateCanAuto)
+                {
+                    string upVer = _updateLatestVersion;
+                    entries.Add(FluentTrayMenuEntry.Item(
+                        "立即更新到 v" + upVer,
+                        "\uE896",
+                        delegate { TriggerAppUpdateInstall(); }
+                    ));
+                }
+                else
+                {
+                    string relUrl = _updateReleaseUrl;
+                    entries.Add(FluentTrayMenuEntry.Item(
+                        "新版本 v" + _updateLatestVersion + "（前往下载）",
+                        "\uE896",
+                        delegate { OpenAllowedExternalUrl(relUrl); }
+                    ));
+                }
+                entries.Add(FluentTrayMenuEntry.Separator());
+            }
             entries.Add(FluentTrayMenuEntry.Item(
                 "主窗口",
                 "\uE80F",
                 delegate { ShowMainWindow(); }
             ));
+            entries.Add(FluentTrayMenuEntry.Item("检查更新", "\uE777", delegate { TriggerAppUpdateCheck(); }));
             entries.Add(FluentTrayMenuEntry.Item("重启后台服务", "\uE72C", delegate { QueueRecovery(true); }));
             entries.Add(FluentTrayMenuEntry.Item(
                 "重启",
@@ -2103,7 +2182,7 @@ namespace T3ToolsTray
                 _shownMinimizeHint = true;
                 try
                 {
-                    _errorBalloon = false;
+                    _balloonMode = "default";
                     _trayIcon.ShowBalloonTip(
                         2400,
                         "T3Tools 已缩放到托盘",
@@ -2160,7 +2239,11 @@ namespace T3ToolsTray
         {
             nodeExe = null;
             string exeDir = AppDomain.CurrentDomain.BaseDirectory;
+            string bundledNode = Path.Combine(exeDir, "runtime", "node.exe");
+            if (File.Exists(bundledNode)) nodeExe = bundledNode;
+
             var candidates = new List<string>();
+            candidates.Add(Path.GetFullPath(Path.Combine(exeDir, "app", "bin", "t3tools.mjs")));
             candidates.Add(Path.GetFullPath(Path.Combine(exeDir, "..", "bin", "t3tools.mjs")));
             candidates.Add(Path.GetFullPath(Path.Combine(exeDir, "bin", "t3tools.mjs")));
 
@@ -2172,7 +2255,7 @@ namespace T3ToolsTray
                     if (cfg != null)
                     {
                         string cfgNode = GetString(cfg, "nodeExe", "");
-                        if (!string.IsNullOrEmpty(cfgNode) && File.Exists(cfgNode)) nodeExe = cfgNode;
+                        if (string.IsNullOrEmpty(nodeExe) && !string.IsNullOrEmpty(cfgNode) && File.Exists(cfgNode)) nodeExe = cfgNode;
                         string cfgCli = GetString(cfg, "cliPath", "");
                         if (!string.IsNullOrEmpty(cfgCli)) candidates.Add(cfgCli);
                         string cfgRoot = GetString(cfg, "repoRoot", "");
@@ -2578,6 +2661,7 @@ namespace T3ToolsTray
                 _daemonVersion = GetString(statusData, "version", _daemonVersion);
                 _daemonPid = GetInt(statusData, "pid", _daemonPid);
                 ReadAlerts(statusData);
+                ReadAppUpdate(statusData);
                 var cdp = GetDict(statusData, "cdp");
                 if (cdp != null)
                 {
@@ -2598,7 +2682,7 @@ namespace T3ToolsTray
                             {
                                 try
                                 {
-                                    _errorBalloon = false;
+                                    _balloonMode = "default";
                                     _trayIcon.ShowBalloonTip(
                                         2200,
                                         "T3Tools 已自动吸附到 T3 Code",
@@ -2644,7 +2728,6 @@ namespace T3ToolsTray
         {
             var alerts = GetDict(status, "alerts");
             if (alerts == null) return;
-            _unreadErrors = GetInt(alerts, "unreadCount", 0);
             int seq = GetInt(alerts, "latestSeq", 0);
             int previous = _lastNotifiedAlertSeq;
             _lastNotifiedAlertSeq = seq;
@@ -2676,9 +2759,234 @@ namespace T3ToolsTray
             SafeInvoke(delegate
             {
                 if (_trayIcon == null) return;
-                _errorBalloon = true;
+                _balloonMode = "errors";
                 _trayIcon.ShowBalloonTip(5000,title,body,icon);
             });
+        }
+
+        private void ReadAppUpdate(Dictionary<string, object> status)
+        {
+            var upd = GetDict(status, "appUpdate");
+            if (upd == null) return;
+
+            _updateHasNew = GetBool(upd, "hasUpdate", false);
+            _updateCanAuto = GetBool(upd, "canAutoUpdate", false);
+            _updateIsSkipped = GetBool(upd, "isSkipped", false);
+            _updateLatestVersion = GetString(upd, "latestVersion", "");
+            _updateStatus = GetString(upd, "status", "idle");
+            _updateProgress = GetInt(upd, "progressPercent", 0);
+            _updateDownloadSize = GetLong(upd, "downloadSize", 0);
+            _updateReleaseUrl = GetString(upd, "releaseUrl", "");
+            _updateStagedZip = GetString(upd, "stagedZipPath", "");
+            _updateStagedSha = GetString(upd, "stagedSha256", "");
+            _updateStagedVersion = GetString(upd, "stagedVersion", "");
+            _updateInstallDir = GetString(upd, "installDir", "");
+            long applyReqAt = GetLong(upd, "applyRequestedAtMs", 0);
+
+            var justUpd = GetDict(upd, "justUpdated");
+            if (justUpd != null)
+            {
+                string toVer = GetString(justUpd, "toVersion", "");
+                if (!string.IsNullOrEmpty(toVer) && _lastJustUpdatedVersion != toVer)
+                {
+                    _lastJustUpdatedVersion = toVer;
+                    SafeInvoke(delegate
+                    {
+                        PushToastToWebView("已更新至 T3Tools v" + toVer);
+                        if (_trayIcon != null)
+                        {
+                            try
+                            {
+                                _balloonMode = "default";
+                                _trayIcon.ShowBalloonTip(
+                                    4000,
+                                    "T3Tools 已更新至 v" + toVer,
+                                    "新版本已自动安装并启动完成。",
+                                    ToolTipIcon.Info
+                                );
+                            }
+                            catch { }
+                        }
+                    });
+                }
+            }
+
+            if (_updateHasNew && !_updateIsSkipped && !string.IsNullOrEmpty(_updateLatestVersion) &&
+                _updateStatus == "available" && _lastNotifiedUpdateVersion != _updateLatestVersion)
+            {
+                _lastNotifiedUpdateVersion = _updateLatestVersion;
+                string ver = _updateLatestVersion;
+                bool canAuto = _updateCanAuto;
+                string sizeHint = _updateDownloadSize > 0 ? FormatByteSize(_updateDownloadSize) : "";
+                SafeInvoke(delegate
+                {
+                    if (_trayIcon == null) return;
+                    try
+                    {
+                        _balloonMode = "update";
+                        string body = canAuto
+                            ? (string.IsNullOrEmpty(sizeHint) ? "点击立即自动更新并重启" : string.Format("点击立即自动更新并重启（{0}）", sizeHint))
+                            : "点击前往查看更新并下载安装包";
+                        _trayIcon.ShowBalloonTip(7000, "发现 T3Tools 新版本 v" + ver, body, ToolTipIcon.Info);
+                    }
+                    catch { }
+                });
+            }
+
+            if (_updateStatus == "ready" && applyReqAt > 0 && !_updateSwapLaunched &&
+                !string.IsNullOrEmpty(_updateStagedZip) && !string.IsNullOrEmpty(_updateStagedSha) &&
+                !string.IsNullOrEmpty(_updateInstallDir))
+            {
+                _updateSwapLaunched = true;
+                string zipPath = _updateStagedZip;
+                string sha = _updateStagedSha;
+                string dstDir = _updateInstallDir;
+                string fromVer = _daemonVersion;
+                string toVer = string.IsNullOrEmpty(_updateStagedVersion) ? _updateLatestVersion : _updateStagedVersion;
+                SafeInvoke(delegate
+                {
+                    LaunchNativeUpdaterAndExit(zipPath, sha, dstDir, fromVer, toVer);
+                });
+            }
+        }
+
+        private static string FormatByteSize(long bytes)
+        {
+            if (bytes <= 0) return "";
+            if (bytes < 1024 * 1024) return string.Format("{0:0} KB", Math.Max(1.0, bytes / 1024.0));
+            return string.Format("{0:0.0} MB", bytes / (1024.0 * 1024.0));
+        }
+
+        private void OpenAllowedExternalUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return;
+            try
+            {
+                Uri u;
+                if (!Uri.TryCreate(url, UriKind.Absolute, out u)) return;
+                if (!string.Equals(u.Scheme, "https", StringComparison.OrdinalIgnoreCase)) return;
+                if (!string.Equals(u.Host, "github.com", StringComparison.OrdinalIgnoreCase)) return;
+                if (!u.AbsolutePath.StartsWith("/LionKo/t3tools", StringComparison.OrdinalIgnoreCase)) return;
+                Process.Start(new ProcessStartInfo(u.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch { }
+        }
+
+        private void TriggerAppUpdateCheck()
+        {
+            PushToastToWebView("正在检查 T3Tools 更新...");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    var resp = HttpPostJson(_daemonUrl + "/api/app-update/check", "{}", 15000);
+                    var data = GetDict(resp, "data");
+                    bool hasUpd = GetBool(data, "hasUpdate", false);
+                    string ver = GetString(data, "latestVersion", "");
+                    string err = GetString(data, "lastError", "");
+                    if (!string.IsNullOrEmpty(err))
+                    {
+                        PushToastToWebView("检查更新失败: " + err);
+                    }
+                    else if (hasUpd && !string.IsNullOrEmpty(ver))
+                    {
+                        PushToastToWebView("发现新版本 v" + ver);
+                    }
+                    else
+                    {
+                        PushToastToWebView("当前已是最新版本 v" + _daemonVersion);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    PushToastToWebView("检查更新失败: " + ex.Message);
+                }
+                PollStatusAsync();
+            });
+        }
+
+        private void TriggerAppUpdateInstall()
+        {
+            PushToastToWebView("正在下载并校验 T3Tools 更新...");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    var resp = HttpPostJson(_daemonUrl + "/api/app-update/install", "{}", 20000);
+                    var data = GetDict(resp, "data");
+                    bool ok = GetBool(data, "ok", true);
+                    string err = GetString(data, "error", "");
+                    if (!ok && !string.IsNullOrEmpty(err))
+                    {
+                        PushToastToWebView(err);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    PushToastToWebView("启动更新失败: " + ex.Message);
+                }
+                PollStatusAsync();
+            });
+        }
+
+        private void LaunchNativeUpdaterAndExit(string zipPath, string sha256, string installDir, string fromVer, string toVer)
+        {
+            if (_exiting) return;
+            try
+            {
+                string selfExe = Path.GetFullPath(Application.ExecutablePath);
+                string selfDir = Path.GetFullPath(Path.GetDirectoryName(selfExe) ?? "").TrimEnd('\\');
+                string targetDir = Path.GetFullPath(installDir).TrimEnd('\\');
+                string fullZip = Path.GetFullPath(zipPath);
+                string expectedStaging = Path.Combine(selfDir, "_staging") + Path.DirectorySeparatorChar;
+
+                if (!string.Equals(selfDir, targetDir, StringComparison.OrdinalIgnoreCase) ||
+                    !fullZip.StartsWith(expectedStaging, StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(fullZip))
+                {
+                    _updateSwapLaunched = false;
+                    PushToastToWebView("更新校验失败：安装目录或暂存包路径不匹配");
+                    TrayLog.Event("refused update swap due to path mismatch", true);
+                    return;
+                }
+
+                string tempUpdater = Path.Combine(Path.GetTempPath(), string.Format("T3Tools-updater-{0}.exe", Process.GetCurrentProcess().Id));
+                File.Copy(selfExe, tempUpdater, true);
+
+                var argList = new List<string>
+                {
+                    "--apply-update",
+                    "--pid", Process.GetCurrentProcess().Id.ToString(),
+                    "--zip", QuoteArg(fullZip),
+                    "--sha256", QuoteArg(sha256),
+                    "--dst", QuoteArg(selfDir),
+                    "--from-version", QuoteArg(fromVer ?? ""),
+                    "--to-version", QuoteArg(toVer ?? "")
+                };
+                if (!this.Visible) argList.Add("--tray");
+
+                var psi = new ProcessStartInfo();
+                psi.FileName = tempUpdater;
+                psi.Arguments = string.Join(" ", argList.ToArray());
+                psi.WorkingDirectory = Path.GetTempPath();
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+
+                TrayLog.Event("launched native updater to " + toVer + ", exiting tray");
+                ExitApplication();
+            }
+            catch (Exception ex)
+            {
+                _updateSwapLaunched = false;
+                TrayLog.Event("launch native updater failed: " + ex, true);
+                PushToastToWebView("启动更新器失败: " + ex.Message);
+            }
+        }
+
+        private static string QuoteArg(string val)
+        {
+            string s = (val ?? "").Replace("\"", "\\\"");
+            return "\"" + s + "\"";
         }
 
         private void UpdateTrayIndicator()
@@ -2692,11 +3000,6 @@ namespace T3ToolsTray
             {
                 nextBadge = TrayBadgeState.Paused;
                 trayTooltip = "T3Tools - " + _lastDaemonError;
-            }
-            else if (_daemonReady && _unreadErrors > 0)
-            {
-                nextBadge = TrayBadgeState.Alert;
-                trayTooltip = string.Format("T3Tools - 有 {0} 条未处理模型错误", _unreadErrors);
             }
             else if (!_autoAttach)
             {
@@ -2976,6 +3279,384 @@ namespace T3ToolsTray
             if (d == null || !d.ContainsKey(key) || d[key] == null) return fallback;
             try { return Convert.ToInt32(d[key]); } catch { return fallback; }
         }
+
+        private static long GetLong(Dictionary<string, object> d, string key, long fallback)
+        {
+            if (d == null || !d.ContainsKey(key) || d[key] == null) return fallback;
+            try { return Convert.ToInt64(d[key]); } catch { return fallback; }
+        }
+    }
+
+    internal static class NativeAppUpdater
+    {
+        private static string GetPluginDataDir()
+        {
+            string overrideDir = Environment.GetEnvironmentVariable("T3TOOLS_DIR");
+            if (!string.IsNullOrEmpty(overrideDir)) return overrideDir;
+            string home = Environment.GetEnvironmentVariable("USERPROFILE");
+            if (string.IsNullOrEmpty(home)) home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            return Path.Combine(home, ".t3tools");
+        }
+
+        private static void Log(string msg)
+        {
+            try
+            {
+                string dir = GetPluginDataDir();
+                Directory.CreateDirectory(dir);
+                File.AppendAllText(
+                    Path.Combine(dir, "update.log"),
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine,
+                    Encoding.UTF8
+                );
+            }
+            catch { }
+        }
+
+        private static string ComputeSha256(string filePath)
+        {
+            using (var sha = SHA256.Create())
+            using (var fs = File.OpenRead(filePath))
+            {
+                byte[] hash = sha.ComputeHash(fs);
+                var sb = new StringBuilder(hash.Length * 2);
+                for (int i = 0; i < hash.Length; i++) sb.Append(hash[i].ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        private static void WaitForProcessExit(int pid, int timeoutMs)
+        {
+            if (pid <= 0) return;
+            try
+            {
+                using (var proc = Process.GetProcessById(pid))
+                {
+                    if (!proc.HasExited) proc.WaitForExit(timeoutMs);
+                }
+            }
+            catch { }
+        }
+
+        private static void StopLingeringProcessesUnder(string installDir)
+        {
+            string prefix = Path.GetFullPath(installDir).TrimEnd('\\') + Path.DirectorySeparatorChar;
+            int myPid = Process.GetCurrentProcess().Id;
+            foreach (string name in new[] { "T3Tools", "node" })
+            {
+                try
+                {
+                    foreach (var p in Process.GetProcessesByName(name))
+                    {
+                        try
+                        {
+                            if (p.Id == myPid || p.HasExited) continue;
+                            string path = p.MainModule != null ? p.MainModule.FileName : "";
+                            if (!string.IsNullOrEmpty(path) &&
+                                Path.GetFullPath(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                p.Kill();
+                                p.WaitForExit(3000);
+                            }
+                        }
+                        catch { }
+                        finally { p.Dispose(); }
+                    }
+                }
+                catch { }
+            }
+        }
+
+        private static void ExtractZipSafe(string zipPath, string destDir)
+        {
+            Directory.CreateDirectory(destDir);
+            string fullDest = Path.GetFullPath(destDir).TrimEnd('\\') + Path.DirectorySeparatorChar;
+            using (var archive = ZipFile.OpenRead(zipPath))
+            {
+                foreach (var entry in archive.Entries)
+                {
+                    string rel = (entry.FullName ?? "").Replace('/', Path.DirectorySeparatorChar);
+                    if (string.IsNullOrEmpty(rel)) continue;
+                    string targetPath = Path.GetFullPath(Path.Combine(destDir, rel));
+                    if (!targetPath.StartsWith(fullDest, StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException("更新包包含非法路径: " + entry.FullName);
+                    }
+                    if (rel.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                    {
+                        Directory.CreateDirectory(targetPath);
+                    }
+                    else
+                    {
+                        string parent = Path.GetDirectoryName(targetPath);
+                        if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                        entry.ExtractToFile(targetPath, true);
+                    }
+                }
+            }
+        }
+
+        private static void MoveWithRetry(string src, string dst, bool isDir)
+        {
+            Exception lastErr = null;
+            for (int i = 0; i < 20; i++)
+            {
+                try
+                {
+                    if (isDir)
+                    {
+                        if (Directory.Exists(dst)) Directory.Delete(dst, true);
+                        Directory.Move(src, dst);
+                    }
+                    else
+                    {
+                        if (File.Exists(dst)) File.Delete(dst);
+                        File.Move(src, dst);
+                    }
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    lastErr = ex;
+                    Thread.Sleep(250);
+                }
+            }
+            throw lastErr ?? new IOException("无法移动 " + src);
+        }
+
+        private static void DeleteQuiet(string path, bool isDir)
+        {
+            try
+            {
+                if (isDir)
+                {
+                    if (Directory.Exists(path)) Directory.Delete(path, true);
+                }
+                else
+                {
+                    if (File.Exists(path)) File.Delete(path);
+                }
+            }
+            catch { }
+        }
+
+        private static string PreserveInstallMode(string oldReleasePath, string newReleasePath)
+        {
+            try
+            {
+                if (!File.Exists(oldReleasePath) || !File.Exists(newReleasePath)) return null;
+                var ser = new JavaScriptSerializer();
+                var oldObj = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(oldReleasePath, Encoding.UTF8));
+                var newObj = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(newReleasePath, Encoding.UTF8));
+                if (oldObj != null && newObj != null && oldObj.ContainsKey("installMode"))
+                {
+                    string mode = Convert.ToString(oldObj["installMode"]);
+                    if (mode == "portable" || mode == "installed")
+                    {
+                        newObj["installMode"] = mode;
+                        File.WriteAllText(newReleasePath, ser.Serialize(newObj), new UTF8Encoding(false));
+                        return mode;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void WriteMarkerJson(string fileName, Dictionary<string, object> payload)
+        {
+            try
+            {
+                string dir = GetPluginDataDir();
+                Directory.CreateDirectory(dir);
+                var ser = new JavaScriptSerializer();
+                File.WriteAllText(Path.Combine(dir, fileName), ser.Serialize(payload), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        public static void ScheduleCleanupUpdater(string updaterPath)
+        {
+            if (string.IsNullOrEmpty(updaterPath)) return;
+            try
+            {
+                string full = Path.GetFullPath(updaterPath);
+                string tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd('\\') + Path.DirectorySeparatorChar;
+                string name = Path.GetFileName(full) ?? "";
+                if (!full.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)) return;
+                if (!name.StartsWith("T3Tools-updater-", StringComparison.OrdinalIgnoreCase) ||
+                    !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return;
+
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    for (int i = 0; i < 12; i++)
+                    {
+                        Thread.Sleep(500);
+                        try
+                        {
+                            if (!File.Exists(full)) return;
+                            File.Delete(full);
+                            return;
+                        }
+                        catch { }
+                    }
+                });
+            }
+            catch { }
+        }
+
+        public static int RunApplyUpdate(string[] args)
+        {
+            int oldPid = 0;
+            string zipPath = "";
+            string expectedSha = "";
+            string installDir = "";
+            string fromVer = "";
+            string toVer = "";
+            bool startInTray = false;
+            bool noRelaunch = false;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i] ?? "";
+                if (a == "--pid" && i + 1 < args.Length) int.TryParse(args[++i], out oldPid);
+                else if (a == "--zip" && i + 1 < args.Length) zipPath = args[++i];
+                else if (a == "--sha256" && i + 1 < args.Length) expectedSha = args[++i];
+                else if (a == "--dst" && i + 1 < args.Length) installDir = args[++i];
+                else if (a == "--from-version" && i + 1 < args.Length) fromVer = args[++i];
+                else if (a == "--to-version" && i + 1 < args.Length) toVer = args[++i];
+                else if (a == "--tray") startInTray = true;
+                else if (a == "--no-relaunch") noRelaunch = true;
+            }
+
+            if (string.IsNullOrEmpty(zipPath) || string.IsNullOrEmpty(expectedSha) || string.IsNullOrEmpty(installDir))
+            {
+                Log("missing required arguments");
+                return 2;
+            }
+
+            installDir = Path.GetFullPath(installDir).TrimEnd('\\');
+            zipPath = Path.GetFullPath(zipPath);
+            string extractDir = Path.Combine(installDir, "_staging", "extract_" + Process.GetCurrentProcess().Id);
+            var backups = new List<Tuple<string, string, bool>>();
+
+            Log(string.Format("starting update {0} -> {1} in {2}", fromVer, toVer, installDir));
+
+            try
+            {
+                WaitForProcessExit(oldPid, 10000);
+                Thread.Sleep(350);
+                StopLingeringProcessesUnder(installDir);
+
+                if (!File.Exists(zipPath)) throw new FileNotFoundException("更新包不存在", zipPath);
+                string actualSha = ComputeSha256(zipPath);
+                if (!string.Equals(actualSha, expectedSha.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("SHA-256 校验失败");
+                }
+
+                DeleteQuiet(extractDir, true);
+                ExtractZipSafe(zipPath, extractDir);
+
+                string stagedExe = Path.Combine(extractDir, "T3Tools.exe");
+                string stagedApp = Path.Combine(extractDir, "app");
+                string stagedCli = Path.Combine(stagedApp, "bin", "t3tools.mjs");
+                if (!File.Exists(stagedExe) || !File.Exists(stagedCli))
+                {
+                    throw new InvalidOperationException("更新包结构不完整（缺少 T3Tools.exe 或 app/bin/t3tools.mjs）");
+                }
+
+                string stagedRelease = Path.Combine(extractDir, "release.json");
+                string liveRelease = Path.Combine(installDir, "release.json");
+                if (File.Exists(stagedRelease))
+                {
+                    PreserveInstallMode(liveRelease, stagedRelease);
+                }
+
+                string liveExe = Path.Combine(installDir, "T3Tools.exe");
+                string liveApp = Path.Combine(installDir, "app");
+                string liveRuntime = Path.Combine(installDir, "runtime");
+                string stagedRuntime = Path.Combine(extractDir, "runtime");
+                bool replaceRuntime = File.Exists(Path.Combine(stagedRuntime, "node.exe"));
+
+                Action<string, string, bool> swapItem = delegate(string livePath, string newPath, bool isDir)
+                {
+                    string bakPath = livePath + ".bak";
+                    DeleteQuiet(bakPath, isDir);
+                    if (isDir ? Directory.Exists(livePath) : File.Exists(livePath))
+                    {
+                        MoveWithRetry(livePath, bakPath, isDir);
+                        backups.Add(Tuple.Create(livePath, bakPath, isDir));
+                    }
+                    MoveWithRetry(newPath, livePath, isDir);
+                };
+
+                swapItem(liveApp, stagedApp, true);
+                swapItem(liveExe, stagedExe, false);
+                if (File.Exists(stagedRelease)) swapItem(liveRelease, stagedRelease, false);
+                if (replaceRuntime) swapItem(liveRuntime, stagedRuntime, true);
+
+                foreach (var b in backups) DeleteQuiet(b.Item2, b.Item3);
+                DeleteQuiet(Path.Combine(installDir, "_staging"), true);
+
+                WriteMarkerJson("just-updated.json", new Dictionary<string, object>
+                {
+                    { "fromVersion", fromVer ?? "" },
+                    { "toVersion", toVer ?? "" },
+                    { "updatedAt", DateTime.UtcNow.ToString("o") }
+                });
+                Log("update succeeded to " + toVer);
+
+                if (!noRelaunch) RelaunchInstalledExe(liveExe, startInTray);
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                Log("update failed, rolling back: " + ex);
+                for (int i = backups.Count - 1; i >= 0; i--)
+                {
+                    var b = backups[i];
+                    try
+                    {
+                        DeleteQuiet(b.Item1, b.Item3);
+                        MoveWithRetry(b.Item2, b.Item1, b.Item3);
+                    }
+                    catch (Exception rbEx)
+                    {
+                        Log("rollback warning for " + b.Item1 + ": " + rbEx.Message);
+                    }
+                }
+                DeleteQuiet(extractDir, true);
+                WriteMarkerJson("last-update-error.json", new Dictionary<string, object>
+                {
+                    { "error", ex.Message },
+                    { "at", DateTime.UtcNow.ToString("o") }
+                });
+                if (!noRelaunch) RelaunchInstalledExe(Path.Combine(installDir, "T3Tools.exe"), startInTray);
+                return 1;
+            }
+        }
+
+        private static void RelaunchInstalledExe(string exePath, bool startInTray)
+        {
+            if (!File.Exists(exePath)) return;
+            try
+            {
+                string selfExe = Application.ExecutablePath;
+                var launchArgs = new List<string> { "--wait-restart", "--cleanup-updater", "\"" + selfExe + "\"" };
+                if (startInTray) launchArgs.Add("--tray");
+                var psi = new ProcessStartInfo();
+                psi.FileName = exePath;
+                psi.Arguments = string.Join(" ", launchArgs.ToArray());
+                psi.WorkingDirectory = Path.GetDirectoryName(exePath);
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                Log("relaunch failed: " + ex.Message);
+            }
+        }
     }
 
     internal static class Program
@@ -2990,6 +3671,22 @@ namespace T3ToolsTray
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args != null)
+            {
+                for (int i = 0; i < args.Length; i++)
+                {
+                    if (string.Equals(args[i], "--apply-update", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Environment.ExitCode = NativeAppUpdater.RunApplyUpdate(args);
+                        return;
+                    }
+                    if (string.Equals(args[i], "--cleanup-updater", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    {
+                        NativeAppUpdater.ScheduleCleanupUpdater(args[i + 1]);
+                    }
+                }
+            }
+
             bool startInTray = false;
             bool requestQuit = false;
             bool waitRestart = false;

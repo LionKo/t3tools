@@ -77,6 +77,7 @@ export function createHttpServer({
   settings,
   handleRpc,
   getDaemonStatus,
+  getAppUpdate = null,
   getHealth,
   buildClientBundle,
   buildFallbackHtml,
@@ -168,6 +169,7 @@ export function createHttpServer({
         const allowFallback = reqUrl.searchParams.get('allowFallback') !== '0';
         const threadId = requestedThreadId || (allowFallback ? (getActiveThreadId() || '') : '');
         const data = engine.getLiveThreadSnapshot(threadId, { allowFallback });
+        if (typeof getAppUpdate === 'function') data.appUpdate = getAppUpdate();
         sendJson(res, 200, { ok: true, data });
         return;
       }
@@ -205,8 +207,11 @@ export function createHttpServer({
       // Mutating endpoints require per-daemon token + exact application/json media type (fixes P2 #5)
       const mutatingPaths = new Set([
         '/api/settings',
-        '/api/errors/ack', '/api/t3/focus-thread', '/api/alerts/test',
+        '/api/errors/ack', '/api/errors/resolve', '/api/t3/focus-thread', '/api/alerts/test',
         '/api/runtime-updates/check',
+        '/api/app-update/check',
+        '/api/app-update/install',
+        '/api/app-update/skip',
         '/api/sync',
         '/api/cdp/reattach',
         '/api/cdp/toggle',
@@ -228,9 +233,13 @@ export function createHttpServer({
         }
         const action = {
           '/api/errors/ack': 'ackErrors',
+          '/api/errors/resolve': 'resolveErrors',
           '/api/t3/focus-thread': 'focusThread',
           '/api/alerts/test': 'testAlert',
-          '/api/runtime-updates/check': 'checkRuntimeUpdates'
+          '/api/runtime-updates/check': 'checkRuntimeUpdates',
+          '/api/app-update/check': 'checkAppUpdate',
+          '/api/app-update/install': 'installAppUpdate',
+          '/api/app-update/skip': 'skipAppUpdate'
         }[pathname];
         if (action) {
           const body = await readJsonBody(req);

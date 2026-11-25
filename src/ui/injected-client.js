@@ -111,14 +111,17 @@
       if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
       return j.data;
     }
-    if (['focusThread','ackErrors','testAlert','checkRuntimeUpdates'].includes(action)) {
-      const path = action === 'focusThread'
-        ? '/api/t3/focus-thread'
-        : action === 'testAlert'
-          ? '/api/alerts/test'
-          : action === 'checkRuntimeUpdates'
-            ? '/api/runtime-updates/check'
-            : '/api/errors/ack';
+    if (['focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates','checkAppUpdate','installAppUpdate','skipAppUpdate'].includes(action)) {
+      const path = {
+        focusThread: '/api/t3/focus-thread',
+        ackErrors: '/api/errors/ack',
+        resolveErrors: '/api/errors/resolve',
+        testAlert: '/api/alerts/test',
+        checkRuntimeUpdates: '/api/runtime-updates/check',
+        checkAppUpdate: '/api/app-update/check',
+        installAppUpdate: '/api/app-update/install',
+        skipAppUpdate: '/api/app-update/skip'
+      }[action];
       const res = await http(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
       const json = await res.json();
       if (!json.ok) throw Object.assign(new Error(json.error), { receivedReply: true });
@@ -825,8 +828,11 @@
   let lastTodayUsage = null;
   let lastSidebarUsage = null;
   let lastRuntimeUpdates = null;
+  let lastAppUpdate = null;
   let dismissedRuntimeUpdateSig = '';
+  let dismissedAppUpdateVer = '';
   try { dismissedRuntimeUpdateSig = localStorage.getItem('t3tools.dismissedRuntimeUpdateSig') || ''; } catch {}
+  try { dismissedAppUpdateVer = localStorage.getItem('t3tools.dismissedAppUpdateVer') || ''; } catch {}
   let activeThreadId = detectActiveThreadId();
   let lastRouteHref = String(location.href || '');
 
@@ -1247,10 +1253,12 @@
         settings: cfg,
         todayUsage: activeRange === 'today' ? lastTodayUsage : null,
         sidebarUsage: lastSidebarUsage,
-        runtimeUpdates: lastLive?.runtimeUpdates ?? lastRuntimeUpdates
+        runtimeUpdates: lastLive?.runtimeUpdates ?? lastRuntimeUpdates,
+        appUpdate: lastLive?.appUpdate ?? lastAppUpdate
       },
       {
         dismissedUpdateSig: dismissedRuntimeUpdateSig,
+        dismissedAppUpdateVer,
         status: badgeStatus
       }
     );
@@ -1492,6 +1500,42 @@
         try { localStorage.setItem('t3tools.dismissedRuntimeUpdateSig', sig); } catch {}
         renderSidebarWidget();
       }
+    } else if (action === 'dismiss-app-update') {
+      const ver = btn.getAttribute('data-pt-app-ver') || '';
+      if (ver) {
+        dismissedAppUpdateVer = ver;
+        try { localStorage.setItem('t3tools.dismissedAppUpdateVer', ver); } catch {}
+        renderSidebarWidget();
+      }
+    } else if (action === 'install-app-update') {
+      const upd = lastLive?.appUpdate ?? lastAppUpdate;
+      if (upd && !upd.canAutoUpdate) {
+        if (upd.releaseUrl) window.open(upd.releaseUrl, '_blank', 'noopener,noreferrer');
+      } else {
+        callRpc('installAppUpdate', {}).then(res => {
+          if (res?.status) {
+            lastAppUpdate = res.status;
+            if (lastLive) lastLive.appUpdate = res.status;
+            renderSidebarWidget();
+          }
+        }).catch(() => {});
+      }
+    }
+  }
+
+  function applyAlertCounts(counts) {
+    if (!counts || typeof counts.unreadCount !== 'number') return;
+    const nextCounts = {
+      unreadCount: counts.unreadCount,
+      unreadRecoveredCount: counts.unreadRecoveredCount ?? 0,
+      unreadIncidents: counts.unreadIncidents ?? (counts.unreadCount + (counts.unreadRecoveredCount ?? 0)),
+      activeBrokenThreads: counts.activeBrokenThreads ?? 0
+    };
+    lastStatus = lastStatus
+      ? { ...lastStatus, alerts: { ...(lastStatus.alerts || {}), ...nextCounts } }
+      : { alerts: nextCounts };
+    if (lastLive?.globalAlerts) {
+      lastLive = { ...lastLive, globalAlerts: { ...lastLive.globalAlerts, ...nextCounts } };
     }
   }
 
@@ -1500,12 +1544,20 @@
     const target = e.target;
     const toast = showOverlayToast;
     try {
-      if (await handleErrorClick(e,dashState,{toast,rpc:callRpc,current:()=>dashState.tab,
+      if (await handleErrorClick(e,dashState,{toast,current:()=>dashState.tab,
+        rpc:async (action,params)=>{
+          const res = await callRpc(action,params);
+          if (['ackErrors','resolveErrors'].includes(action)) {
+            applyAlertCounts(res);
+            fetchOverlayStatus();
+          }
+          return res;
+        },
         close:()=>{dashboardOpen=false;renderDashboardOverlay();},
-        open:async view=>{
+        open:async (view, opts = {})=>{
           dashState.tab = view;
           await refreshDashboard();
-          if (view === 'models') overlayMount?.contentEl.querySelector('[data-error-center]')?.scrollIntoView();
+          if (view === 'models' && opts.scroll !== false) overlayMount?.contentEl.querySelector('[data-error-center]')?.scrollIntoView();
         }})) return;
     } catch (err) { toast(err.message); return; }
     // Only close when clicking the backdrop itself, NEVER when clicking inside the dashboard (fixes P1 #1)
@@ -1818,10 +1870,24 @@
         }
         lastSettings = live.settings;
       }
-      if (dashboardOpen && dashState.tab === 'models' && lastLive?.globalAlerts?.unreadCount !== live.globalAlerts?.unreadCount) refreshDashboard();
+      const prevAlerts = lastLive?.globalAlerts;
+      const nextAlerts = live?.globalAlerts;
+      const alertsChanged = Boolean(
+        nextAlerts && (
+          prevAlerts?.unreadCount !== nextAlerts.unreadCount ||
+          prevAlerts?.unreadRecoveredCount !== nextAlerts.unreadRecoveredCount ||
+          prevAlerts?.unreadIncidents !== nextAlerts.unreadIncidents
+        )
+      );
+      if (nextAlerts) applyAlertCounts(nextAlerts);
+      if (dashboardOpen && alertsChanged) {
+        if (dashState.tab === 'models') refreshDashboard();
+        else renderDashboardOverlay();
+      }
       if (live?.todayUsage) lastTodayUsage = live.todayUsage;
       if (live?.sidebarUsage) lastSidebarUsage = live.sidebarUsage;
       if (live?.runtimeUpdates) lastRuntimeUpdates = live.runtimeUpdates;
+      if (live?.appUpdate) lastAppUpdate = live.appUpdate;
       lastLive = live;
       lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
@@ -1982,6 +2048,7 @@
       lastTodayUsage = null;
       lastSidebarUsage = null;
       lastRuntimeUpdates = null;
+      lastAppUpdate = null;
       themeSync.dispose();
       if (globalThis.__t3Tools) globalThis.__t3Tools.healthy = false;
     }

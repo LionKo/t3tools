@@ -11,6 +11,9 @@ import { createErrorAlerts } from '../src/analytics/error-alerts.mjs';
 import { createAnalyticsEngine } from '../src/analytics/engine.mjs';
 import { formatLocalDay } from '../src/analytics/heatmap-health.mjs';
 import { createHttpServer } from '../src/host/http-server.mjs';
+import { buildClientBundle } from '../src/ui/bundle.mjs';
+import { buildFallbackHtml } from '../src/ui/fallback-page.mjs';
+import { runInNewContext } from 'node:vm';
 
 test('smart alerts ignore history, detect critical failures and bursts, deduplicate polling and coalesce cooldowns', () => {
   const monitor = createErrorAlerts(1000);
@@ -92,7 +95,7 @@ test('new error mutations share Host, Origin, token and JSON checks and reject G
   const server = createHttpServer({port:0,authToken:'secret',handleRpc:async(action,params)=>{actions.push([action,params]);return {action};}});
   const {port} = await server.listen();
   try {
-    for (const [path,action] of [['errors/ack','ackErrors'],['alerts/test','testAlert'],['t3/focus-thread','focusThread']]) {
+    for (const [path,action] of [['errors/ack','ackErrors'],['errors/resolve','resolveErrors'],['alerts/test','testAlert'],['t3/focus-thread','focusThread']]) {
       const url = 'http://127.0.0.1:'+port+'/api/'+path;
       const headers = {'Content-Type':'application/json','X-T3Tools-Token':'secret'};
       function send(method, extra) {
@@ -114,7 +117,7 @@ test('new error mutations share Host, Origin, token and JSON checks and reject G
       assert.equal((await post({'Content-Type':'text/plain'})).status,415);
       assert.equal((await (await post({})).json()).data.action,action);
     }
-    assert.equal(actions.length,3);
+    assert.equal(actions.length,4);
   } finally {await server.close();}
 });
 
@@ -172,4 +175,200 @@ test('high-severity alerts bypass warning cooldown on same model and failedRuns 
     store.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('resolving errors clears unread/red badge counts while keeping all error history inspectable across restarts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 't3-resolve-'));
+  const file = join(dir, 'store.sqlite');
+  let store = createTelemetryStore(file);
+  try {
+    const baseNow = +new Date(2026, 4, 10, 12, 0, 0);
+    const base = { accountId: 'acct', providerDriver: 'antigravity', modelId: 'gemini-4-neon', inputTokens: 100, outputTokens: 50 };
+    store.replaceSourceRequests('src-1', '1', [
+      { ...base, id: 'err-a1', timestampMs: baseNow - 3000, status: 'error', errorCode: 'eof', errorText: 'eof 1', nativeSessionId: 'nat-a', t3ThreadId: 'th-a', t3ThreadTitle: '对话 A' },
+      { ...base, id: 'err-a2', timestampMs: baseNow - 2000, status: 'success', retries: 1, errorCode: 'timeout', errorText: 'retry 1', nativeSessionId: 'nat-a', t3ThreadId: 'th-a', t3ThreadTitle: '对话 A' },
+      { ...base, id: 'err-b1', timestampMs: baseNow - 1000, status: 'error', errorCode: 'rate-limit', errorText: '429', nativeSessionId: 'nat-b', t3ThreadId: 'th-b', t3ThreadTitle: '对话 B' }
+    ]);
+    const adapter = { syncAll() {} };
+    const makeEngine = s => createAnalyticsEngine({
+      store: s,
+      settings: { get: () => DEFAULT_SETTINGS },
+      antigravityAdapter: adapter,
+      codexAdapter: adapter,
+      quotaAdapter: { readAllQuotas: () => ({ flatWindows: [] }) },
+      t3State: {}
+    });
+
+    let engine = makeEngine(store);
+    engine.tickAlerts(baseNow);
+    assert.equal(engine.getAlerts().unreadIncidents, 3);
+    assert.equal(engine.getAlerts().unreadCount, 2);
+
+    // 1. Resolve single item: red badge decrements, but all 3 error records remain visible
+    const itemRes = engine.resolveErrors({ scope: 'item', id: 'err-a1' }, baseNow);
+    assert.equal(itemRes.unreadCount, 1);
+    assert.equal(itemRes.unreadIncidents, 2);
+    let dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow });
+    assert.equal(dash.errorInsights.summary.totalErrors, 2);
+    assert.equal(dash.errorInsights.summary.totalIncidents, 3);
+    assert.equal(dash.errorInsights.summary.resolvedCount, 1);
+    assert.equal(dash.errorInsights.recentErrors.length, 3);
+    assert.equal(dash.errorInsights.recentErrors.find(r => r.id === 'err-a1').resolved, true);
+    assert.equal(dash.errorInsights.recentErrors.find(r => r.id === 'err-b1').resolved, false);
+
+    // 2. Resolve session: clears session unresolved count, keeps session card, new error in same session still triggers badge
+    const sessRes = engine.resolveErrors({ scope: 'session', sessionKey: 'th-a', t3ThreadId: 'th-a', nativeSessionId: 'nat-a' }, baseNow);
+    assert.equal(sessRes.unreadIncidents, 1);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow });
+    assert.equal(dash.errorInsights.affectedSessions.find(s => s.sessionKey === 'th-a').resolved, true);
+    assert.equal(dash.errorInsights.summary.activeBrokenThreads, 1);
+
+    store.replaceSourceRequests('src-2', '2', [
+      { ...base, id: 'err-a3', timestampMs: baseNow + 5000, status: 'error', errorCode: 'eof', errorText: 'new eof', nativeSessionId: 'nat-a', t3ThreadId: 'th-a', t3ThreadTitle: '对话 A' }
+    ]);
+    engine.tickAlerts(baseNow + 6000);
+    assert.equal(engine.getAlerts().unreadIncidents, 2);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 6000 });
+    assert.equal(dash.errorInsights.affectedSessions.find(s => s.sessionKey === 'th-a').resolved, false);
+
+    // 3. Resolve all (ack): clears red badge and broken-thread alarm while keeping all 4 errors inspectable
+    const allRes = engine.resolveErrors({ scope: 'all' }, baseNow + 7000);
+    assert.equal(allRes.unreadCount, 0);
+    assert.equal(allRes.unreadRecoveredCount, 0);
+    assert.equal(allRes.unreadIncidents, 0);
+    assert.equal(allRes.activeBrokenThreads, 0);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 7000 });
+    assert.equal(dash.errorInsights.summary.totalIncidents, 4);
+    assert.equal(dash.errorInsights.summary.resolvedCount, 4);
+    assert.equal(dash.errorInsights.summary.unreadIncidents, 0);
+    assert.equal(dash.errorInsights.summary.activeBrokenThreads, 0);
+    assert.equal(dash.errorInsights.affectedSessions.length, 2);
+    assert.ok(dash.errorInsights.affectedSessions.every(s => s.resolved));
+    assert.equal(dash.errorInsights.recentErrors.length, 4);
+    assert.ok(dash.errorInsights.recentErrors.every(r => r.resolved));
+
+    // 4. Persistence across store/engine restart
+    store.close();
+    store = createTelemetryStore(file);
+    engine = makeEngine(store);
+    engine.tickAlerts(baseNow + 8000);
+    assert.equal(engine.getAlerts().unreadIncidents, 0);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 8000 });
+    assert.equal(dash.errorInsights.summary.totalIncidents, 4);
+    assert.equal(dash.errorInsights.summary.resolvedCount, 4);
+
+    // 5. Newer error after resolve-all triggers unread badge again
+    store.replaceSourceRequests('src-3', '3', [
+      { ...base, id: 'err-new', timestampMs: baseNow + 10000, status: 'error', errorCode: 'timeout', errorText: 'fresh error', nativeSessionId: 'nat-c', t3ThreadId: 'th-c', t3ThreadTitle: '新对话' }
+    ]);
+    engine.tickAlerts(baseNow + 11000);
+    assert.equal(engine.getAlerts().unreadCount, 1);
+    assert.equal(engine.getAlerts().unreadIncidents, 1);
+    assert.equal(engine.getAlerts().activeBrokenThreads, 1);
+
+    // 6. Validation errors carry statusCode 400
+    assert.throws(() => engine.resolveErrors({ scope: 'item' }), err => err.statusCode === 400);
+    assert.throws(() => engine.resolveErrors({ scope: 'session' }), err => err.statusCode === 400);
+    assert.throws(() => engine.resolveErrors({ scope: 'bogus' }), err => err.statusCode === 400);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('injected overlay immediately clears red badge on ackErrors/resolveErrors while keeping error rows visible', async () => {
+  const html = buildFallbackHtml({ version: '0.1.0', authToken: 'tok' });
+  assert.match(html, /\/api\/errors\/resolve/);
+  assert.match(html, /全部标记已解决/);
+
+  const rpcCalls = [];
+  let unread = 3;
+  const listeners = new Map();
+  const makeEl = tag => ({
+    tagName: String(tag || 'DIV').toUpperCase(),
+    style: { setProperty() {}, removeProperty() {} },
+    setAttribute() {},
+    getAttribute() { return ''; },
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    attachShadow() { return { append(_, contentEl) { this.contentEl = contentEl; } }; },
+    appendChild(el) { el.isConnected = true; el.parentElement = this; },
+    remove() { this.isConnected = false; }
+  });
+  let createdOverlayContent = null;
+  const body = makeEl('body');
+  const context = {
+    document: {
+      body,
+      documentElement: { getAttribute: () => 'dark' },
+      createElement(tag) {
+        const el = makeEl(tag);
+        el.attachShadow = () => ({
+          append(_style, content) {
+            if (el.id === 't3tools-dashboard-overlay') {
+              createdOverlayContent = content;
+              content.addEventListener = (type, fn) => listeners.set(type, fn);
+            }
+          }
+        });
+        return el;
+      },
+      querySelector: () => null,
+      querySelectorAll: () => []
+    },
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+    location: { hash: '#/env/th', pathname: '/', search: '', href: 'http://localhost/' },
+    window: new EventTarget(),
+    MutationObserver: class { observe() {} disconnect() {} },
+    AbortController,
+    URLSearchParams,
+    clearTimeout() {},
+    setTimeout() { return 0; },
+    fetch: async (url, opts) => {
+      rpcCalls.push({ url, method: opts?.method || 'GET', body: opts?.body });
+      if (url.includes('/api/errors/ack')) {
+        unread = 0;
+        return { ok: true, json: async () => ({ ok: true, data: { ackTsMs: Date.now(), unreadCount: 0, unreadRecoveredCount: 0, unreadIncidents: 0, activeBrokenThreads: 0 } }) };
+      }
+      if (url.includes('/api/status')) {
+        return { ok: true, json: async () => ({ ok: true, data: { alerts: { unreadCount: unread, unreadRecoveredCount: 0, unreadIncidents: unread, activeBrokenThreads: unread ? 1 : 0 }, settings: {} } }) };
+      }
+      if (url.includes('/api/dashboard')) {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            data: {
+              summary: { models: [] },
+              quotas: { groups: [] },
+              anomalySummary: { total: 0 },
+              facets: { accounts: [] },
+              errorInsights: {
+                summary: { totalErrors: 3, totalRetriedRecovered: 0, totalIncidents: 3, unreadCount: unread, unreadRecoveredCount: 0, unreadIncidents: unread, resolvedCount: unread ? 0 : 3, activeBrokenThreads: unread ? 1 : 0, todayDay: '2026-11-25', scopeDay: '2026-11-25' },
+                dailyTrend: [], hourlyTrend: [], affectedSessions: [], recentErrors: [], failedRuns: []
+              }
+            }
+          })
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, data: { settings: {}, thread: { unresolved: true }, quotas: { groups: [] }, globalAlerts: { unreadCount: unread, unreadRecoveredCount: 0, unreadIncidents: unread } } }) };
+    }
+  };
+  runInNewContext(buildClientBundle({ transport: 'http', authToken: 'tok' }), context);
+  context.__t3Tools.openDashboard();
+  await new Promise(r => setTimeout(r, 20));
+  assert.ok(createdOverlayContent.innerHTML.includes('data-tone="danger">3</span>'));
+
+  const clickHandler = listeners.get('click');
+  const fakeBtn = {
+    disabled: false,
+    dataset: { errorAction: 'ack' },
+    closest(sel) { return sel.includes('data-error-action') ? this : null; }
+  };
+  await clickHandler({ target: fakeBtn });
+  await new Promise(r => setTimeout(r, 20));
+  assert.ok(rpcCalls.some(c => c.url.endsWith('/api/errors/ack') && c.method === 'POST'));
+  assert.ok(!createdOverlayContent.innerHTML.includes('data-tone="danger">3</span>'));
+  context.__t3Tools.dispose();
 });

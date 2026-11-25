@@ -1,5 +1,6 @@
 ﻿param(
-  [string]$OutExe = ""
+  [string]$OutExe = "",
+  [string]$Version = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -9,6 +10,18 @@ $distDir = Join-Path $root 'dist'
 if ([string]::IsNullOrWhiteSpace($OutExe)) {
   $OutExe = Join-Path $distDir 'T3Tools.exe'
 }
+if ([string]::IsNullOrWhiteSpace($Version)) {
+  $pkgPath = Join-Path $root 'package.json'
+  if (Test-Path -LiteralPath $pkgPath) {
+    $pkg = Get-Content -LiteralPath $pkgPath -Raw | ConvertFrom-Json
+    $Version = [string]$pkg.version
+  }
+}
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = '0.1.0' }
+$cleanSemver = ($Version -replace '^v', '')
+$numericParts = ($cleanSemver -replace '[-+].*$', '').Split('.')
+while ($numericParts.Length -lt 3) { $numericParts += '0' }
+$assemblyVer = "$($numericParts[0]).$($numericParts[1]).$($numericParts[2]).0"
 
 $OutExe = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutExe)
 $outDir = Split-Path -Parent $OutExe
@@ -132,7 +145,19 @@ $manifestXml = @'
 '@
 [System.IO.File]::WriteAllText($manifestPath, $manifestXml, [System.Text.Encoding]::UTF8)
 
-Write-Host "正在编译原生 Windows 托盘程序: $OutExe ..." -ForegroundColor Cyan
+Write-Host "正在编译原生 Windows 托盘程序: $OutExe (v$cleanSemver) ..." -ForegroundColor Cyan
+$asmInfoPath = Join-Path $env:TEMP ("T3ToolsAssemblyInfo-" + [Guid]::NewGuid().ToString('N') + ".cs")
+$asmInfoCs = @"
+using System.Reflection;
+[assembly: AssemblyTitle("T3Tools")]
+[assembly: AssemblyDescription("Windows T3 Code 原生增强插件与托盘宿主")]
+[assembly: AssemblyProduct("T3Tools")]
+[assembly: AssemblyVersion("$assemblyVer")]
+[assembly: AssemblyFileVersion("$assemblyVer")]
+[assembly: AssemblyInformationalVersion("$cleanSemver")]
+"@
+[System.IO.File]::WriteAllText($asmInfoPath, $asmInfoCs, [System.Text.Encoding]::UTF8)
+
 $cscArgs = @(
   '/nologo',
   '/target:winexe',
@@ -146,13 +171,20 @@ $cscArgs = @(
   '/r:System.Drawing.dll',
   '/r:System.Windows.Forms.dll',
   '/r:System.Web.Extensions.dll',
-  $srcFile
+  '/r:System.IO.Compression.dll',
+  '/r:System.IO.Compression.FileSystem.dll',
+  $srcFile,
+  $asmInfoPath
 )
 
-$output = & $csc @cscArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
-  $output | ForEach-Object { Write-Error $_ }
-  throw "编译 T3Tools.exe 失败（退出码 $LASTEXITCODE）"
+try {
+  $output = & $csc @cscArgs 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    $output | ForEach-Object { Write-Error $_ }
+    throw "编译 T3Tools.exe 失败（退出码 $LASTEXITCODE）"
+  }
+} finally {
+  Remove-Item -LiteralPath $asmInfoPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "编译成功: $OutExe ($([Math]::Round((Get-Item $OutExe).Length / 1KB, 1)) KB)" -ForegroundColor Green

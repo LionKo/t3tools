@@ -110,6 +110,101 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
     .pt-desktop-only-row { display: none !important; }
     body[data-desktop="true"] .pt-desktop-only-row { display: flex !important; }
 
+    /* App self-update banner & settings progress */
+    .side-ver-dot {
+      display: none;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--pt-accent, #6366f1);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--pt-accent, #6366f1) 24%, transparent);
+      margin-left: 2px;
+      flex: none;
+    }
+    .side-ver-dot.visible { display: inline-block; }
+    .pt-update-banner {
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 18px;
+      background: color-mix(in srgb, var(--pt-accent, #6366f1) 12%, var(--pt-card, #14161b));
+      border-bottom: 1px solid color-mix(in srgb, var(--pt-accent, #6366f1) 30%, var(--pt-border, rgba(255,255,255,.1)));
+      font-size: 12px;
+      line-height: 1.4;
+      flex: none;
+    }
+    .pt-update-banner.visible { display: flex; }
+    .pt-update-banner-main {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .pt-update-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: var(--pt-accent, #6366f1);
+      color: var(--pt-accent-fg, #fff);
+      flex: none;
+    }
+    .pt-update-summary {
+      color: var(--pt-fg, #f3f4f6);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pt-update-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: none;
+    }
+    .pt-update-progress {
+      width: 110px;
+      height: 6px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
+      overflow: hidden;
+      flex: none;
+    }
+    .pt-update-progress-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: 999px;
+      background: var(--pt-accent, #6366f1);
+      transition: width 180ms ease;
+    }
+    .pt-update-notes {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: var(--pt-surface, #1b1e25);
+      border: 1px solid var(--pt-border, rgba(255,255,255,.1));
+      color: var(--pt-muted, #9ca3af);
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      max-height: 120px;
+      overflow: auto;
+    }
+    .pt-mode-chip {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      font-size: 10.5px;
+      font-weight: 500;
+      background: color-mix(in srgb, var(--pt-fg, #fff) 8%, transparent);
+      color: var(--pt-muted, #9ca3af);
+    }
+
     /* Custom subtle scrollbars */
     ::-webkit-scrollbar { width: 7px; height: 7px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -133,6 +228,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           <span class="side-logo">T3</span>
           <span>T3Tools</span>
           <span class="side-ver">v${safeVersion}</span>
+          <span class="side-ver-dot" id="side-update-dot" title="发现新版本，点击前往设置更新"></span>
         </span>
       </div>
 
@@ -191,6 +287,22 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           <span class="top-toast" id="pt-shell-toast"></span>
         </div>
       </header>
+
+      <div class="pt-update-banner" id="pt-app-update-banner" role="status" aria-live="polite">
+        <div class="pt-update-banner-main">
+          <span class="pt-update-pill" id="pt-update-banner-pill">新版本</span>
+          <span class="pt-update-summary" id="pt-update-banner-text">发现 T3Tools 新版本</span>
+          <div class="pt-update-progress" id="pt-update-banner-progress" style="display:none;">
+            <div class="pt-update-progress-fill" id="pt-update-banner-fill"></div>
+          </div>
+        </div>
+        <div class="pt-update-actions">
+          <button type="button" class="pt-btn pt-btn-accent" id="pt-update-banner-install" data-pt-action="install-app-update">立即更新</button>
+          <button type="button" class="pt-btn" id="pt-update-banner-notes" data-pt-action="open-release-url">更新说明</button>
+          <button type="button" class="pt-btn" id="pt-update-banner-skip" data-pt-action="skip-app-update">跳过</button>
+          <button type="button" class="icon-btn" id="pt-update-banner-dismiss" data-pt-action="dismiss-app-update" title="本次暂不提醒" aria-label="本次暂不提醒">×</button>
+        </div>
+      </div>
 
       <div class="app-viewport" id="app-viewport">
         <!-- Magpie-style contextual page toolbar for data views (overview / models / requests) -->
@@ -380,6 +492,38 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
               </div>
             </div>
 
+            <div class="settings-group-title">应用更新</div>
+            <div class="pt-card">
+              <div class="setting-row" style="align-items:flex-start;">
+                <div style="min-width:0;flex:1;">
+                  <div class="setting-label">
+                    <span id="settings-update-heading">T3Tools v${safeVersion}</span>
+                    <span class="pt-mode-chip" id="settings-install-mode">检测中</span>
+                  </div>
+                  <div class="setting-desc" id="settings-update-sub">自动从 GitHub Releases 检查更新，点击即可完成校验与重启升级</div>
+                  <div class="pt-update-progress" id="settings-update-progress" style="display:none;width:220px;margin-top:8px;">
+                    <div class="pt-update-progress-fill" id="settings-update-fill"></div>
+                  </div>
+                  <div class="pt-update-notes" id="settings-update-notes" style="display:none;"></div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;flex:none;">
+                  <button type="button" class="pt-btn pt-btn-accent" id="settings-update-install-btn" data-pt-action="install-app-update" style="display:none;">立即更新</button>
+                  <button type="button" class="pt-btn" id="settings-update-check-btn" data-pt-action="check-app-update">检查更新</button>
+                  <button type="button" class="pt-btn" id="settings-update-release-btn" data-pt-action="open-release-url" style="display:none;">Release 页面</button>
+                </div>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">启动及后台自动检查更新</div>
+                  <div class="setting-desc">每隔 6 小时静默检查 GitHub Releases，发现新版本时通过托盘和顶栏通知</div>
+                </div>
+                <label class="pt-switch">
+                  <input type="checkbox" data-app-update-setting="autoCheck" checked />
+                  <span class="pt-switch-track"></span>
+                </label>
+              </div>
+            </div>
+
             <div class="settings-group-title">服务与控制</div>
             <div class="pt-card">
               <div class="setting-row">
@@ -533,6 +677,27 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       const settingsDaemonInfo = document.getElementById('settings-daemon-info');
       const badgeQuotasEl = document.getElementById('nav-badge-quotas');
       const badgeAnomEl = document.getElementById('nav-badge-anomalies');
+      const sideUpdateDotEl = document.getElementById('side-update-dot');
+      const updateBannerEl = document.getElementById('pt-app-update-banner');
+      const updateBannerPillEl = document.getElementById('pt-update-banner-pill');
+      const updateBannerTextEl = document.getElementById('pt-update-banner-text');
+      const updateBannerProgEl = document.getElementById('pt-update-banner-progress');
+      const updateBannerFillEl = document.getElementById('pt-update-banner-fill');
+      const updateBannerInstallEl = document.getElementById('pt-update-banner-install');
+      const updateBannerSkipEl = document.getElementById('pt-update-banner-skip');
+      const updateBannerDismissEl = document.getElementById('pt-update-banner-dismiss');
+      const settingsUpdHeadEl = document.getElementById('settings-update-heading');
+      const settingsUpdModeEl = document.getElementById('settings-install-mode');
+      const settingsUpdSubEl = document.getElementById('settings-update-sub');
+      const settingsUpdProgEl = document.getElementById('settings-update-progress');
+      const settingsUpdFillEl = document.getElementById('settings-update-fill');
+      const settingsUpdNotesEl = document.getElementById('settings-update-notes');
+      const settingsUpdInstallBtn = document.getElementById('settings-update-install-btn');
+      const settingsUpdCheckBtn = document.getElementById('settings-update-check-btn');
+      const settingsUpdReleaseBtn = document.getElementById('settings-update-release-btn');
+      let dismissedBannerVersion = '';
+      let fastUpdatePollTimer = null;
+      let shownJustUpdated = '';
 
       const viewOverviewEl = document.getElementById('view-overview');
       const viewQuotasEl = document.getElementById('view-quotas');
@@ -762,6 +927,168 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
                 ? 'var(--pt-accent, #6366f1)'
                 : 'var(--pt-muted, #9ca3af)';
         }
+        renderAppUpdateUi(statusData?.appUpdate, cfg.appUpdates);
+      }
+
+      function formatUpdateBytes(bytes) {
+        const n = Number(bytes) || 0;
+        if (n <= 0) return '';
+        if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+        return (n / (1024 * 1024)).toFixed(1) + ' MB';
+      }
+
+      function openReleaseUrl(url) {
+        const target = String(url || statusData?.appUpdate?.releaseUrl || 'https://github.com/LionKo/t3tools/releases');
+        if (hasWebViewBridge) {
+          postHostMessage({ action: 'openUrl', url: target });
+        } else {
+          window.open(target, '_blank', 'noopener,noreferrer');
+        }
+      }
+
+      function syncFastUpdatePoll(upd) {
+        const busy = upd && (upd.status === 'downloading' || upd.status === 'verifying' || upd.status === 'ready' || upd.status === 'checking');
+        if (busy && !fastUpdatePollTimer) {
+          fastUpdatePollTimer = setInterval(() => { fetchStatus(); }, 650);
+        } else if (!busy && fastUpdatePollTimer) {
+          clearInterval(fastUpdatePollTimer);
+          fastUpdatePollTimer = null;
+        }
+      }
+
+      function renderAppUpdateUi(upd, updCfg) {
+        const autoCheckEl = document.querySelector('[data-app-update-setting="autoCheck"]');
+        if (autoCheckEl && !pendingSettings.has('appUpdates.autoCheck')) {
+          autoCheckEl.checked = updCfg ? updCfg.autoCheck !== false : (upd ? upd.autoCheck !== false : true);
+        }
+        syncFastUpdatePoll(upd);
+        if (!upd) return;
+
+        if (upd.justUpdated?.toVersion && shownJustUpdated !== upd.justUpdated.toVersion) {
+          shownJustUpdated = upd.justUpdated.toVersion;
+          showToast('已自动更新至 T3Tools v' + upd.justUpdated.toVersion);
+        }
+
+        const hasNew = Boolean(upd.hasUpdate && upd.latestVersion);
+        const busy = upd.status === 'downloading' || upd.status === 'verifying' || upd.status === 'ready';
+        const modeLabel = upd.installMode === 'installed' ? '安装版' : upd.installMode === 'portable' ? '便携版' : '开发模式';
+        const sizeHint = formatUpdateBytes(upd.downloadSize);
+        const pct = Math.max(0, Math.min(100, Number(upd.progressPercent) || 0));
+
+        if (sideUpdateDotEl) {
+          sideUpdateDotEl.classList.toggle('visible', hasNew && !upd.isSkipped);
+        }
+
+        // 1. Top Update Banner
+        const showBanner = Boolean(
+          busy || (hasNew && !upd.isSkipped && dismissedBannerVersion !== upd.latestVersion)
+        );
+        if (updateBannerEl) {
+          updateBannerEl.classList.toggle('visible', showBanner);
+          if (showBanner) {
+            if (upd.status === 'downloading') {
+              updateBannerPillEl.textContent = '下载中 ' + pct + '%';
+              updateBannerTextEl.textContent = '正在下载 T3Tools v' + upd.latestVersion + (sizeHint ? '（' + sizeHint + '）' : '') + '...';
+              updateBannerProgEl.style.display = 'block';
+              updateBannerFillEl.style.width = pct + '%';
+              updateBannerInstallEl.disabled = true;
+              updateBannerInstallEl.textContent = '下载中...';
+              updateBannerSkipEl.style.display = 'none';
+              updateBannerDismissEl.style.display = 'none';
+            } else if (upd.status === 'verifying') {
+              updateBannerPillEl.textContent = '校验中';
+              updateBannerTextEl.textContent = '正在校验 SHA-256 完整性...';
+              updateBannerProgEl.style.display = 'block';
+              updateBannerFillEl.style.width = '98%';
+              updateBannerInstallEl.disabled = true;
+              updateBannerInstallEl.textContent = '校验中...';
+              updateBannerSkipEl.style.display = 'none';
+              updateBannerDismissEl.style.display = 'none';
+            } else if (upd.status === 'ready') {
+              updateBannerPillEl.textContent = '即将重启';
+              updateBannerTextEl.textContent = 'T3Tools v' + upd.latestVersion + ' 已校验就绪，正在自动替换并重启...';
+              updateBannerProgEl.style.display = 'block';
+              updateBannerFillEl.style.width = '100%';
+              updateBannerInstallEl.disabled = true;
+              updateBannerInstallEl.textContent = '正在重启...';
+              updateBannerSkipEl.style.display = 'none';
+              updateBannerDismissEl.style.display = 'none';
+            } else {
+              updateBannerPillEl.textContent = 'v' + upd.latestVersion;
+              const firstNote = String(upd.releaseNotes || '').split(/\\r?\\n/).map(s => s.trim()).find(Boolean) || '';
+              updateBannerTextEl.textContent =
+                '发现新版本 v' + upd.latestVersion +
+                (sizeHint ? '（' + sizeHint + '）' : '') +
+                (firstNote ? ' · ' + firstNote : '');
+              updateBannerProgEl.style.display = 'none';
+              updateBannerInstallEl.disabled = false;
+              updateBannerInstallEl.textContent = upd.canAutoUpdate ? '立即更新' : '前往下载';
+              updateBannerSkipEl.style.display = '';
+              updateBannerDismissEl.style.display = '';
+            }
+          }
+        }
+
+        // 2. Settings Update Card
+        if (settingsUpdHeadEl) {
+          settingsUpdHeadEl.textContent = 'T3Tools v' + (upd.currentVersion || boot.version);
+        }
+        if (settingsUpdModeEl) {
+          settingsUpdModeEl.textContent = modeLabel + (upd.hasBundledNode ? ' · 内置 Node' : '');
+        }
+        if (settingsUpdSubEl) {
+          if (upd.status === 'checking') {
+            settingsUpdSubEl.textContent = '正在检查 GitHub Releases 最新版本...';
+          } else if (upd.status === 'downloading') {
+            settingsUpdSubEl.textContent = '正在下载 v' + upd.latestVersion + '：' + pct + '%' + (sizeHint ? ' / ' + sizeHint : '');
+          } else if (upd.status === 'verifying') {
+            settingsUpdSubEl.textContent = '下载完成，正在校验 SHA-256 哈希...';
+          } else if (upd.status === 'ready') {
+            settingsUpdSubEl.textContent = '更新包已就绪，托盘程序正在接管替换并重启...';
+          } else if (upd.status === 'error' && upd.lastError) {
+            settingsUpdSubEl.textContent = '更新状态异常：' + upd.lastError;
+          } else if (hasNew) {
+            settingsUpdSubEl.textContent =
+              '发现新版本 v' + upd.latestVersion +
+              (sizeHint ? '（' + (upd.packageKind === 'full' ? '完整包 ' : '轻量更新 ') + sizeHint + '）' : '') +
+              (upd.canAutoUpdate ? ' · 点击「立即更新」自动升级并重启' : ' · ' + (upd.cannotUpdateReason || '请前往 GitHub 下载'));
+          } else if (upd.checkedAtMs) {
+            const t = new Date(upd.checkedAtMs);
+            const hh = String(t.getHours()).padStart(2, '0');
+            const mm = String(t.getMinutes()).padStart(2, '0');
+            settingsUpdSubEl.textContent = '已是最新版本（上次检查 ' + hh + ':' + mm + '）';
+          } else {
+            settingsUpdSubEl.textContent = upd.canAutoUpdate
+              ? '已启用自动更新，点击「检查更新」可立即检测最新版本'
+              : (upd.cannotUpdateReason || '点击「检查更新」检测 GitHub Releases 最新版本');
+          }
+        }
+        if (settingsUpdProgEl) {
+          settingsUpdProgEl.style.display = busy ? 'block' : 'none';
+          if (busy) settingsUpdFillEl.style.width = (upd.status === 'verifying' ? 98 : upd.status === 'ready' ? 100 : pct) + '%';
+        }
+        if (settingsUpdNotesEl) {
+          if (hasNew && upd.releaseNotes) {
+            settingsUpdNotesEl.textContent = upd.releaseNotes;
+            settingsUpdNotesEl.style.display = 'block';
+          } else {
+            settingsUpdNotesEl.style.display = 'none';
+          }
+        }
+        if (settingsUpdInstallBtn) {
+          settingsUpdInstallBtn.style.display = hasNew ? 'inline-flex' : 'none';
+          settingsUpdInstallBtn.disabled = busy;
+          settingsUpdInstallBtn.textContent = busy
+            ? (upd.status === 'downloading' ? '下载中 ' + pct + '%' : '正在更新...')
+            : (upd.canAutoUpdate ? '立即更新到 v' + upd.latestVersion : '前往下载');
+        }
+        if (settingsUpdCheckBtn) {
+          settingsUpdCheckBtn.disabled = busy || upd.status === 'checking';
+          settingsUpdCheckBtn.textContent = upd.status === 'checking' ? '检查中...' : '检查更新';
+        }
+        if (settingsUpdReleaseBtn) {
+          settingsUpdReleaseBtn.style.display = hasNew ? 'inline-flex' : 'none';
+        }
       }
 
       function syncNavBadges() {
@@ -914,15 +1241,35 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
       document.body.addEventListener('click', async e => {
         const target = e.target;
-        const open = async view => {
+        const open = async (view, opts = {}) => {
           switchView(view); await fetchDash();
-          if (view === 'models') viewModelsEl.querySelector('[data-error-center]')?.scrollIntoView({behavior:'smooth'});
+          if (view === 'models' && opts.scroll !== false) viewModelsEl.querySelector('[data-error-center]')?.scrollIntoView({behavior:'smooth'});
         };
         try {
           if (await handleErrorClick(e,state,{open,current:()=>activeView,toast:showToast,close:()=>{},rpc:async (action,params)=>{
-            const res = await postApi(action === 'ackErrors' ? '/api/errors/ack' : '/api/t3/focus-thread',params);
+            const pathMap = {
+              ackErrors: '/api/errors/ack',
+              resolveErrors: '/api/errors/resolve',
+              focusThread: '/api/t3/focus-thread'
+            };
+            const res = await postApi(pathMap[action] || '/api/t3/focus-thread',params);
             if (!res.ok) throw new Error(res.error);
-            if (action === 'ackErrors') await fetchStatus();
+            if (['ackErrors','resolveErrors'].includes(action)) {
+              if (res.data && typeof res.data.unreadCount === 'number') {
+                statusData = {
+                  ...(statusData || {}),
+                  alerts: {
+                    ...(statusData?.alerts || {}),
+                    unreadCount: res.data.unreadCount,
+                    unreadRecoveredCount: res.data.unreadRecoveredCount ?? 0,
+                    unreadIncidents: res.data.unreadIncidents ?? (res.data.unreadCount + (res.data.unreadRecoveredCount ?? 0)),
+                    activeBrokenThreads: res.data.activeBrokenThreads ?? 0
+                  }
+                };
+                renderShellStatus();
+              }
+              await fetchStatus();
+            }
             return res.data;
           }})) return;
         } catch (err) { showToast(err.message); return; }
@@ -970,6 +1317,58 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           return;
         }
         if (act === 'test-alert') { const res = await postApi('/api/alerts/test',{}); showToast(res.ok ? '已发送测试告警' : res.error); return; }
+        if (act === 'check-app-update') {
+          showToast('正在检查新版本...');
+          const res = await postApi('/api/app-update/check', {}).catch(() => null);
+          if (res?.ok && res.data) {
+            statusData = { ...(statusData || {}), appUpdate: res.data };
+            dismissedBannerVersion = '';
+            renderShellStatus();
+            if (res.data.lastError) showToast(res.data.lastError);
+            else if (res.data.hasUpdate) showToast('发现新版本 v' + res.data.latestVersion);
+            else showToast('当前已是最新版本');
+          } else {
+            showToast(res?.error || '检查更新失败');
+          }
+          return;
+        }
+        if (act === 'install-app-update') {
+          const upd = statusData?.appUpdate;
+          if (upd && !upd.canAutoUpdate) {
+            openReleaseUrl(upd.releaseUrl);
+            return;
+          }
+          showToast('正在下载并校验更新...');
+          const res = await postApi('/api/app-update/install', {}).catch(() => null);
+          const payload = res?.data;
+          if (payload?.status) {
+            statusData = { ...(statusData || {}), appUpdate: payload.status };
+            renderShellStatus();
+          }
+          if (!res?.ok || payload?.ok === false) {
+            showToast(payload?.error || res?.error || '启动更新失败');
+          }
+          return;
+        }
+        if (act === 'skip-app-update') {
+          const ver = statusData?.appUpdate?.latestVersion || '';
+          const res = await postApi('/api/app-update/skip', { version: ver }).catch(() => null);
+          if (res?.ok && res.data) {
+            statusData = { ...(statusData || {}), appUpdate: res.data };
+            renderShellStatus();
+            showToast('已跳过版本 v' + ver);
+          }
+          return;
+        }
+        if (act === 'dismiss-app-update') {
+          dismissedBannerVersion = statusData?.appUpdate?.latestVersion || '';
+          renderShellStatus();
+          return;
+        }
+        if (act === 'open-release-url') {
+          openReleaseUrl(statusData?.appUpdate?.releaseUrl);
+          return;
+        }
         if (act === 'open-errors') {
           Object.assign(state,{errorSession:'',preset:'all',errorModel:'',errorCode:'all',day:'',account:'all'});
           await open('models'); return;
@@ -1101,6 +1500,12 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           else if (e.target.type === 'number' && statusData?.settings?.alertConfig) {
             e.target.value = statusData.settings.alertConfig[key] / (key.endsWith('Ms') ? 1000 : 1);
           }
+          return;
+        }
+        if (e.target.dataset.appUpdateSetting) {
+          const key = e.target.dataset.appUpdateSetting;
+          const value = Boolean(e.target.checked);
+          if (await saveSetting('appUpdates.' + key, { appUpdates: { [key]: value } })) showToast('设置已保存');
           return;
         }
         const settingEl = e.target.closest?.('[data-pt-setting]');

@@ -1,10 +1,26 @@
 ﻿import { formatLocalDay } from './heatmap-health.mjs';
 
-export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs = 0, now = Date.now()) {
+export function isErrorResolved(item, ackTsMs = 0, resolvedState = null) {
+  if (!item) return false;
+  const ts = Number(item.timestampMs ?? item.createdAtMs ?? 0);
+  if (ackTsMs > 0 && ts <= ackTsMs) return true;
+  if (!resolvedState) return false;
+  if (item.id && resolvedState.ids?.has(String(item.id))) return true;
+  if (resolvedState.sessions?.size) {
+    for (const key of [item.t3ThreadId, item.nativeSessionId, item.sessionKey]) {
+      if (!key) continue;
+      const cutoff = resolvedState.sessions.get(String(key));
+      if (cutoff != null && ts <= cutoff) return true;
+    }
+  }
+  return false;
+}
+
+export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs = 0, now = Date.now(), resolvedState = null) {
   const sessions = new Map(), days = new Map(), hours = new Map(), successes = new Map();
   const recentErrors = [], byCode = Object.create(null), byCodeRecovered = Object.create(null);
   let totalErrors = 0, totalRetried = 0, totalRetriedRecovered = 0;
-  let unreadCount = 0, unreadRecoveredCount = 0;
+  let unreadCount = 0, unreadRecoveredCount = 0, resolvedCount = 0;
 
   const includeRetried = ![false, 'false', '0'].includes(query.includeRetried);
   const onlyToday = ![false, 'false', '0'].includes(query.errorOnlyToday);
@@ -37,14 +53,17 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
 
     if (effectiveDay && effectiveDay !== date) continue;
 
+    const resolved = isErrorResolved(r, ackTsMs, resolvedState);
+    if (resolved) resolvedCount++;
+
     if (failed) {
       totalErrors++;
       byCode[code] = (byCode[code] || 0) + 1;
-      if (r.timestampMs > ackTsMs) unreadCount++;
+      if (!resolved) unreadCount++;
     } else if (recoveredRetry) {
       totalRetriedRecovered++;
       byCodeRecovered[code] = (byCodeRecovered[code] || 0) + 1;
-      if (r.timestampMs > ackTsMs) unreadRecoveredCount++;
+      if (!resolved) unreadRecoveredCount++;
     }
     if ((r.retries || 0) > 0) totalRetried++;
 
@@ -56,7 +75,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
     else hourBucket.recovered++;
     hourBucket.byCode[code] = (hourBucket.byCode[code] || 0) + 1;
 
-    if (recentErrors.length < 50) recentErrors.push(r);
+    if (recentErrors.length < 50) recentErrors.push({ ...r, resolved });
     if (!key) continue;
     const session = sessions.get(key) || {
       sessionKey: key,
@@ -68,6 +87,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
       errorCount: 0,
       recoveredCount: 0,
       incidentCount: 0,
+      unresolvedCount: 0,
       retryCount: 0,
       lastErrorAtMs: r.timestampMs,
       latestErrorCode: code,
@@ -81,6 +101,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
     if (failed) session.errorCount++;
     else if (recoveredRetry) session.recoveredCount++;
     session.incidentCount++;
+    if (!resolved) session.unresolvedCount++;
     session.retryCount += r.retries || 0;
     session.firstErrorAtMs = r.timestampMs;
     session.errorCodes[code] = (session.errorCodes[code] || 0) + 1;
@@ -98,8 +119,9 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
     s.lastSuccessAfterErrorAtMs = success > s.lastErrorAtMs ? success : null;
     if (s.lastSuccessAfterErrorAtMs) s.state = 'recovered';
     s.onlyRecoveredRetry = s.errorCount === 0 && s.recoveredCount > 0;
+    s.resolved = s.unresolvedCount === 0;
   }
-  const stateRank = s => (s.state === 'failing' ? 2 : s.onlyRecoveredRetry ? 1 : 0);
+  const stateRank = s => (s.resolved ? -1 : s.state === 'failing' ? 2 : s.onlyRecoveredRetry ? 1 : 0);
   affectedSessions.sort((a, b) => stateRank(b) - stateRank(a) || b.lastErrorAtMs - a.lastErrorAtMs);
 
   const hourlyTrend = [...hours.values()].sort((a, b) => a.hour.localeCompare(b.hour));
@@ -113,6 +135,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
       unreadCount,
       unreadRecoveredCount,
       unreadIncidents: unreadCount + unreadRecoveredCount,
+      resolvedCount,
       ackTsMs,
       todayDay,
       scopeDay: effectiveDay,
@@ -120,7 +143,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
       byCode,
       byCodeRecovered,
       affectedThreads: sessions.size,
-      activeBrokenThreads: affectedSessions.filter(s => s.state === 'failing').length
+      activeBrokenThreads: affectedSessions.filter(s => s.state === 'failing' && !s.resolved).length
     },
     dailyTrend: [...days.values()].reverse(),
     hourlyTrend,

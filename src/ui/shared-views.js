@@ -316,6 +316,10 @@ const PT_SHARED_CSS = `
 .pt-error-detail.is-recovered {
   border-left: 3px solid var(--pt-warning, #f59e0b);
 }
+.pt-error-detail.is-resolved {
+  border-left: 3px solid var(--pt-success, #22c55e);
+  opacity: 0.84;
+}
 .pt-error-legend {
   display: inline-flex;
   align-items: center;
@@ -3136,6 +3140,42 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
     triggerTitleParts.push(versionSummary);
   }
 
+  const appUpdate = live?.appUpdate && typeof live.appUpdate === 'object' ? live.appUpdate : null;
+  const dismissedAppVer = String(options.dismissedAppUpdateVer || '').trim();
+  const appUpdateBusy = Boolean(appUpdate && ['downloading', 'verifying', 'ready'].includes(appUpdate.status));
+  const showAppUpdateBanner = Boolean(
+    appUpdate &&
+    appUpdate.hasUpdate &&
+    appUpdate.latestVersion &&
+    (appUpdateBusy || (!appUpdate.isSkipped && dismissedAppVer !== appUpdate.latestVersion))
+  );
+
+  let appUpdateRowHtml = '';
+  if (showAppUpdateBanner) {
+    const ver = String(appUpdate.latestVersion);
+    const pct = Math.max(0, Math.min(100, Number(appUpdate.progressPercent) || 0));
+    const appLabel = appUpdate.status === 'downloading'
+      ? `T3Tools 更新中 ${pct}%`
+      : (appUpdate.status === 'verifying' || appUpdate.status === 'ready')
+        ? 'T3Tools 正在重启更新...'
+        : `T3Tools v${ver} 可更新`;
+    const appTip = appUpdate.canAutoUpdate
+      ? `T3Tools v${appUpdate.currentVersion || '?'} → v${ver} · 点击立即自动更新并重启`
+      : `T3Tools v${appUpdate.currentVersion || '?'} → v${ver} · 点击前往 GitHub Releases 下载`;
+    const dismissBtn = appUpdateBusy
+      ? ''
+      : `<button type="button" class="pt-sidebar-update-dismiss" data-pt-action="dismiss-app-update" data-pt-app-ver="${esc(ver)}" title="忽略当前版本提醒" aria-label="忽略当前版本提醒">×</button>`;
+    appUpdateRowHtml = `
+      <div class="pt-sidebar-update-row" data-pt-app-update="${esc(ver)}">
+        <button type="button" class="pt-sidebar-update-btn" data-pt-action="install-app-update" title="${esc(appTip)}">
+          <span class="pt-sidebar-update-dot" aria-hidden="true"></span>
+          <span class="pt-sidebar-update-text">${appUpdateBusy ? '↻' : '↑'} ${esc(appLabel)}</span>
+        </button>
+        ${dismissBtn}
+      </div>
+    `;
+  }
+
   let updateRowHtml = '';
   if (showUpdateBanner) {
     const label = updatable.length === 1
@@ -3174,6 +3214,7 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
 
   return `
     <div class="pt-sidebar-stack">
+      ${appUpdateRowHtml}
       ${updateRowHtml}
       <button type="button" class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="${esc(triggerTitle)}" aria-label="${esc(triggerTitle)}">
         <span class="pt-sidebar-logo" data-state="${esc(badgeState)}" aria-hidden="true">
@@ -4945,18 +4986,21 @@ function renderDashboardHtml(data, uiState, {
     </div>
   `;
 }
-function errorButton(action, text, attrs = {}) {
-  return '<button type="button" class="pt-btn" data-error-action="' + action + '" ' +
-    Object.entries(attrs).map(([k,v]) => 'data-' + k + '="' + esc(v || '') + '"').join(' ') + '>' + esc(text) + '</button>';
+function errorButton(action, text, attrs = {}, extraClass = '', disabled = false) {
+  const cls = extraClass ? 'pt-btn ' + extraClass : 'pt-btn';
+  const attrStr = Object.entries(attrs).map(([k,v]) => 'data-' + k + '="' + esc(v || '') + '"').join(' ');
+  return '<button type="button" class="' + cls + '" data-error-action="' + action + '"' +
+    (attrStr ? ' ' + attrStr : '') + (disabled ? ' disabled' : '') + '>' + esc(text) + '</button>';
 }
 function errorDiagnostic(r, data, { compact = false } = {}) {
   const isFailed = r.status === 'error';
+  const isResolved = Boolean(r.resolved);
   const label = ERROR_CODE_LABELS[r.errorCode] || r.errorCode || '其他错误';
   const statusTag = isFailed ? `失败 · ${label}` : `重试恢复×${r.retries || 1} · ${label}`;
   const session = r.t3ThreadId || r.nativeSessionId || '';
   const title = r.t3ThreadTitle || session;
   const metadata = [fmtTime(r.timestampMs), r.accountId, r.modelRaw || r.modelId, r.t3ThreadId, r.nativeSessionId,
-    isFailed ? '结果: 失败' : '结果: 重试后恢复', '重试 ' + (r.retries || 0), '耗时 ' + fmtDuration(r.durationMs), '首字 ' + fmtDuration(r.ttftMs)].filter(Boolean).join(' · ');
+    isFailed ? '结果: 失败' : '结果: 重试后恢复', isResolved ? '处理状态: 已解决' : '', '重试 ' + (r.retries || 0), '耗时 ' + fmtDuration(r.durationMs), '首字 ' + fmtDuration(r.ttftMs)].filter(Boolean).join(' · ');
   const alternatives = (data?.errorInsights?.healthyAlternatives || []).filter(m => m !== r.modelId);
   const advice = r.errorCode === 'rate-limit'
     ? `<span>触发限流，建议切换至有余量的账号：</span> ${errorButton('quotas','查看账号额度 →')}`
@@ -4966,10 +5010,12 @@ function errorDiagnostic(r, data, { compact = false } = {}) {
         ? `<span>建议检查网络/重试，或临时切换至健康模型：<strong class="pt-mono">${esc(alternatives.slice(0, 3).join('、'))}</strong></span>`
         : '<span>建议检查网络连接、代理节点与上游服务状态后重试。</span>';
   const preview = (r.errorText || '').slice(0, compact ? 64 : 110);
+  const detailCls = isResolved ? 'is-resolved' : isFailed ? 'is-error' : 'is-recovered';
+  const statusBadgeCls = isResolved ? 'pt-badge-muted' : isFailed ? 'pt-badge-err' : 'pt-badge-warn';
   const summaryHtml = compact
     ? `<summary title="展开查看完整报错与诊断">${esc(preview || '查看报错详情')}</summary>`
-    : `<summary title="点击展开完整报错与诊断"><span class="pt-mono pt-muted">${esc(fmtTime(r.timestampMs))}</span> · <strong class="pt-mono">${esc(r.modelId)}</strong> · <span>${esc(title)}</span> <span class="pt-badge ${isFailed ? 'pt-badge-err' : 'pt-badge-warn'}">${esc(statusTag)}</span> <span class="pt-muted">${esc(preview)}</span></summary>`;
-  return `<details class="pt-error-detail ${isFailed ? 'is-error' : 'is-recovered'}">${summaryHtml}
+    : `<summary title="点击展开完整报错与诊断"><span class="pt-mono pt-muted">${esc(fmtTime(r.timestampMs))}</span> · <strong class="pt-mono">${esc(r.modelId)}</strong> · <span>${esc(title)}</span> ${isResolved ? '<span class="pt-badge pt-badge-ok">已解决</span> ' : ''}<span class="pt-badge ${statusBadgeCls}">${esc(statusTag)}</span> <span class="pt-muted">${esc(preview)}</span></summary>`;
+  return `<details class="pt-error-detail ${detailCls}">${summaryHtml}
     <pre>${esc(r.errorText || '未记录错误文本')}</pre>
     <div class="pt-error-detail-meta pt-mono">${esc(metadata)}</div>
     <div class="pt-error-detail-meta">${advice}</div>
@@ -4977,6 +5023,7 @@ function errorDiagnostic(r, data, { compact = false } = {}) {
       ${errorButton('copy','复制诊断摘要', { text: [metadata, title, statusTag, r.errorText].filter(Boolean).join('\n') })}
       ${errorButton('focus','前往 T3 Code 对话',{ thread: r.t3ThreadId, title })}
       ${compact ? '' : errorButton('record','在请求明细中查看',{ session, model: r.modelId, code: r.errorCode, id: r.id })}
+      ${compact || !r.id || isResolved ? '' : errorButton('resolve-item','标记已解决',{ id: r.id })}
     </div>
   </details>`;
 }
@@ -4998,14 +5045,18 @@ function renderErrorTracker(data, state = {}) {
   const totalIncidents = summary.totalIncidents ?? (summary.totalErrors + (summary.totalRetriedRecovered || 0));
   const recoveredTotal = summary.totalRetriedRecovered || 0;
   const unreadTotal = summary.unreadIncidents ?? summary.unreadCount ?? 0;
-  const unreadTone = (summary.unreadCount || 0) > 0 ? 'pt-badge-err' : unreadTotal > 0 ? 'pt-badge-warn' : 'pt-badge-ok';
+  const hasUnresolvedFailed = (summary.unreadCount || 0) > 0;
+  const hasUnresolvedRecovered = (summary.unreadRecoveredCount || 0) > 0;
+  const hasUnresolvedRuns = Boolean(info.failedRuns?.some(a => !a.resolved));
+  const canResolveAll = unreadTotal > 0 || hasUnresolvedRuns;
+  const unreadTone = hasUnresolvedFailed ? 'pt-badge-err' : unreadTotal > 0 ? 'pt-badge-warn' : 'pt-badge-ok';
   const unreadBadge = unreadTotal > 0
-    ? `<span class="pt-badge ${unreadTone} pt-mono" title="未读失败 ${summary.unreadCount || 0} · 未读重试恢复 ${summary.unreadRecoveredCount || 0}">${unreadTotal} 未读</span>`
-    : `<span class="pt-badge pt-badge-ok">无未读</span>`;
+    ? `<span class="pt-badge ${unreadTone} pt-mono" title="待处理失败 ${summary.unreadCount || 0} · 待处理重试恢复 ${summary.unreadRecoveredCount || 0}">${unreadTotal} 待处理</span>`
+    : `<span class="pt-badge pt-badge-ok">${totalIncidents > 0 ? '已全部解决' : '无异常'}</span>`;
   const countSplitBadges = `
-    <span class="pt-badge pt-badge-muted pt-mono" title="失败与重试恢复合计">共 ${totalIncidents}</span>
-    <span class="pt-badge ${summary.totalErrors > 0 ? 'pt-badge-err' : 'pt-badge-muted'} pt-mono">失败 ${summary.totalErrors}</span>
-    <span class="pt-badge ${recoveredTotal > 0 ? 'pt-badge-warn' : 'pt-badge-muted'} pt-mono">重试恢复 ${recoveredTotal}</span>
+    <span class="pt-badge pt-badge-muted pt-mono" title="失败与重试恢复合计（历史记录保留可查）">共 ${totalIncidents}</span>
+    <span class="pt-badge ${hasUnresolvedFailed ? 'pt-badge-err' : 'pt-badge-muted'} pt-mono">失败 ${summary.totalErrors}</span>
+    <span class="pt-badge ${hasUnresolvedRecovered ? 'pt-badge-warn' : 'pt-badge-muted'} pt-mono">重试恢复 ${recoveredTotal}</span>
   `;
   const emptyHint = onlyToday
     ? '今日暂无异常'
@@ -5029,7 +5080,7 @@ function renderErrorTracker(data, state = {}) {
           <input type="checkbox" data-pt-filter="includeRetried" ${state.includeRetried !== false ? 'checked' : ''} />
           <span>含重试恢复</span>
         </label>
-        ${errorButton('ack','全部已读')}
+        ${errorButton('ack', canResolveAll ? '全部标记已解决' : '已全部解决', {}, canResolveAll ? 'pt-btn-accent' : '', !canResolveAll)}
         ${errorButton('requests','请求明细 →')}
       </div>
     </div>
@@ -5065,15 +5116,16 @@ function renderErrorTracker(data, state = {}) {
       </div>
       ${affectedSessions.length ? `<div class="pt-session-list">${affectedSessions.map(s => {
         const isOnlyRetry = Boolean(s.onlyRecoveredRetry || (s.errorCount === 0 && (s.recoveredCount || 0) > 0));
-        const cardCls = s.state === 'failing' ? 'failing' : isOnlyRetry ? 'retried' : '';
-        const stateCls = s.state === 'failing' ? 'pt-badge-err' : isOnlyRetry ? 'pt-badge-warn' : 'pt-badge-ok';
-        const stateText = s.state === 'failing' ? '持续异常中' : isOnlyRetry ? '重试恢复' : '已恢复';
+        const isResolved = Boolean(s.resolved);
+        const cardCls = isResolved ? '' : s.state === 'failing' ? 'failing' : isOnlyRetry ? 'retried' : '';
+        const stateCls = isResolved ? 'pt-badge-ok' : s.state === 'failing' ? 'pt-badge-err' : isOnlyRetry ? 'pt-badge-warn' : 'pt-badge-ok';
+        const stateText = isResolved ? '已解决' : s.state === 'failing' ? '持续异常中' : isOnlyRetry ? '重试恢复' : '已恢复';
         const sRecovered = s.recoveredCount || 0;
         const sTotal = s.incidentCount || (s.errorCount + sRecovered);
         const codeStats = s.errorCodeStats || {};
         const codeBadges = Object.entries(s.errorCodes || {}).map(([k, n]) => {
           const st = codeStats[k] || { failed: s.errorCount > 0 ? n : 0, recovered: 0, total: n };
-          const cls = st.failed > 0 ? 'pt-badge-err' : 'pt-badge-warn';
+          const cls = isResolved ? 'pt-badge-muted' : st.failed > 0 ? 'pt-badge-err' : 'pt-badge-warn';
           const text = st.failed > 0 && st.recovered > 0
             ? `${ERROR_CODE_LABELS[k] || k} ${st.failed}+${st.recovered}↻`
             : st.failed > 0
@@ -5089,8 +5141,8 @@ function renderErrorTracker(data, state = {}) {
           </div>
           <div class="pt-muted pt-mono" style="font-size:10.5px;">${esc(fmtTime(s.lastErrorAtMs))} · ${esc(s.models.join('、'))} · ${esc(s.accountId)} · 共 ${sTotal} 次</div>
           <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
-            ${s.errorCount > 0 ? `<span class="pt-badge pt-badge-err pt-mono">失败 ${s.errorCount}</span>` : ''}
-            ${sRecovered > 0 ? `<span class="pt-badge pt-badge-warn pt-mono">重试恢复 ${sRecovered}</span>` : ''}
+            ${s.errorCount > 0 ? `<span class="pt-badge ${isResolved ? 'pt-badge-muted' : 'pt-badge-err'} pt-mono">失败 ${s.errorCount}</span>` : ''}
+            ${sRecovered > 0 ? `<span class="pt-badge ${isResolved ? 'pt-badge-muted' : 'pt-badge-warn'} pt-mono">重试恢复 ${sRecovered}</span>` : ''}
             ${codeBadges}
           </div>
           ${s.latestErrorText ? `<div class="pt-muted" style="font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(s.latestErrorText)}">${esc(s.latestErrorText.slice(0,110))}</div>` : ''}
@@ -5098,6 +5150,7 @@ function renderErrorTracker(data, state = {}) {
             ${errorButton('session','筛选报错',{session:s.sessionKey})}
             ${errorButton('focus','前往对话',{thread:s.t3ThreadId,title:s.title})}
             ${errorButton('all','查看全部请求',{session:s.sessionKey})}
+            ${isResolved ? '' : errorButton('resolve-session','标记已解决',{session:s.sessionKey,thread:s.t3ThreadId || '',native:s.nativeSessionId || '',ts:String(s.lastErrorAtMs || 0)})}
           </div>
         </article>`;
       }).join('')}</div>` : `<div class="pt-muted" style="padding:6px 2px;">${esc(onlyToday ? '今日暂无受影响对话' : '暂无受影响对话')}</div>`}
@@ -5105,13 +5158,16 @@ function renderErrorTracker(data, state = {}) {
 
     ${info.failedRuns?.length ? `<div>
       <div class="pt-tracker-subhead"><span>T3 会话运行失败 (${info.failedRuns.length})</span></div>
-      <div class="pt-session-list">${info.failedRuns.map(a => `<article class="pt-session-card failing">
+      <div class="pt-session-list">${info.failedRuns.map(a => `<article class="pt-session-card ${a.resolved ? '' : 'failing'}">
         <div class="pt-session-top">
-          <span class="pt-badge pt-badge-err">会话失败</span>
+          <span class="pt-badge ${a.resolved ? 'pt-badge-ok' : 'pt-badge-err'}">${a.resolved ? '已解决' : '会话失败'}</span>
           <span class="pt-session-title">${esc(a.t3ThreadTitle || a.t3ThreadId)}</span>
         </div>
         <div class="pt-muted pt-mono" style="font-size:10.5px;">${esc(fmtTime(a.createdAtMs))} · ${esc(a.modelId || '未知模型')}</div>
-        <div class="pt-session-actions">${errorButton('focus','前往对话',{thread:a.t3ThreadId,title:a.t3ThreadTitle || a.t3ThreadId})}</div>
+        <div class="pt-session-actions">
+          ${errorButton('focus','前往对话',{thread:a.t3ThreadId,title:a.t3ThreadTitle || a.t3ThreadId})}
+          ${a.resolved ? '' : errorButton('resolve-item','标记已解决',{id:a.resolveId || a.id || ''})}
+        </div>
       </article>`).join('')}</div>
     </div>` : ''}
 
@@ -5150,9 +5206,11 @@ async function copyTextSafe(text) {
 async function handleErrorClick(e, state, ui) {
   const el = e.target.closest?.('[data-error-action],[data-pt-heatmap-day]');
   if (!el) return false;
+  if (el.disabled) return true;
   const d = el.dataset;
   const action = d.errorAction;
   let view = 'models';
+  let scrollToErrorCenter = true;
   if (action === 'focus') {
     const result = d.thread ? await ui.rpc('focusThread',{threadId:d.thread,title:d.title}) : null;
     if (result?.focused) {
@@ -5171,7 +5229,24 @@ async function handleErrorClick(e, state, ui) {
   }
   if (action === 'ack') {
     await ui.rpc('ackErrors',{});
-    ui.toast('已将当前模型错误全部标为已读');
+    ui.toast('已全部标记为已解决，红点已消除');
+    scrollToErrorCenter = false;
+  }
+  if (action === 'resolve-session') {
+    await ui.rpc('resolveErrors',{
+      scope: 'session',
+      sessionKey: d.session || '',
+      t3ThreadId: d.thread || '',
+      nativeSessionId: d.native || '',
+      upToTsMs: Number(d.ts) || 0
+    });
+    ui.toast('已将该对话报错标记为已解决');
+    scrollToErrorCenter = false;
+  }
+  if (action === 'resolve-item') {
+    await ui.rpc('resolveErrors',{ scope: 'item', id: d.id || '' });
+    ui.toast('已将该条报错标记为已解决');
+    scrollToErrorCenter = false;
   }
   if (action === 'quotas') view = 'quotas';
   if (action !== 'clear' || d.key !== 'requestId') state.requestId = '';
@@ -5198,6 +5273,6 @@ async function handleErrorClick(e, state, ui) {
     if (action === 'record') Object.assign(state,{requestId:d.id,detailId:d.id,errorCode:d.code || 'all',status:'error_or_retried'});
   }
   state.page = 1;
-  await ui.open(view);
+  await ui.open(view, { scroll: scrollToErrorCenter });
   return true;
 }

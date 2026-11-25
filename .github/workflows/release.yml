@@ -1,0 +1,129 @@
+name: Release Windows Installer & Auto-Update
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0). Defaults to package.json version.'
+        required: false
+        default: ''
+      notes:
+        description: 'Optional release notes summary for latest.json'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark GitHub release as prerelease'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.16.0'
+
+      - name: Resolve and verify version
+        id: ver
+        shell: pwsh
+        run: |
+          $pkg = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
+          $pkgVer = ([string]$pkg.version).Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tagName = $env:GITHUB_REF_NAME
+            $tagVer = $tagName.TrimStart('v')
+            if ($tagVer -ne $pkgVer) {
+              throw "Tag ($tagName) does not match package.json version ($pkgVer). Please bump package.json first."
+            }
+            $ver = $tagVer
+          } else {
+            $inputVer = "${{ inputs.version }}".Trim().TrimStart('v')
+            $ver = if ($inputVer) { $inputVer } else { $pkgVer }
+            $tagName = "v$ver"
+          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building release $tagName (version=$ver)"
+
+      - name: Run full test suite
+        shell: pwsh
+        run: node --test tests/*.test.mjs
+
+      - name: Generate release notes for latest.json
+        shell: pwsh
+        run: |
+          $custom = @"
+          ${{ inputs.notes }}
+          "@.Trim()
+          if (-not [string]::IsNullOrWhiteSpace($custom)) {
+            [System.IO.File]::WriteAllText('dist/release-notes.txt', $custom, [System.Text.Encoding]::UTF8)
+            exit 0
+          }
+          $prevTag = git describe --tags --abbrev=0 HEAD^ 2>$null
+          if ($prevTag) {
+            $commits = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges | Select-Object -First 15
+          } else {
+            $commits = git log -n 10 --pretty=format:"- %s" --no-merges
+          }
+          $text = if ($commits) { ($commits -join "`n") } else { "T3Tools v${{ steps.ver.outputs.version }}" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          [System.IO.File]::WriteAllText('dist/release-notes.txt', $text, [System.Text.Encoding]::UTF8)
+
+      - name: Build Windows installer, portable zip, delta app zip & latest.json
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
+            -Version "${{ steps.ver.outputs.version }}" `
+            -NodeVersion "22.16.0" `
+            -RepoSlug "${{ github.repository }}" `
+            -NotesFile "dist/release-notes.txt"
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          $required = @(
+            "dist/release/T3Tools-Setup-v$ver-win-x64.exe",
+            "dist/release/T3Tools-v$ver-win-x64-portable.zip",
+            "dist/release/T3Tools-v$ver-app.zip",
+            "dist/release/latest.json",
+            "dist/release/SHA256SUMS.txt"
+          )
+          foreach ($f in $required) {
+            if (-not (Test-Path -LiteralPath $f)) {
+              throw "Missing expected release artifact: $f"
+            }
+          }
+          # Smoke-test extracted portable runtime
+          $smokeDir = "dist/smoke"
+          Expand-Archive -LiteralPath "dist/release/T3Tools-v$ver-win-x64-portable.zip" -DestinationPath $smokeDir -Force
+          & "$smokeDir/runtime/node.exe" "$smokeDir/app/bin/t3tools.mjs" doctor | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Portable runtime smoke test failed" }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: T3Tools ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ inputs.prerelease == true }}
+          files: |
+            dist/release/T3Tools-Setup-v*.exe
+            dist/release/T3Tools-v*-win-x64-portable.zip
+            dist/release/T3Tools-v*-app.zip
+            dist/release/latest.json
+            dist/release/SHA256SUMS.txt
