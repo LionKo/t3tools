@@ -949,12 +949,38 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       function syncFastUpdatePoll(upd) {
         const busy = upd && (upd.status === 'downloading' || upd.status === 'verifying' || upd.status === 'ready' || upd.status === 'checking');
         if (busy && !fastUpdatePollTimer) {
-          fastUpdatePollTimer = setInterval(() => { fetchStatus(); }, 650);
+          let inFlight = false;
+          let consecutiveErrors = 0;
+          const scheduleNext = () => {
+            if (!fastUpdatePollTimer) return;
+            const delay = consecutiveErrors > 0 ? Math.min(5000, 800 * (consecutiveErrors + 1)) : 650;
+            fastUpdatePollTimer = setTimeout(async () => {
+              if (!fastUpdatePollTimer) return;
+              if (document.hidden || inFlight) { scheduleNext(); return; }
+              inFlight = true;
+              try {
+                await fetchStatus();
+                consecutiveErrors = 0;
+              } catch {
+                consecutiveErrors++;
+              } finally {
+                inFlight = false;
+                scheduleNext();
+              }
+            }, delay);
+          };
+          fastUpdatePollTimer = setTimeout(() => {}, 0);
+          clearTimeout(fastUpdatePollTimer);
+          fastUpdatePollTimer = 1;
+          scheduleNext();
         } else if (!busy && fastUpdatePollTimer) {
-          clearInterval(fastUpdatePollTimer);
+          clearTimeout(fastUpdatePollTimer);
           fastUpdatePollTimer = null;
         }
       }
+      window.addEventListener('beforeunload', () => {
+        if (fastUpdatePollTimer) { clearTimeout(fastUpdatePollTimer); fastUpdatePollTimer = null; }
+      });
 
       function renderAppUpdateUi(upd, updCfg) {
         const autoCheckEl = document.querySelector('[data-app-update-setting="autoCheck"]');

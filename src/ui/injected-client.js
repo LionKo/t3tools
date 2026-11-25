@@ -1518,7 +1518,12 @@
             if (lastLive) lastLive.appUpdate = res.status;
             renderSidebarWidget();
           }
-        }).catch(() => {});
+          if (res?.ok === false && res.error) {
+            showOverlayToast(res.error);
+          }
+        }).catch(err => {
+          showOverlayToast(err?.message || '启动自动更新失败');
+        });
       }
     }
   }

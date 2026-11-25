@@ -20,9 +20,12 @@ const DRIVER_DISPLAY_NAMES = {
 };
 
 function parseSemverParts(raw) {
-  const m = String(raw || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)/);
+  const m = String(raw || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/);
   if (!m) return null;
-  return [Number(m[1]), Number(m[2]), Number(m[3])];
+  return {
+    core: [Number(m[1]), Number(m[2]), Number(m[3])],
+    prerelease: m[4] ? m[4].split('.') : []
+  };
 }
 
 export function compareSemver(a, b) {
@@ -30,7 +33,26 @@ export function compareSemver(a, b) {
   const pb = parseSemverParts(b);
   if (!pa || !pb) return null;
   for (let i = 0; i < 3; i++) {
-    if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+    if (pa.core[i] !== pb.core[i]) return pa.core[i] < pb.core[i] ? -1 : 1;
+  }
+  const aPre = pa.prerelease;
+  const bPre = pb.prerelease;
+  if (aPre.length === 0 && bPre.length === 0) return 0;
+  if (aPre.length === 0) return 1;
+  if (bPre.length === 0) return -1;
+  const len = Math.max(aPre.length, bPre.length);
+  for (let i = 0; i < len; i++) {
+    if (i >= aPre.length) return -1;
+    if (i >= bPre.length) return 1;
+    const sa = aPre[i];
+    const sb = bPre[i];
+    if (sa === sb) continue;
+    const na = /^\d+$/.test(sa) ? Number(sa) : null;
+    const nb = /^\d+$/.test(sb) ? Number(sb) : null;
+    if (na !== null && nb !== null) return na < nb ? -1 : 1;
+    if (na !== null) return -1;
+    if (nb !== null) return 1;
+    return sa < sb ? -1 : 1;
   }
   return 0;
 }

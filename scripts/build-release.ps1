@@ -25,12 +25,9 @@ if ([string]::IsNullOrWhiteSpace($OutDir)) {
   $OutDir = Join-Path $root 'dist\release'
 }
 $OutDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDir)
-if (Test-Path -LiteralPath $OutDir) {
-  Remove-Item -LiteralPath $OutDir -Recurse -Force
-}
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$workDir = Join-Path $OutDir '_work'
+$workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("t3tools-release-work-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $workDir | Out-Null
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 

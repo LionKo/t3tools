@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 0.2.0). Defaults to package.json version.'
+        description: 'Release version (must match package.json, e.g. 0.1.2). Defaults to package.json.'
         required: false
         default: ''
       notes:
@@ -21,6 +21,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
 
 jobs:
   build-and-release:
@@ -40,9 +44,18 @@ jobs:
       - name: Resolve and verify version
         id: ver
         shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
         run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $pkg = Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json
           $pkgVer = ([string]$pkg.version).Trim()
+          if ($pkgVer -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+            throw "Invalid package.json version: $pkgVer"
+          }
+
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $tagName = $env:GITHUB_REF_NAME
             $tagVer = $tagName.TrimStart('v')
@@ -51,13 +64,31 @@ jobs:
             }
             $ver = $tagVer
           } else {
-            $inputVer = "${{ inputs.version }}".Trim().TrimStart('v')
-            $ver = if ($inputVer) { $inputVer } else { $pkgVer }
+            $inputVer = ([string]$env:INPUT_VERSION).Trim().TrimStart('v')
+            if ($inputVer -and $inputVer -ne $pkgVer) {
+              throw "Input version ($inputVer) does not match package.json version ($pkgVer). Bump package.json before releasing."
+            }
+            $ver = $pkgVer
             $tagName = "v$ver"
           }
+
+          # Verify existing tag points to the exact commit being built
+          $tagExists = $false
+          $tagSha = (git rev-list -n 1 "refs/tags/$tagName" 2>$null)
+          if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($tagSha)) {
+            $tagExists = $true
+            $headSha = (git rev-parse HEAD).Trim()
+            if ($tagSha.Trim() -ne $headSha) {
+              throw "Existing tag $tagName points to $($tagSha.Trim()), not current HEAD ($headSha)."
+            }
+          }
+
+          $isPrerelease = ($env:INPUT_PRERELEASE -eq 'true') -or ($ver -match '-')
           "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "tag=$tagName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Building release $tagName (version=$ver)"
+          "tag_exists=$($tagExists.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building release $tagName (version=$ver, tag_exists=$tagExists, prerelease=$isPrerelease)"
 
       - name: Run full test suite
         shell: pwsh
@@ -65,37 +96,51 @@ jobs:
 
       - name: Generate release notes for latest.json
         shell: pwsh
+        env:
+          INPUT_NOTES: ${{ inputs.notes }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          $custom = @"
-          ${{ inputs.notes }}
-          "@.Trim()
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          $custom = [string]$env:INPUT_NOTES
           if (-not [string]::IsNullOrWhiteSpace($custom)) {
-            [System.IO.File]::WriteAllText('dist/release-notes.txt', $custom, [System.Text.Encoding]::UTF8)
+            [System.IO.File]::WriteAllText('dist/release-notes.txt', $custom.Trim(), $utf8NoBom)
             exit 0
           }
-          $prevTag = git describe --tags --abbrev=0 HEAD^ 2>$null
-          if ($prevTag) {
-            $commits = git log "$prevTag..HEAD" --pretty=format:"- %s" --no-merges | Select-Object -First 15
+          $prevTag = ''
+          git rev-parse --verify HEAD^ *> $null
+          if ($LASTEXITCODE -eq 0) {
+            $prevTag = (git describe --tags --match 'v*' --abbrev=0 HEAD^ 2>$null)
+            if ($LASTEXITCODE -ne 0) { $prevTag = '' }
+          }
+          if (-not [string]::IsNullOrWhiteSpace($prevTag)) {
+            $commits = git log "$($prevTag.Trim())..HEAD" --pretty=format:"- %s" --no-merges | Select-Object -First 15
           } else {
             $commits = git log -n 10 --pretty=format:"- %s" --no-merges
           }
-          $text = if ($commits) { ($commits -join "`n") } else { "T3Tools v${{ steps.ver.outputs.version }}" }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          [System.IO.File]::WriteAllText('dist/release-notes.txt', $text, [System.Text.Encoding]::UTF8)
+          $text = if ($commits) { ($commits -join "`n") } else { "T3Tools v$env:RELEASE_VERSION" }
+          [System.IO.File]::WriteAllText('dist/release-notes.txt', $text, $utf8NoBom)
 
       - name: Build Windows installer, portable zip, delta app zip & latest.json
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-release.ps1 `
-            -Version "${{ steps.ver.outputs.version }}" `
+            -Version "$env:RELEASE_VERSION" `
             -NodeVersion "22.16.0" `
             -RepoSlug "${{ github.repository }}" `
             -NotesFile "dist/release-notes.txt"
 
-      - name: Verify release artifacts
+      - name: Verify release artifacts & checksums
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          $ver = "${{ steps.ver.outputs.version }}"
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:RELEASE_VERSION
           $required = @(
             "dist/release/T3Tools-Setup-v$ver-win-x64.exe",
             "dist/release/T3Tools-v$ver-win-x64-portable.zip",
@@ -108,22 +153,132 @@ jobs:
               throw "Missing expected release artifact: $f"
             }
           }
-          # Smoke-test extracted portable runtime
-          $smokeDir = "dist/smoke"
-          Expand-Archive -LiteralPath "dist/release/T3Tools-v$ver-win-x64-portable.zip" -DestinationPath $smokeDir -Force
-          & "$smokeDir/runtime/node.exe" "$smokeDir/app/bin/t3tools.mjs" doctor | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "Portable runtime smoke test failed" }
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+          # Verify latest.json has no BOM and its hashes/sizes match actual files on disk
+          $rawBytes = [System.IO.File]::ReadAllBytes('dist/release/latest.json')
+          if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
+            throw "latest.json must not contain UTF-8 BOM"
+          }
+          $manifest = Get-Content -LiteralPath 'dist/release/latest.json' -Raw | ConvertFrom-Json
+          if ($manifest.version -ne $ver) { throw "latest.json version mismatch: $($manifest.version) != $ver" }
+          foreach ($entry in @($manifest.appPackage, $manifest.fullPackage, $manifest.installer)) {
+            $path = Join-Path 'dist/release' $entry.fileName
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $actualSize = (Get-Item -LiteralPath $path).Length
+            if ($actualHash -ne $entry.sha256) { throw "SHA-256 mismatch for $($entry.fileName)" }
+            if ($actualSize -ne $entry.size) { throw "Size mismatch for $($entry.fileName)" }
+          }
+
+          # Smoke-test extracted portable runtime and assert doctor JSON output
+          $smokeDir = "dist/smoke"
+          if (Test-Path -LiteralPath $smokeDir) { Remove-Item -LiteralPath $smokeDir -Recurse -Force }
+          Expand-Archive -LiteralPath "dist/release/T3Tools-v$ver-win-x64-portable.zip" -DestinationPath $smokeDir -Force
+          $doctorRaw = & "$smokeDir/runtime/node.exe" "$smokeDir/app/bin/t3tools.mjs" doctor
+          if ($LASTEXITCODE -ne 0) { throw "Portable runtime doctor exited with code $LASTEXITCODE" }
+          $doctor = ($doctorRaw -join "`n") | ConvertFrom-Json
+          if ($doctor.version -ne $ver) { throw "Doctor reported version $($doctor.version) != $ver" }
+          if (-not $doctor.nodeOk) { throw "Doctor reported nodeOk=false for bundled Node ($($doctor.nodeVersion))" }
+          Write-Host "Verified doctor JSON: version=$($doctor.version), node=$($doctor.nodeVersion)"
+
+      - name: Upload verified build artifacts (for retry/audit)
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: T3Tools ${{ steps.ver.outputs.tag }}
-          generate_release_notes: true
-          prerelease: ${{ inputs.prerelease == true }}
-          files: |
-            dist/release/T3Tools-Setup-v*.exe
-            dist/release/T3Tools-v*-win-x64-portable.zip
-            dist/release/T3Tools-v*-app.zip
-            dist/release/latest.json
-            dist/release/SHA256SUMS.txt
+          name: t3tools-release-v${{ steps.ver.outputs.version }}
+          path: dist/release/*
+          retention-days: 14
+
+      - name: Publish GitHub Release (Draft-First Atomic)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ steps.ver.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+          TAG_EXISTS: ${{ steps.ver.outputs.tag_exists }}
+          IS_PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          BUILD_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:RELEASE_TAG
+          $ver = $env:RELEASE_VERSION
+
+          function Invoke-WithRetry([string]$Label, [scriptblock]$Action) {
+            for ($attempt = 1; $attempt -le 4; $attempt++) {
+              try {
+                & $Action
+                if ($LASTEXITCODE -eq 0) { return }
+                throw "$Label exited with code $LASTEXITCODE"
+              } catch {
+                if ($attempt -ge 4) { throw }
+                $delay = $attempt * 5
+                Write-Warning "$Label failed (attempt $attempt): $($_.Exception.Message); retrying in ${delay}s..."
+                Start-Sleep -Seconds $delay
+              }
+            }
+          }
+
+          function Get-ReleaseInfo([string]$TagName) {
+            $json = gh release view $TagName --json isDraft,assets 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($json)) { return $null }
+            return ($json | ConvertFrom-Json)
+          }
+
+          # 1. Never silently clobber an already-published release (prevents broken latest.json / hash mismatch)
+          $existing = Get-ReleaseInfo $tag
+          if ($existing -and -not $existing.isDraft) {
+            throw "Release $tag is already published. Bump package.json and push a new tag instead of mutating published assets."
+          }
+
+          # 2. Create draft release if it does not exist (re-checks on retry after timeout)
+          if (-not $existing) {
+            $createArgs = @('release', 'create', $tag, '--draft', '--title', "T3Tools $tag", '--generate-notes')
+            if ($env:TAG_EXISTS -eq 'true') {
+              $createArgs += '--verify-tag'
+            } else {
+              $createArgs += @('--target', $env:BUILD_SHA)
+            }
+            if ($env:IS_PRERELEASE -eq 'true') { $createArgs += '--prerelease' }
+
+            Invoke-WithRetry "Create draft release $tag" {
+              if (Get-ReleaseInfo $tag) {
+                $global:LASTEXITCODE = 0
+                return
+              }
+              & gh @createArgs
+            }
+          }
+
+          # 3. Upload all assets to the draft release
+          $assets = @(
+            "dist/release/T3Tools-Setup-v$ver-win-x64.exe",
+            "dist/release/T3Tools-v$ver-win-x64-portable.zip",
+            "dist/release/T3Tools-v$ver-app.zip",
+            "dist/release/SHA256SUMS.txt",
+            "dist/release/latest.json"
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset)) { throw "Missing asset: $asset" }
+            Invoke-WithRetry "Upload $asset" {
+              & gh release upload $tag $asset --clobber
+            }
+          }
+
+          # 4. Verify all expected assets & exact sizes are present on the draft before publishing
+          $draftState = Get-ReleaseInfo $tag
+          if (-not $draftState) { throw "Could not inspect draft release $tag before publishing" }
+          foreach ($asset in $assets) {
+            $fileName = Split-Path -Leaf $asset
+            $expectedSize = (Get-Item -LiteralPath $asset).Length
+            $uploaded = $draftState.assets | Where-Object { $_.name -eq $fileName } | Select-Object -First 1
+            if (-not $uploaded) { throw "Uploaded asset missing on draft: $fileName" }
+            if ([long]$uploaded.size -ne [long]$expectedSize) {
+              throw "Uploaded asset size mismatch for ${fileName}: $($uploaded.size) != $expectedSize"
+            }
+          }
+
+          # 5. Atomically publish draft -> live release (makes all 5 files + latest.json visible simultaneously)
+          Invoke-WithRetry "Publish release $tag" {
+            & gh release edit $tag --draft=false
+          }
+          Write-Host "Successfully published atomic release $tag with all verified assets."

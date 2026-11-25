@@ -2344,6 +2344,7 @@ namespace T3ToolsTray
                 psi.StandardOutputEncoding = Encoding.UTF8;
                 psi.StandardErrorEncoding = Encoding.UTF8;
                 psi.EnvironmentVariables["T3TOOLS_AUTH_TOKEN"] = _authToken;
+                psi.EnvironmentVariables["T3TOOLS_TRAY_EXE"] = Application.ExecutablePath;
 
                 var proc = new Process();
                 proc.StartInfo = psi;
@@ -2866,7 +2867,9 @@ namespace T3ToolsTray
                 if (!Uri.TryCreate(url, UriKind.Absolute, out u)) return;
                 if (!string.Equals(u.Scheme, "https", StringComparison.OrdinalIgnoreCase)) return;
                 if (!string.Equals(u.Host, "github.com", StringComparison.OrdinalIgnoreCase)) return;
-                if (!u.AbsolutePath.StartsWith("/LionKo/t3tools", StringComparison.OrdinalIgnoreCase)) return;
+                string path = u.AbsolutePath ?? "";
+                if (!string.Equals(path, "/LionKo/t3tools", StringComparison.OrdinalIgnoreCase) &&
+                    !path.StartsWith("/LionKo/t3tools/", StringComparison.OrdinalIgnoreCase)) return;
                 Process.Start(new ProcessStartInfo(u.AbsoluteUri) { UseShellExecute = true });
             }
             catch { }
@@ -2935,8 +2938,8 @@ namespace T3ToolsTray
             try
             {
                 string selfExe = Path.GetFullPath(Application.ExecutablePath);
-                string selfDir = Path.GetFullPath(Path.GetDirectoryName(selfExe) ?? "").TrimEnd('\\');
-                string targetDir = Path.GetFullPath(installDir).TrimEnd('\\');
+                string selfDir = NativeAppUpdater.NormalizeDirPath(Path.GetDirectoryName(selfExe) ?? "");
+                string targetDir = NativeAppUpdater.NormalizeDirPath(installDir);
                 string fullZip = Path.GetFullPath(zipPath);
                 string expectedStaging = Path.Combine(selfDir, "_staging") + Path.DirectorySeparatorChar;
 
@@ -2950,7 +2953,9 @@ namespace T3ToolsTray
                     return;
                 }
 
-                string tempUpdater = Path.Combine(Path.GetTempPath(), string.Format("T3Tools-updater-{0}.exe", Process.GetCurrentProcess().Id));
+                string tempDir = Path.Combine(Path.GetTempPath(), "T3Tools-Updater");
+                Directory.CreateDirectory(tempDir);
+                string tempUpdater = Path.Combine(tempDir, string.Format("T3Tools-updater-{0}-{1}.exe", Process.GetCurrentProcess().Id, Guid.NewGuid().ToString("N").Substring(0, 8)));
                 File.Copy(selfExe, tempUpdater, true);
 
                 var argList = new List<string>
@@ -2985,8 +2990,36 @@ namespace T3ToolsTray
 
         private static string QuoteArg(string val)
         {
-            string s = (val ?? "").Replace("\"", "\\\"");
-            return "\"" + s + "\"";
+            string s = val ?? "";
+            var sb = new StringBuilder();
+            sb.Append('"');
+            int backslashes = 0;
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\')
+                {
+                    backslashes++;
+                }
+                else if (c == '"')
+                {
+                    sb.Append('\\', backslashes * 2 + 1);
+                    sb.Append('"');
+                    backslashes = 0;
+                }
+                else
+                {
+                    if (backslashes > 0)
+                    {
+                        sb.Append('\\', backslashes);
+                        backslashes = 0;
+                    }
+                    sb.Append(c);
+                }
+            }
+            if (backslashes > 0) sb.Append('\\', backslashes * 2);
+            sb.Append('"');
+            return sb.ToString();
         }
 
         private void UpdateTrayIndicator()
@@ -3289,6 +3322,26 @@ namespace T3ToolsTray
 
     internal static class NativeAppUpdater
     {
+        private const int MaxZipEntries = 2000;
+        private const long MaxUncompressedBytes = 256L * 1024L * 1024L;
+        private const string InnoUninstallRegPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{7D5B3E61-4E6D-49F2-B4B6-7A06A8E4101C}_is1";
+
+        public static string NormalizeDirPath(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            string full = Path.GetFullPath(raw);
+            string root = Path.GetPathRoot(full) ?? "";
+            if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase)) return full;
+            return full.TrimEnd('\\', '/');
+        }
+
+        private static string EnsureTrailingSep(string dir)
+        {
+            string norm = NormalizeDirPath(dir);
+            if (string.IsNullOrEmpty(norm)) return "";
+            return norm.EndsWith("\\", StringComparison.Ordinal) ? norm : norm + "\\";
+        }
+
         private static string GetPluginDataDir()
         {
             string overrideDir = Environment.GetEnvironmentVariable("T3TOOLS_DIR");
@@ -3307,18 +3360,28 @@ namespace T3ToolsTray
                 File.AppendAllText(
                     Path.Combine(dir, "update.log"),
                     DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " " + msg + Environment.NewLine,
-                    Encoding.UTF8
+                    new UTF8Encoding(false)
                 );
             }
             catch { }
         }
 
-        private static string ComputeSha256(string filePath)
+        private static string ComputeSha256Hex(string text)
         {
             using (var sha = SHA256.Create())
-            using (var fs = File.OpenRead(filePath))
             {
-                byte[] hash = sha.ComputeHash(fs);
+                byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(text ?? ""));
+                var sb = new StringBuilder(hash.Length * 2);
+                for (int i = 0; i < hash.Length; i++) sb.Append(hash[i].ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        private static string ComputeStreamSha256(Stream stream)
+        {
+            using (var sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(stream);
                 var sb = new StringBuilder(hash.Length * 2);
                 for (int i = 0; i < hash.Length; i++) sb.Append(hash[i].ToString("x2"));
                 return sb.ToString();
@@ -3340,7 +3403,7 @@ namespace T3ToolsTray
 
         private static void StopLingeringProcessesUnder(string installDir)
         {
-            string prefix = Path.GetFullPath(installDir).TrimEnd('\\') + Path.DirectorySeparatorChar;
+            string prefix = EnsureTrailingSep(installDir);
             int myPid = Process.GetCurrentProcess().Id;
             foreach (string name in new[] { "T3Tools", "node" })
             {
@@ -3356,7 +3419,7 @@ namespace T3ToolsTray
                                 Path.GetFullPath(path).StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                             {
                                 p.Kill();
-                                p.WaitForExit(3000);
+                                p.WaitForExit(4000);
                             }
                         }
                         catch { }
@@ -3367,30 +3430,74 @@ namespace T3ToolsTray
             }
         }
 
-        private static void ExtractZipSafe(string zipPath, string destDir)
+        /**
+         * Single-handle verification & extraction: verifies SHA-256 on the exact open FileStream
+         * and extracts from that same handle (eliminates TOCTOU) with Zip Slip and size guards.
+         */
+        private static void VerifyAndExtractZipSingleHandle(string zipPath, string expectedSha, string destDir)
         {
+            if (!File.Exists(zipPath)) throw new FileNotFoundException("更新包不存在", zipPath);
             Directory.CreateDirectory(destDir);
-            string fullDest = Path.GetFullPath(destDir).TrimEnd('\\') + Path.DirectorySeparatorChar;
-            using (var archive = ZipFile.OpenRead(zipPath))
+            string fullDest = EnsureTrailingSep(destDir);
+
+            using (var fs = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                foreach (var entry in archive.Entries)
+                string actualSha = ComputeStreamSha256(fs);
+                if (!string.Equals(actualSha, (expectedSha ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
                 {
-                    string rel = (entry.FullName ?? "").Replace('/', Path.DirectorySeparatorChar);
-                    if (string.IsNullOrEmpty(rel)) continue;
-                    string targetPath = Path.GetFullPath(Path.Combine(destDir, rel));
-                    if (!targetPath.StartsWith(fullDest, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("SHA-256 校验失败");
+                }
+                fs.Position = 0;
+                using (var archive = new ZipArchive(fs, ZipArchiveMode.Read, true))
+                {
+                    if (archive.Entries.Count > MaxZipEntries)
                     {
-                        throw new InvalidOperationException("更新包包含非法路径: " + entry.FullName);
+                        throw new InvalidOperationException("更新包内文件数量超出安全上限");
                     }
-                    if (rel.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                    long totalBytes = 0;
+                    foreach (var entry in archive.Entries)
                     {
-                        Directory.CreateDirectory(targetPath);
-                    }
-                    else
-                    {
+                        string raw = entry.FullName ?? "";
+                        if (string.IsNullOrEmpty(raw)) continue;
+                        if (raw.IndexOf(':') >= 0 || raw.StartsWith("/") || raw.StartsWith("\\"))
+                        {
+                            throw new InvalidOperationException("更新包包含非法路径: " + raw);
+                        }
+                        string rel = raw.Replace('/', Path.DirectorySeparatorChar);
+                        string targetPath = Path.GetFullPath(Path.Combine(destDir, rel));
+                        if (!targetPath.StartsWith(fullDest, StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException("更新包包含越界路径: " + raw);
+                        }
+                        if (rel.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal))
+                        {
+                            Directory.CreateDirectory(targetPath);
+                            continue;
+                        }
+
+                        totalBytes += Math.Max(0L, entry.Length);
+                        if (totalBytes > MaxUncompressedBytes)
+                        {
+                            throw new InvalidOperationException("更新包解压体积超出安全上限");
+                        }
                         string parent = Path.GetDirectoryName(targetPath);
                         if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
-                        entry.ExtractToFile(targetPath, true);
+                        using (var entryStream = entry.Open())
+                        using (var outFs = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                        {
+                            byte[] buffer = new byte[65536];
+                            int read;
+                            long entryWritten = 0;
+                            while ((read = entryStream.Read(buffer, 0, buffer.Length)) > 0)
+                            {
+                                entryWritten += read;
+                                if (entryWritten > MaxUncompressedBytes)
+                                {
+                                    throw new InvalidOperationException("更新包单文件解压体积超出安全上限");
+                                }
+                                outFs.Write(buffer, 0, read);
+                            }
+                        }
                     }
                 }
             }
@@ -3463,6 +3570,25 @@ namespace T3ToolsTray
             return null;
         }
 
+        private static void UpdateInnoDisplayVersionIfMatched(string installDir, string toVer)
+        {
+            if (string.IsNullOrEmpty(toVer)) return;
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(InnoUninstallRegPath, true))
+                {
+                    if (key == null) return;
+                    string loc = Convert.ToString(key.GetValue("InstallLocation") ?? "");
+                    if (!string.IsNullOrEmpty(loc) &&
+                        string.Equals(NormalizeDirPath(loc), NormalizeDirPath(installDir), StringComparison.OrdinalIgnoreCase))
+                    {
+                        key.SetValue("DisplayVersion", toVer);
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static void WriteMarkerJson(string fileName, Dictionary<string, object> payload)
         {
             try
@@ -3475,15 +3601,115 @@ namespace T3ToolsTray
             catch { }
         }
 
+        private static void SaveTransaction(string txPath, List<Tuple<string, string, bool>> backups)
+        {
+            try
+            {
+                var ser = new JavaScriptSerializer();
+                var items = new List<Dictionary<string, object>>();
+                foreach (var b in backups)
+                {
+                    items.Add(new Dictionary<string, object>
+                    {
+                        { "live", b.Item1 },
+                        { "bak", b.Item2 },
+                        { "isDir", b.Item3 }
+                    });
+                }
+                var payload = new Dictionary<string, object>
+                {
+                    { "updatedAt", DateTime.UtcNow.ToString("o") },
+                    { "backups", items }
+                };
+                File.WriteAllText(txPath, ser.Serialize(payload), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        public static void RecoverInterruptedTransactionIfNeeded(string installDir, bool alreadyHoldsLock = false)
+        {
+            if (string.IsNullOrEmpty(installDir)) return;
+            string normDir = NormalizeDirPath(installDir);
+            string txPath = Path.Combine(normDir, "_update_tx.json");
+            if (!File.Exists(txPath)) return;
+
+            Mutex probeMutex = null;
+            bool acquired = alreadyHoldsLock;
+            try
+            {
+                if (!alreadyHoldsLock)
+                {
+                    string lockName = @"Local\T3Tools_UpdateLock_" + ComputeSha256Hex(normDir.ToLowerInvariant()).Substring(0, 16);
+                    probeMutex = new Mutex(false, lockName);
+                    try { acquired = probeMutex.WaitOne(0); }
+                    catch (AbandonedMutexException) { acquired = true; }
+                    // Another live updater holds the lock (e.g. during post-launch verification) -> do not touch backups
+                    if (!acquired) return;
+                }
+
+                var ser = new JavaScriptSerializer();
+                var tx = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(txPath, Encoding.UTF8));
+                var rawList = tx != null && tx.ContainsKey("backups") ? tx["backups"] as System.Collections.IList : null;
+                string exePath = Path.Combine(normDir, "T3Tools.exe");
+                string cliPath = Path.Combine(normDir, "app", "bin", "t3tools.mjs");
+                bool healthy = File.Exists(exePath) && File.Exists(cliPath);
+                if (rawList != null)
+                {
+                    for (int i = rawList.Count - 1; i >= 0; i--)
+                    {
+                        var item = rawList[i] as Dictionary<string, object>;
+                        if (item == null) continue;
+                        string live = Convert.ToString(item.ContainsKey("live") ? item["live"] : "");
+                        string bak = Convert.ToString(item.ContainsKey("bak") ? item["bak"] : "");
+                        bool isDir = item.ContainsKey("isDir") && Convert.ToBoolean(item["isDir"]);
+                        if (string.IsNullOrEmpty(live) || string.IsNullOrEmpty(bak)) continue;
+                        bool bakExists = isDir ? Directory.Exists(bak) : File.Exists(bak);
+                        if (!healthy && bakExists)
+                        {
+                            try
+                            {
+                                DeleteQuiet(live, isDir);
+                                MoveWithRetry(bak, live, isDir);
+                                Log("recovered interrupted swap item: " + live);
+                            }
+                            catch (Exception ex)
+                            {
+                                Log("recovery warning for " + live + ": " + ex.Message);
+                            }
+                        }
+                        else if (healthy && bakExists)
+                        {
+                            DeleteQuiet(bak, isDir);
+                        }
+                    }
+                }
+                DeleteQuiet(txPath, false);
+            }
+            catch (Exception ex)
+            {
+                Log("RecoverInterruptedTransactionIfNeeded failed: " + ex.Message);
+            }
+            finally
+            {
+                if (probeMutex != null)
+                {
+                    if (acquired) { try { probeMutex.ReleaseMutex(); } catch { } }
+                    probeMutex.Dispose();
+                }
+            }
+        }
+
         public static void ScheduleCleanupUpdater(string updaterPath)
         {
             if (string.IsNullOrEmpty(updaterPath)) return;
             try
             {
                 string full = Path.GetFullPath(updaterPath);
-                string tempRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd('\\') + Path.DirectorySeparatorChar;
+                string tempRoot = EnsureTrailingSep(Path.GetTempPath());
+                string dedicatedDir = EnsureTrailingSep(Path.Combine(Path.GetTempPath(), "T3Tools-Updater"));
                 string name = Path.GetFileName(full) ?? "";
-                if (!full.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)) return;
+                if (!full.StartsWith(dedicatedDir, StringComparison.OrdinalIgnoreCase) &&
+                    !full.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)) return;
                 if (!name.StartsWith("T3Tools-updater-", StringComparison.OrdinalIgnoreCase) ||
                     !name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return;
 
@@ -3503,6 +3729,23 @@ namespace T3ToolsTray
                 });
             }
             catch { }
+        }
+
+        private static void RollbackBackups(List<Tuple<string, string, bool>> backups)
+        {
+            for (int i = backups.Count - 1; i >= 0; i--)
+            {
+                var b = backups[i];
+                try
+                {
+                    DeleteQuiet(b.Item1, b.Item3);
+                    MoveWithRetry(b.Item2, b.Item1, b.Item3);
+                }
+                catch (Exception rbEx)
+                {
+                    Log("rollback warning for " + b.Item1 + ": " + rbEx.Message);
+                }
+            }
         }
 
         public static int RunApplyUpdate(string[] args)
@@ -3535,111 +3778,154 @@ namespace T3ToolsTray
                 return 2;
             }
 
-            installDir = Path.GetFullPath(installDir).TrimEnd('\\');
+            installDir = NormalizeDirPath(installDir);
             zipPath = Path.GetFullPath(zipPath);
-            string extractDir = Path.Combine(installDir, "_staging", "extract_" + Process.GetCurrentProcess().Id);
-            var backups = new List<Tuple<string, string, bool>>();
-
-            Log(string.Format("starting update {0} -> {1} in {2}", fromVer, toVer, installDir));
-
-            try
+            string lockName = @"Local\T3Tools_UpdateLock_" + ComputeSha256Hex(installDir.ToLowerInvariant()).Substring(0, 16);
+            bool lockOwned;
+            using (var updateMutex = new Mutex(true, lockName, out lockOwned))
             {
-                WaitForProcessExit(oldPid, 10000);
-                Thread.Sleep(350);
-                StopLingeringProcessesUnder(installDir);
-
-                if (!File.Exists(zipPath)) throw new FileNotFoundException("更新包不存在", zipPath);
-                string actualSha = ComputeSha256(zipPath);
-                if (!string.Equals(actualSha, expectedSha.Trim(), StringComparison.OrdinalIgnoreCase))
+                if (!lockOwned)
                 {
-                    throw new InvalidOperationException("SHA-256 校验失败");
+                    Log("another updater instance holds lock for " + installDir);
+                    return 3;
                 }
 
-                DeleteQuiet(extractDir, true);
-                ExtractZipSafe(zipPath, extractDir);
+                string extractDir = Path.Combine(installDir, "_staging", "extract_" + Process.GetCurrentProcess().Id);
+                string txPath = Path.Combine(installDir, "_update_tx.json");
+                var backups = new List<Tuple<string, string, bool>>();
 
-                string stagedExe = Path.Combine(extractDir, "T3Tools.exe");
-                string stagedApp = Path.Combine(extractDir, "app");
-                string stagedCli = Path.Combine(stagedApp, "bin", "t3tools.mjs");
-                if (!File.Exists(stagedExe) || !File.Exists(stagedCli))
+                Log(string.Format("starting update {0} -> {1} in {2}", fromVer, toVer, installDir));
+
+                try
                 {
-                    throw new InvalidOperationException("更新包结构不完整（缺少 T3Tools.exe 或 app/bin/t3tools.mjs）");
-                }
+                    // 1. Validate & extract package BEFORE stopping running processes (single-handle hash + zip)
+                    DeleteQuiet(extractDir, true);
+                    VerifyAndExtractZipSingleHandle(zipPath, expectedSha, extractDir);
 
-                string stagedRelease = Path.Combine(extractDir, "release.json");
-                string liveRelease = Path.Combine(installDir, "release.json");
-                if (File.Exists(stagedRelease))
-                {
-                    PreserveInstallMode(liveRelease, stagedRelease);
-                }
-
-                string liveExe = Path.Combine(installDir, "T3Tools.exe");
-                string liveApp = Path.Combine(installDir, "app");
-                string liveRuntime = Path.Combine(installDir, "runtime");
-                string stagedRuntime = Path.Combine(extractDir, "runtime");
-                bool replaceRuntime = File.Exists(Path.Combine(stagedRuntime, "node.exe"));
-
-                Action<string, string, bool> swapItem = delegate(string livePath, string newPath, bool isDir)
-                {
-                    string bakPath = livePath + ".bak";
-                    DeleteQuiet(bakPath, isDir);
-                    if (isDir ? Directory.Exists(livePath) : File.Exists(livePath))
+                    string stagedExe = Path.Combine(extractDir, "T3Tools.exe");
+                    string stagedApp = Path.Combine(extractDir, "app");
+                    string stagedCli = Path.Combine(stagedApp, "bin", "t3tools.mjs");
+                    if (!File.Exists(stagedExe) || !File.Exists(stagedCli))
                     {
-                        MoveWithRetry(livePath, bakPath, isDir);
-                        backups.Add(Tuple.Create(livePath, bakPath, isDir));
+                        throw new InvalidOperationException("更新包结构不完整（缺少 T3Tools.exe 或 app/bin/t3tools.mjs）");
                     }
-                    MoveWithRetry(newPath, livePath, isDir);
-                };
 
-                swapItem(liveApp, stagedApp, true);
-                swapItem(liveExe, stagedExe, false);
-                if (File.Exists(stagedRelease)) swapItem(liveRelease, stagedRelease, false);
-                if (replaceRuntime) swapItem(liveRuntime, stagedRuntime, true);
-
-                foreach (var b in backups) DeleteQuiet(b.Item2, b.Item3);
-                DeleteQuiet(Path.Combine(installDir, "_staging"), true);
-
-                WriteMarkerJson("just-updated.json", new Dictionary<string, object>
-                {
-                    { "fromVersion", fromVer ?? "" },
-                    { "toVersion", toVer ?? "" },
-                    { "updatedAt", DateTime.UtcNow.ToString("o") }
-                });
-                Log("update succeeded to " + toVer);
-
-                if (!noRelaunch) RelaunchInstalledExe(liveExe, startInTray);
-                return 0;
-            }
-            catch (Exception ex)
-            {
-                Log("update failed, rolling back: " + ex);
-                for (int i = backups.Count - 1; i >= 0; i--)
-                {
-                    var b = backups[i];
-                    try
+                    string stagedPkgPath = Path.Combine(stagedApp, "package.json");
+                    if (!string.IsNullOrEmpty(toVer) && File.Exists(stagedPkgPath))
                     {
-                        DeleteQuiet(b.Item1, b.Item3);
-                        MoveWithRetry(b.Item2, b.Item1, b.Item3);
+                        var ser = new JavaScriptSerializer();
+                        var pkgObj = ser.Deserialize<Dictionary<string, object>>(File.ReadAllText(stagedPkgPath, Encoding.UTF8));
+                        string pkgVer = pkgObj != null && pkgObj.ContainsKey("version") ? Convert.ToString(pkgObj["version"]).Trim() : "";
+                        if (!string.IsNullOrEmpty(pkgVer) && !string.Equals(pkgVer, toVer.Trim(), StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw new InvalidOperationException(string.Format("更新包内版本号 ({0}) 与目标版本 ({1}) 不一致", pkgVer, toVer));
+                        }
                     }
-                    catch (Exception rbEx)
+
+                    // 2. Recover any leftover interrupted transaction before starting a new swap
+                    RecoverInterruptedTransactionIfNeeded(installDir, true);
+
+                    // 3. Only after package is 100% validated, stop old tray & daemon processes
+                    WaitForProcessExit(oldPid, 10000);
+                    Thread.Sleep(350);
+                    StopLingeringProcessesUnder(installDir);
+
+                    string stagedRelease = Path.Combine(extractDir, "release.json");
+                    string liveRelease = Path.Combine(installDir, "release.json");
+                    if (File.Exists(stagedRelease))
                     {
-                        Log("rollback warning for " + b.Item1 + ": " + rbEx.Message);
+                        PreserveInstallMode(liveRelease, stagedRelease);
                     }
+
+                    string liveExe = Path.Combine(installDir, "T3Tools.exe");
+                    string liveApp = Path.Combine(installDir, "app");
+                    string liveRuntime = Path.Combine(installDir, "runtime");
+                    string stagedRuntime = Path.Combine(extractDir, "runtime");
+                    bool replaceRuntime = File.Exists(Path.Combine(stagedRuntime, "node.exe"));
+
+                    // Persist the full rollback plan BEFORE performing any rename
+                    var plannedPlan = new List<Tuple<string, string, bool>>();
+                    if (Directory.Exists(liveApp)) plannedPlan.Add(Tuple.Create(liveApp, liveApp + ".bak", true));
+                    if (File.Exists(liveExe)) plannedPlan.Add(Tuple.Create(liveExe, liveExe + ".bak", false));
+                    if (File.Exists(stagedRelease) && File.Exists(liveRelease)) plannedPlan.Add(Tuple.Create(liveRelease, liveRelease + ".bak", false));
+                    if (replaceRuntime && Directory.Exists(liveRuntime)) plannedPlan.Add(Tuple.Create(liveRuntime, liveRuntime + ".bak", true));
+                    SaveTransaction(txPath, plannedPlan);
+
+                    Action<string, string, bool> swapItem = delegate(string livePath, string newPath, bool isDir)
+                    {
+                        string bakPath = livePath + ".bak";
+                        DeleteQuiet(bakPath, isDir);
+                        if (isDir ? Directory.Exists(livePath) : File.Exists(livePath))
+                        {
+                            MoveWithRetry(livePath, bakPath, isDir);
+                            backups.Add(Tuple.Create(livePath, bakPath, isDir));
+                        }
+                        MoveWithRetry(newPath, livePath, isDir);
+                    };
+
+                    swapItem(liveApp, stagedApp, true);
+                    swapItem(liveExe, stagedExe, false);
+                    if (File.Exists(stagedRelease)) swapItem(liveRelease, stagedRelease, false);
+                    if (replaceRuntime) swapItem(liveRuntime, stagedRuntime, true);
+
+                    // 4. Write marker & launch new executable BEFORE discarding .bak backups; verify startup survives
+                    WriteMarkerJson("just-updated.json", new Dictionary<string, object>
+                    {
+                        { "fromVersion", fromVer ?? "" },
+                        { "toVersion", toVer ?? "" },
+                        { "updatedAt", DateTime.UtcNow.ToString("o") }
+                    });
+
+                    if (!noRelaunch)
+                    {
+                        var launched = RelaunchInstalledExe(liveExe, startInTray);
+                        if (launched == null)
+                        {
+                            throw new InvalidOperationException("新版本启动失败，执行自动回滚");
+                        }
+                        try
+                        {
+                            if (launched.WaitForExit(1200) && launched.ExitCode != 0)
+                            {
+                                throw new InvalidOperationException("新版本启动后立即异常退出 (ExitCode " + launched.ExitCode + ")，执行自动回滚");
+                            }
+                        }
+                        finally { launched.Dispose(); }
+                    }
+
+                    // 5. New version verified -> sync Installed Apps DisplayVersion and clean up backups/tx/staging
+                    UpdateInnoDisplayVersionIfMatched(installDir, toVer);
+                    foreach (var b in backups) DeleteQuiet(b.Item2, b.Item3);
+                    DeleteQuiet(txPath, false);
+                    DeleteQuiet(Path.Combine(installDir, "_staging"), true);
+                    Log("update succeeded to " + toVer);
+                    return 0;
                 }
-                DeleteQuiet(extractDir, true);
-                WriteMarkerJson("last-update-error.json", new Dictionary<string, object>
+                catch (Exception ex)
                 {
-                    { "error", ex.Message },
-                    { "at", DateTime.UtcNow.ToString("o") }
-                });
-                if (!noRelaunch) RelaunchInstalledExe(Path.Combine(installDir, "T3Tools.exe"), startInTray);
-                return 1;
+                    Log("update failed, rolling back: " + ex);
+                    RollbackBackups(backups);
+                    DeleteQuiet(txPath, false);
+                    DeleteQuiet(extractDir, true);
+                    DeleteQuiet(Path.Combine(GetPluginDataDir(), "just-updated.json"), false);
+                    WriteMarkerJson("last-update-error.json", new Dictionary<string, object>
+                    {
+                        { "error", ex.Message },
+                        { "at", DateTime.UtcNow.ToString("o") }
+                    });
+                    if (!noRelaunch)
+                    {
+                        var fallbackProc = RelaunchInstalledExe(Path.Combine(installDir, "T3Tools.exe"), startInTray);
+                        if (fallbackProc != null) fallbackProc.Dispose();
+                    }
+                    return 1;
+                }
             }
         }
 
-        private static void RelaunchInstalledExe(string exePath, bool startInTray)
+        private static Process RelaunchInstalledExe(string exePath, bool startInTray)
         {
-            if (!File.Exists(exePath)) return;
+            if (!File.Exists(exePath)) return null;
             try
             {
                 string selfExe = Application.ExecutablePath;
@@ -3650,11 +3936,12 @@ namespace T3ToolsTray
                 psi.Arguments = string.Join(" ", launchArgs.ToArray());
                 psi.WorkingDirectory = Path.GetDirectoryName(exePath);
                 psi.UseShellExecute = false;
-                Process.Start(psi);
+                return Process.Start(psi);
             }
             catch (Exception ex)
             {
                 Log("relaunch failed: " + ex.Message);
+                return null;
             }
         }
     }
@@ -3739,6 +4026,7 @@ namespace T3ToolsTray
                 }
 
                 NativeMethods.EnableHighDpi();
+                NativeAppUpdater.RecoverInterruptedTransactionIfNeeded(Path.GetDirectoryName(Application.ExecutablePath));
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.Run(new T3ToolsTrayForm(startInTray, wakeEvent, quitEvent));

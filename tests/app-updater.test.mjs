@@ -13,6 +13,7 @@ import {
   isAllowedUpdateUrl,
   selectUpdatePackage
 } from '../src/host/app-updater.mjs';
+import { compareSemver } from '../src/adapters/runtime-updates.mjs';
 import { startDaemon } from '../src/host/daemon.mjs';
 import { buildFallbackHtml } from '../src/ui/fallback-page.mjs';
 
@@ -40,16 +41,26 @@ function makeFakeReleaseDir(root, { installMode = 'installed', withRuntime = tru
 
 test('isAllowedUpdateUrl, detectInstallContext and selectUpdatePackage enforce safety & delta selection', () => {
   assert.equal(isAllowedUpdateUrl('https://github.com/LionKo/t3tools/releases/latest/download/latest.json'), true);
+  assert.equal(isAllowedUpdateUrl('https://github.com/other/repo/releases/latest/download/latest.json'), false);
   assert.equal(isAllowedUpdateUrl('https://objects.githubusercontent.com/some/asset.zip'), true);
+  assert.equal(isAllowedUpdateUrl('https://objects.githubusercontent.com/some/asset.zip', { allowAssetHost: false }), false);
   assert.equal(isAllowedUpdateUrl('http://github.com/LionKo/t3tools/releases/latest/download/latest.json'), false);
   assert.equal(isAllowedUpdateUrl('https://evil.example.com/latest.json'), false);
 
-  // Guard Inno Setup script against invalid constants and ensure UTF-8 BOM for non-ASCII labels
+  // Full SemVer prerelease ordering
+  assert.equal(compareSemver('0.2.0-rc.1', '0.2.0'), -1);
+  assert.equal(compareSemver('0.2.0', '0.2.0-rc.1'), 1);
+  assert.equal(compareSemver('0.2.0-rc.1', '0.2.0-rc.2'), -1);
+
+  // Guard Inno Setup script against invalid constants, legacy migration, and UTF-8 BOM
   const issRaw = readFileSync(new URL('../installer/T3Tools.iss', import.meta.url));
   assert.equal(issRaw[0] === 0xef && issRaw[1] === 0xbb && issRaw[2] === 0xbf, true, 'T3Tools.iss should have UTF-8 BOM');
   const issText = issRaw.toString('utf8');
   assert.equal(/\{userprofile\}/i.test(issText), false, 'Inno Setup does not support {userprofile}; use GetEnv("USERPROFILE")');
   assert.match(issText, /GetEnv\('USERPROFILE'\)/);
+  assert.match(issText, /MigrateLegacyInstall/);
+  assert.match(issText, /\[InstallDelete\]/);
+  assert.match(issText, /\[UninstallDelete\]/);
 
   const tmp = mkdtempSync(join(tmpdir(), 't3tools-upd-ctx-'));
   try {
@@ -60,14 +71,17 @@ test('isAllowedUpdateUrl, detectInstallContext and selectUpdatePackage enforce s
     assert.equal(devCtx.mode, 'dev');
     assert.equal(devCtx.canAutoUpdate, false);
 
-    // Standard Release layout enables auto-update
+    // Standard Release layout enables auto-update, unless a mismatched trayExeOverride is declared
     const relRoot = join(tmp, 'installed');
     const appRoot = makeFakeReleaseDir(relRoot, { installMode: 'installed' });
-    const relCtx = detectInstallContext({ appRoot });
+    const relCtx = detectInstallContext({ appRoot, trayExeOverride: join(relRoot, 'T3Tools.exe') });
     assert.equal(relCtx.mode, 'installed');
     assert.equal(relCtx.canAutoUpdate, true);
     assert.equal(relCtx.hasBundledNode, true);
     assert.equal(relCtx.installDir, relRoot);
+
+    const mismatchCtx = detectInstallContext({ appRoot, trayExeOverride: join(tmp, 'other', 'T3Tools.exe') });
+    assert.equal(mismatchCtx.canAutoUpdate, false);
 
     const shaA = 'a'.repeat(64);
     const shaB = 'b'.repeat(64);
@@ -79,6 +93,7 @@ test('isAllowedUpdateUrl, detectInstallContext and selectUpdatePackage enforce s
     };
     assert.equal(selectUpdatePackage(manifest, { currentNodeVersion: '22.16.0' })?.kind, 'app');
     assert.equal(selectUpdatePackage(manifest, { currentNodeVersion: '22.13.0' })?.kind, 'full');
+    assert.equal(selectUpdatePackage({ ...manifest, fullPackage: null }, { currentNodeVersion: '22.13.0' }), null);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -168,6 +183,104 @@ test('createAppUpdater checks GitHub manifest, downloads & verifies SHA-256, rej
     assert.ok(goodResult.applyRequestedAtMs > 0);
     assert.equal(existsSync(goodResult.stagedZipPath), true);
     assert.equal(existsSync(join(relRoot, '_staging', 'pending-update.json')), true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('createAppUpdater enforces single-flight concurrent installs, rejects untrusted redirects, handles staging errors, and times out stalled handoff', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 't3tools-upd-race-'));
+  try {
+    const relRoot = join(tmp, 'T3Tools');
+    const appRoot = makeFakeReleaseDir(relRoot, { installMode: 'installed' });
+    const dataDir = join(tmp, '.t3tools');
+    const settings = createSettingsStore(join(dataDir, 'settings.json'));
+
+    const zipBytes = Buffer.from('PK\x03\x04single-flight-zip');
+    const validSha = sha256Hex(zipBytes);
+    let downloadCalls = 0;
+    let redirectToEvil = false;
+
+    const manifestPayload = {
+      version: '0.2.0',
+      publishedAt: '2026-11-26T00:00:00Z',
+      minNodeVersion: '22.13.0',
+      notes: '- 并发与重定向测试',
+      appPackage: {
+        url: 'https://github.com/LionKo/t3tools/releases/download/v0.2.0/T3Tools-v0.2.0-app.zip',
+        sha256: validSha,
+        size: zipBytes.length
+      }
+    };
+
+    const fakeFetch = async url => {
+      if (url.endsWith('/latest.json')) {
+        await new Promise(r => setTimeout(r, 25));
+        return { ok: true, status: 200, url, json: async () => manifestPayload };
+      }
+      if (url.includes('github.com')) {
+        downloadCalls++;
+        return {
+          ok: false,
+          status: 302,
+          headers: new Headers({
+            location: redirectToEvil
+              ? 'https://evil.example.com/malware.zip'
+              : 'https://objects.githubusercontent.com/t3tools/T3Tools-v0.2.0-app.zip'
+          })
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        url,
+        headers: new Headers({ 'content-length': String(zipBytes.length) }),
+        arrayBuffer: async () => zipBytes.buffer.slice(zipBytes.byteOffset, zipBytes.byteOffset + zipBytes.byteLength)
+      };
+    };
+
+    const updater = createAppUpdater({
+      currentVersion: '0.1.0',
+      settings,
+      paths: { pluginDataDir: dataDir },
+      appRoot,
+      fetchImpl: fakeFetch,
+      enableBackgroundCheck: false,
+      applyTimeoutMs: 60,
+      nodeVersion: '22.16.0'
+    });
+
+    // 1. Two concurrent first-time startInstall() calls must execute only ONE download
+    const [r1, r2] = await Promise.all([updater.startInstall(), updater.startInstall()]);
+    assert.equal(r1.ok, true);
+    assert.equal(r2.ok, true);
+    assert.equal(Boolean(r1.alreadyInProgress || r2.alreadyInProgress), true);
+    const done = await updater.waitForInstall();
+    assert.equal(done.status, 'ready');
+    assert.equal(downloadCalls, 1);
+
+    // 2. If tray never takes over within applyTimeoutMs, status recovers to error instead of hanging forever
+    await new Promise(r => setTimeout(r, 110));
+    const timedOut = updater.getStatus();
+    assert.equal(timedOut.status, 'error');
+    assert.equal(timedOut.applyRequestedAtMs, null);
+    assert.match(timedOut.lastError, /超时/);
+
+    // 3. Untrusted redirect hop must be rejected before fetching the evil host
+    redirectToEvil = true;
+    await updater.startInstall();
+    const evilRes = await updater.waitForInstall();
+    assert.equal(evilRes.status, 'error');
+    assert.match(evilRes.lastError, /白名单/);
+
+    // 4. Blocking _staging with a regular file must be caught cleanly (no unhandled rejection)
+    redirectToEvil = false;
+    rmSync(join(relRoot, '_staging'), { recursive: true, force: true });
+    writeFileSync(join(relRoot, '_staging'), 'blocking-file', 'utf8');
+    await updater.startInstall();
+    const fsErr = await updater.waitForInstall();
+    assert.equal(fsErr.status, 'error');
+    assert.ok(fsErr.lastError.length > 0);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -284,6 +397,7 @@ test('compiled T3Tools.exe --apply-update performs atomic delta swap, preserves 
     const zipSrc = join(tmp, 'zip_src');
     mkdirSync(join(zipSrc, 'app', 'bin'), { recursive: true });
     writeFileSync(join(zipSrc, 'app', 'bin', 't3tools.mjs'), 'console.log("v0.2.0-updated");\n', 'utf8');
+    writeFileSync(join(zipSrc, 'app', 'package.json'), JSON.stringify({ name: 't3tools', version: '0.2.0' }), 'utf8');
     writeFileSync(join(zipSrc, 'T3Tools.exe'), readFileSync(compiledExe));
     writeFileSync(join(zipSrc, 'release.json'), JSON.stringify({
       version: '0.2.0',
@@ -313,7 +427,16 @@ test('compiled T3Tools.exe --apply-update performs atomic delta swap, preserves 
     assert.match(readFileSync(join(installDir, 'app', 'bin', 't3tools.mjs'), 'utf8'), /v0\.1\.0/);
     assert.equal(existsSync(join(dataDir, 'last-update-error.json')), true);
 
-    // 2. Valid SHA-256 performs atomic swap, preserves runtime/node.exe and portable installMode, cleans _staging
+    // 2. Version mismatch inside package.json must fail cleanly before touching live files
+    const wrongVer = spawnSync(
+      updaterCopy,
+      ['--apply-update', '--pid', '0', '--zip', zipPath, '--sha256', validSha, '--dst', installDir, '--from-version', '0.1.0', '--to-version', '0.9.9', '--no-relaunch'],
+      { encoding: 'utf8', windowsHide: true, env: { ...process.env, T3TOOLS_DIR: dataDir } }
+    );
+    assert.notEqual(wrongVer.status, 0);
+    assert.match(readFileSync(join(installDir, 'app', 'bin', 't3tools.mjs'), 'utf8'), /v0\.1\.0/);
+
+    // 3. Valid SHA-256 + matching version performs atomic swap, preserves runtime/node.exe and portable installMode, cleans _staging & _update_tx.json
     const okSwap = spawnSync(
       updaterCopy,
       ['--apply-update', '--pid', '0', '--zip', zipPath, '--sha256', validSha, '--dst', installDir, '--from-version', '0.1.0', '--to-version', '0.2.0', '--no-relaunch'],
@@ -326,6 +449,7 @@ test('compiled T3Tools.exe --apply-update performs atomic delta swap, preserves 
     assert.equal(nextRelease.version, '0.2.0');
     assert.equal(nextRelease.installMode, 'portable');
     assert.equal(existsSync(stagingDir), false);
+    assert.equal(existsSync(join(installDir, '_update_tx.json')), false);
     const justUpdated = JSON.parse(readFileSync(join(dataDir, 'just-updated.json'), 'utf8'));
     assert.equal(justUpdated.fromVersion, '0.1.0');
     assert.equal(justUpdated.toVersion, '0.2.0');

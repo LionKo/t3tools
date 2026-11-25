@@ -23,7 +23,16 @@ const DEFAULT_INITIAL_DELAY_MS = 15 * 1000; // 15 seconds after startup
 const DEFAULT_ERROR_BACKOFF_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_REQUEST_TIMEOUT_MS = 12000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 180000;
+const DEFAULT_APPLY_TIMEOUT_MS = 30000;
 const MAX_PACKAGE_BYTES = 160 * 1024 * 1024; // 160 MB safety cap
+const MAX_REDIRECT_HOPS = 5;
+
+const REPO_RELEASES_PREFIX = `/${APP_REPO_SLUG.toLowerCase()}/releases/`;
+const ALLOWED_ASSET_REDIRECT_HOSTS = new Set([
+  'objects.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'github-releases.githubusercontent.com'
+]);
 
 const DEFAULT_APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -36,7 +45,12 @@ function readJsonSafe(filePath) {
   }
 }
 
-export function isAllowedUpdateUrl(rawUrl, { allowLocalhost = false } = {}) {
+function normalizeWinPath(p) {
+  const full = resolve(String(p || ''));
+  return process.platform === 'win32' ? full.toLowerCase() : full;
+}
+
+export function isAllowedUpdateUrl(rawUrl, { allowLocalhost = false, allowAssetHost = true } = {}) {
   try {
     const u = new URL(String(rawUrl || '').trim());
     if (allowLocalhost && (u.protocol === 'http:' || u.protocol === 'https:')) {
@@ -44,12 +58,14 @@ export function isAllowedUpdateUrl(rawUrl, { allowLocalhost = false } = {}) {
     }
     if (u.protocol !== 'https:') return false;
     const host = u.hostname.toLowerCase();
-    return (
-      host === 'github.com' ||
-      host === 'objects.githubusercontent.com' ||
-      host === 'release-assets.githubusercontent.com' ||
-      host.endsWith('.githubusercontent.com')
-    );
+    const pathLower = u.pathname.toLowerCase();
+    if (host === 'github.com') {
+      return pathLower === `/${APP_REPO_SLUG.toLowerCase()}/releases` || pathLower.startsWith(REPO_RELEASES_PREFIX);
+    }
+    if (allowAssetHost && ALLOWED_ASSET_REDIRECT_HOSTS.has(host)) {
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -67,13 +83,57 @@ function safeHexEqual(a, b) {
 }
 
 /**
+ * Fetch with explicit hop-by-hop redirect validation against our GitHub allowlist
+ * so an open redirect can never steer a download to an untrusted host.
+ */
+async function fetchWithValidatedRedirects(fetchImpl, initialUrl, {
+  headers = {},
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  allowLocalhost = false,
+  initialAllowAssetHost = false
+} = {}) {
+  let currentUrl = String(initialUrl || '').trim();
+  if (!isAllowedUpdateUrl(currentUrl, { allowLocalhost, allowAssetHost: initialAllowAssetHost })) {
+    throw new Error('更新地址不在允许的仓库白名单内');
+  }
+
+  for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
+    const res = await fetchImpl(currentUrl, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!res) throw new Error('网络请求无响应');
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers?.get?.('location');
+      if (!location) throw new Error(`重定向响应缺少 Location (HTTP ${res.status})`);
+      const nextUrl = new URL(location, currentUrl).toString();
+      if (!isAllowedUpdateUrl(nextUrl, { allowLocalhost, allowAssetHost: true })) {
+        throw new Error('更新重定向目标不在受信任的 GitHub 域名白名单内');
+      }
+      currentUrl = nextUrl;
+      continue;
+    }
+
+    if (res.url && !isAllowedUpdateUrl(res.url, { allowLocalhost, allowAssetHost: true })) {
+      throw new Error('更新响应地址不在受信任的 GitHub 域名白名单内');
+    }
+    return res;
+  }
+  throw new Error('更新请求重定向次数过多');
+}
+
+/**
  * Inspect where T3Tools is running from:
  * - Installed/portable layout: <installDir>/T3Tools.exe + <installDir>/release.json + <installDir>/app/...
  * - Dev checkout layout: contains .git or lacks release.json/T3Tools.exe -> auto-update disabled to protect source tree.
  */
 export function detectInstallContext({
   appRoot = DEFAULT_APP_ROOT,
-  nodeVersion = process.versions.node
+  nodeVersion = process.versions.node,
+  trayExeOverride = process.env.T3TOOLS_TRAY_EXE || ''
 } = {}) {
   const resolvedAppRoot = resolve(appRoot);
   const parentDir = dirname(resolvedAppRoot);
@@ -114,6 +174,23 @@ export function detectInstallContext({
   }
 
   const mode = releaseMeta.installMode === 'portable' ? 'portable' : 'installed';
+
+  // If a parent tray process declared its executable path, verify it belongs to this installDir
+  const declaredTray = String(trayExeOverride || '').trim();
+  if (declaredTray && normalizeWinPath(declaredTray) !== normalizeWinPath(trayExePath)) {
+    return {
+      mode,
+      canAutoUpdate: false,
+      cannotUpdateReason: '当前托盘程序与后台服务不在同一安装目录，请从同一目录重启 T3Tools 后再更新',
+      installDir,
+      appRoot: resolvedAppRoot,
+      trayExePath,
+      hasBundledNode,
+      nodeVersion: String(nodeVersion || ''),
+      channel: String(releaseMeta.channel || 'stable')
+    };
+  }
+
   return {
     mode,
     canAutoUpdate: true,
@@ -128,7 +205,7 @@ export function detectInstallContext({
 }
 
 /**
- * Pick lightweight appPackage (~200KB) for normal updates, and fall back to
+ * Pick lightweight appPackage (~245KB) for normal updates, and fall back to
  * fullPackage (with bundled node.exe) only when minNodeVersion exceeds local Node.
  */
 export function selectUpdatePackage(manifest, {
@@ -142,7 +219,9 @@ export function selectUpdatePackage(manifest, {
     const url = String(raw.url || '').trim();
     const sha256 = String(raw.sha256 || '').trim().toLowerCase();
     const size = Number(raw.size) || 0;
-    if (!url || !isAllowedUpdateUrl(url, { allowLocalhost }) || !isValidSha256(sha256)) return null;
+    if (!url || !isAllowedUpdateUrl(url, { allowLocalhost, allowAssetHost: false }) || !isValidSha256(sha256)) {
+      return null;
+    }
     return { kind, url, sha256, size };
   };
 
@@ -156,7 +235,10 @@ export function selectUpdatePackage(manifest, {
     compareSemver(currentNodeVersion, minNode) === -1
   );
 
-  if (needsNodeUpgrade && fullPkg) return fullPkg;
+  if (needsNodeUpgrade) {
+    // Never downgrade or serve a delta app package when the runtime requires a Node upgrade
+    return fullPkg;
+  }
   if (appPkg) return appPkg;
   if (fullPkg) return fullPkg;
   return null;
@@ -164,7 +246,7 @@ export function selectUpdatePackage(manifest, {
 
 function normalizeReleaseUrl(manifest) {
   const candidate = String(manifest?.releaseUrl || '').trim();
-  if (candidate && isAllowedUpdateUrl(candidate)) return candidate;
+  if (candidate && isAllowedUpdateUrl(candidate, { allowAssetHost: false })) return candidate;
   const ver = String(manifest?.version || '').trim().replace(/^v/i, '');
   return ver ? `${APP_RELEASES_URL}/tag/v${encodeURIComponent(ver)}` : APP_RELEASES_URL;
 }
@@ -174,6 +256,20 @@ function consumeJsonMarker(filePath) {
   const parsed = readJsonSafe(filePath);
   try { unlinkSync(filePath); } catch {}
   return parsed && typeof parsed === 'object' ? parsed : null;
+}
+
+function cleanupStalePendingUpdate(installDir, currentVersion) {
+  if (!installDir) return;
+  const pendingPath = join(installDir, '_staging', 'pending-update.json');
+  const pending = readJsonSafe(pendingPath);
+  if (!pending) return;
+  const pendingVer = String(pending.version || '').trim();
+  const requestedAtMs = Number(pending.requestedAtMs) || 0;
+  const isOutdated = Boolean(pendingVer && compareSemver(pendingVer, currentVersion) <= 0);
+  const isExpired = requestedAtMs > 0 && (Date.now() - requestedAtMs) > 10 * 60 * 1000;
+  if (isOutdated || isExpired) {
+    try { unlinkSync(pendingPath); } catch {}
+  }
 }
 
 export function createAppUpdater({
@@ -189,15 +285,20 @@ export function createAppUpdater({
   errorBackoffMs = DEFAULT_ERROR_BACKOFF_MS,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   downloadTimeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
+  applyTimeoutMs = DEFAULT_APPLY_TIMEOUT_MS,
   nodeVersion = process.versions.node,
+  trayExeOverride = process.env.T3TOOLS_TRAY_EXE || '',
   allowLocalhostForTest = false
 } = {}) {
-  const installCtx = detectInstallContext({ appRoot, nodeVersion });
+  const installCtx = detectInstallContext({ appRoot, nodeVersion, trayExeOverride });
   const justUpdatedPath = paths?.pluginDataDir ? join(paths.pluginDataDir, 'just-updated.json') : '';
   const lastUpdateErrorPath = paths?.pluginDataDir ? join(paths.pluginDataDir, 'last-update-error.json') : '';
 
   const justUpdated = consumeJsonMarker(justUpdatedPath);
   const previousSwapError = consumeJsonMarker(lastUpdateErrorPath);
+  if (installCtx.canAutoUpdate) {
+    cleanupStalePendingUpdate(installCtx.installDir, currentVersion);
+  }
 
   const state = {
     status: previousSwapError?.error ? 'error' : 'idle',
@@ -220,10 +321,31 @@ export function createAppUpdater({
   };
 
   let inFlightCheck = null;
-  let inFlightDownload = null;
+  let inFlightInstall = null;
+  let applyTimeoutTimer = null;
   let initialTimer = null;
   let intervalTimer = null;
   let stopped = false;
+
+  function clearApplyTimeout() {
+    if (applyTimeoutTimer) {
+      clearTimeout(applyTimeoutTimer);
+      applyTimeoutTimer = null;
+    }
+  }
+
+  function armApplyTimeout() {
+    clearApplyTimeout();
+    if (!Number.isFinite(applyTimeoutMs) || applyTimeoutMs <= 0) return;
+    applyTimeoutTimer = setTimeout(() => {
+      applyTimeoutTimer = null;
+      if (stopped || state.status !== 'ready') return;
+      state.status = 'error';
+      state.applyRequestedAtMs = null;
+      state.lastError = '等待托盘接管更新超时，请确认从 T3Tools 托盘程序运行后重试';
+    }, applyTimeoutMs);
+    applyTimeoutTimer.unref?.();
+  }
 
   function readUpdateSettings() {
     const cfg = settings?.get?.() || {};
@@ -302,23 +424,18 @@ export function createAppUpdater({
 
     inFlightCheck = (async () => {
       try {
-        if (!isAllowedUpdateUrl(manifestUrl, { allowLocalhost: allowLocalhostForTest })) {
-          throw new Error('更新清单地址不受信任');
-        }
-        const res = await fetchImpl(manifestUrl, {
-          method: 'GET',
+        const res = await fetchWithValidatedRedirects(fetchImpl, manifestUrl, {
           headers: {
             Accept: 'application/json',
             'Cache-Control': 'no-cache',
             'User-Agent': `T3Tools/${currentVersion}`
           },
-          signal: AbortSignal.timeout(requestTimeoutMs)
+          timeoutMs: requestTimeoutMs,
+          allowLocalhost: allowLocalhostForTest,
+          initialAllowAssetHost: false
         });
-        if (!res || !res.ok) {
-          throw new Error(`检查更新失败 (HTTP ${res?.status ?? 'network'})`);
-        }
-        if (res.url && !isAllowedUpdateUrl(res.url, { allowLocalhost: allowLocalhostForTest })) {
-          throw new Error('更新清单重定向到不受信任的域名');
+        if (!res.ok) {
+          throw new Error(`检查更新失败 (HTTP ${res.status})`);
         }
         const manifest = await res.json();
         const latestVer = String(manifest?.version || '').trim().replace(/^v/i, '');
@@ -341,11 +458,12 @@ export function createAppUpdater({
         state.releaseUrl = normalizeReleaseUrl(manifest);
         state.releaseNotes = String(manifest.notes || '').trim();
         state.minNodeVersion = String(manifest.minNodeVersion || '').trim();
-        state.selectedPackage = pkg;
         state.hasUpdate = hasUpdate;
-        state.lastError = '';
 
-        if (!busyInstall || state.stagedVersion !== latestVer) {
+        const stillBusy = ['downloading', 'verifying', 'ready', 'applying'].includes(state.status);
+        if (!stillBusy) {
+          state.selectedPackage = pkg;
+          state.lastError = '';
           state.status = hasUpdate ? 'available' : 'up-to-date';
           if (!hasUpdate) {
             state.downloadedBytes = 0;
@@ -359,7 +477,8 @@ export function createAppUpdater({
       } catch (err) {
         state.checkedAtMs = Date.now();
         state.lastError = err?.message || '检查更新失败';
-        if (!busyInstall) {
+        const stillBusy = ['downloading', 'verifying', 'ready', 'applying'].includes(state.status);
+        if (!stillBusy) {
           state.status = state.hasUpdate ? 'available' : 'error';
         }
       } finally {
@@ -383,13 +502,11 @@ export function createAppUpdater({
 
   async function downloadAndStagePackage(targetVersion, pkg) {
     const stagingDir = join(installCtx.installDir, '_staging');
-    mkdirSync(stagingDir, { recursive: true });
-    cleanStaleStagingFiles(stagingDir, `T3Tools-v${targetVersion}`);
-
     const safeVer = targetVersion.replace(/[^0-9A-Za-z._-]/g, '_');
     const finalZipPath = join(stagingDir, `T3Tools-v${safeVer}-${pkg.kind}.zip`);
     const partZipPath = `${finalZipPath}.part`;
 
+    clearApplyTimeout();
     state.status = 'downloading';
     state.downloadedBytes = 0;
     state.progressPercent = 0;
@@ -401,20 +518,17 @@ export function createAppUpdater({
 
     let writeStream = null;
     try {
-      if (!isAllowedUpdateUrl(pkg.url, { allowLocalhost: allowLocalhostForTest })) {
-        throw new Error('更新包下载地址不在白名单内');
-      }
+      mkdirSync(stagingDir, { recursive: true });
+      cleanStaleStagingFiles(stagingDir, `T3Tools-v${safeVer}`);
 
-      const res = await fetchImpl(pkg.url, {
-        method: 'GET',
+      const res = await fetchWithValidatedRedirects(fetchImpl, pkg.url, {
         headers: { 'User-Agent': `T3Tools/${currentVersion}` },
-        signal: AbortSignal.timeout(downloadTimeoutMs)
+        timeoutMs: downloadTimeoutMs,
+        allowLocalhost: allowLocalhostForTest,
+        initialAllowAssetHost: false
       });
-      if (!res || !res.ok) {
-        throw new Error(`下载更新包失败 (HTTP ${res?.status ?? 'network'})`);
-      }
-      if (res.url && !isAllowedUpdateUrl(res.url, { allowLocalhost: allowLocalhostForTest })) {
-        throw new Error('更新包下载重定向到不受信任的域名');
+      if (!res.ok) {
+        throw new Error(`下载更新包失败 (HTTP ${res.status})`);
       }
 
       const totalBytes = Number(res.headers?.get?.('content-length')) || pkg.size || 0;
@@ -424,24 +538,43 @@ export function createAppUpdater({
 
       const hash = createHash('sha256');
       writeStream = createWriteStream(partZipPath);
-
-      const writeChunk = chunk => new Promise((resolveWrite, rejectWrite) => {
-        if (!writeStream.write(chunk)) {
-          writeStream.once('drain', resolveWrite);
-          writeStream.once('error', rejectWrite);
-        } else {
-          resolveWrite();
-        }
+      let streamError = null;
+      const streamErrorPromise = new Promise((_, rejectStream) => {
+        writeStream.once('error', err => {
+          streamError = err;
+          rejectStream(err);
+        });
       });
+      // Prevent unhandled rejection when stream closes without error
+      streamErrorPromise.catch(() => {});
+
+      const writeChunk = chunk => {
+        if (streamError) return Promise.reject(streamError);
+        return new Promise((resolveWrite, rejectWrite) => {
+          if (!writeStream.write(chunk)) {
+            const onDrain = () => { cleanup(); resolveWrite(); };
+            const onErr = err => { cleanup(); rejectWrite(err); };
+            const cleanup = () => {
+              writeStream?.off('drain', onDrain);
+              writeStream?.off('error', onErr);
+            };
+            writeStream.once('drain', onDrain);
+            writeStream.once('error', onErr);
+          } else {
+            resolveWrite();
+          }
+        });
+      };
 
       if (res.body && typeof res.body.getReader === 'function') {
         const reader = res.body.getReader();
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await Promise.race([reader.read(), streamErrorPromise]);
           if (done) break;
           const buf = Buffer.from(value);
           state.downloadedBytes += buf.length;
           if (state.downloadedBytes > MAX_PACKAGE_BYTES) {
+            try { await reader.cancel(); } catch {}
             throw new Error('更新包实际体积超出安全上限');
           }
           hash.update(buf);
@@ -461,6 +594,7 @@ export function createAppUpdater({
         state.progressPercent = 99;
       }
 
+      if (streamError) throw streamError;
       await new Promise((resolveEnd, rejectEnd) => {
         writeStream.once('finish', resolveEnd);
         writeStream.once('error', rejectEnd);
@@ -496,6 +630,7 @@ export function createAppUpdater({
       state.applyRequestedAtMs = requestedAtMs;
       state.status = 'ready';
       state.lastError = '';
+      armApplyTimeout();
       return getStatus();
     } catch (err) {
       if (writeStream) {
@@ -509,50 +644,77 @@ export function createAppUpdater({
     }
   }
 
-  async function startInstall() {
+  /**
+   * Single-flight install entry: acquires `inFlightInstall` synchronously BEFORE any await
+   * so concurrent callers can never race on the same staging file or crash the daemon.
+   */
+  function startInstall() {
     if (!installCtx.canAutoUpdate) {
-      return {
+      return Promise.resolve({
         ok: false,
         error: installCtx.cannotUpdateReason || '当前安装方式不支持自动更新',
         status: getStatus()
-      };
+      });
     }
 
-    if (inFlightDownload) {
-      return { ok: true, alreadyInProgress: true, status: getStatus() };
+    if (inFlightInstall) {
+      return Promise.resolve({ ok: true, alreadyInProgress: true, status: getStatus() });
     }
 
     if (state.status === 'ready' && state.stagedZipPath && existsSync(state.stagedZipPath)) {
       state.applyRequestedAtMs = Date.now();
-      return { ok: true, ready: true, status: getStatus() };
+      armApplyTimeout();
+      return Promise.resolve({ ok: true, ready: true, status: getStatus() });
     }
 
-    if (!state.hasUpdate || !state.selectedPackage) {
-      await checkForUpdates({ force: true });
-    }
-    if (!state.hasUpdate) {
-      return { ok: false, error: '当前已是最新版本', status: getStatus() };
-    }
-    if (!state.selectedPackage) {
-      return {
-        ok: false,
-        error: '该版本缺少有效的校验信息或更新包，请手动前往 GitHub Releases 下载',
-        status: getStatus()
-      };
-    }
+    let resolveInitial;
+    const initialReply = new Promise(r => { resolveInitial = r; });
 
-    const targetVersion = state.latestVersion;
-    const pkg = state.selectedPackage;
-    // Clear skippedVersion when user explicitly initiates update
-    if (readUpdateSettings().skippedVersion) {
-      try { settings?.update?.({ appUpdates: { skippedVersion: '' } }); } catch {}
-    }
+    const run = (async () => {
+      try {
+        if (!state.hasUpdate || !state.selectedPackage) {
+          await checkForUpdates({ force: true });
+        }
+        if (!state.hasUpdate) {
+          const reply = { ok: false, error: '当前已是最新版本', status: getStatus() };
+          resolveInitial(reply);
+          return reply.status;
+        }
+        if (!state.selectedPackage) {
+          const reply = {
+            ok: false,
+            error: '该版本缺少有效的校验信息或更新包，请手动前往 GitHub Releases 下载',
+            status: getStatus()
+          };
+          resolveInitial(reply);
+          return reply.status;
+        }
 
-    inFlightDownload = downloadAndStagePackage(targetVersion, pkg).finally(() => {
-      inFlightDownload = null;
-    });
+        const targetVersion = state.latestVersion;
+        const pkg = state.selectedPackage;
+        if (readUpdateSettings().skippedVersion) {
+          try { settings?.update?.({ appUpdates: { skippedVersion: '' } }); } catch {}
+        }
 
-    return { ok: true, started: true, status: getStatus() };
+        state.status = 'downloading';
+        state.lastError = '';
+        state.progressPercent = 0;
+        resolveInitial({ ok: true, started: true, status: getStatus() });
+
+        return await downloadAndStagePackage(targetVersion, pkg);
+      } catch (err) {
+        state.status = 'error';
+        state.lastError = err?.message || '启动更新失败';
+        state.applyRequestedAtMs = null;
+        resolveInitial({ ok: false, error: state.lastError, status: getStatus() });
+        return getStatus();
+      } finally {
+        if (inFlightInstall === run) inFlightInstall = null;
+      }
+    })();
+
+    inFlightInstall = run;
+    return initialReply;
   }
 
   function skipVersion(version = '') {
@@ -587,6 +749,7 @@ export function createAppUpdater({
 
   function stop() {
     stopped = true;
+    clearApplyTimeout();
     if (initialTimer) {
       clearTimeout(initialTimer);
       initialTimer = null;
@@ -602,7 +765,7 @@ export function createAppUpdater({
     checkForUpdates,
     startInstall,
     skipVersion,
-    waitForInstall: () => inFlightDownload || Promise.resolve(getStatus()),
+    waitForInstall: () => inFlightInstall || Promise.resolve(getStatus()),
     start,
     stop
   };
