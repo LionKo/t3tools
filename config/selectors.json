@@ -1,0 +1,92 @@
+{
+  "version": 2,
+  "description": "T3 Code 前端稳定锚点选择器配置（按优先级从高到低匹配；T3 Code 大版本更新时通常只需调整此文件）",
+  "anchors": {
+    "composerFooter": [
+      "[data-chat-composer-footer]"
+    ],
+    "composerFooterRightActions": [
+      "[data-chat-composer-actions=\"right\"]",
+      "[data-chat-composer-controls=\"footer\"]"
+    ],
+    "composerCard": [
+      "[data-chat-composer-form]",
+      "form:has(.composer-tiptap)",
+      "form:has(textarea)"
+    ],
+    "composerHost": [
+      "[data-slot=\"composer-host\"]",
+      "[data-chat-composer-form]",
+      "form:has(.composer-tiptap)",
+      "form:has(textarea)"
+    ],
+    "conversationArea": [
+      "[data-workspace-area=\"conversation\"]",
+      "main:has([data-chat-composer-form])",
+      "main"
+    ],
+    "chatHeader": [
+      "[data-chat-header]",
+      "[data-workspace-area=\"conversation\"] header"
+    ],
+    "sidebar": [
+      "[data-slot=\"sidebar-inner\"]",
+      "[data-slot=\"sidebar\"]",
+      "aside"
+    ],
+    "assistantMessages": [
+      "[data-message-role=\"assistant\"] .chat-markdown",
+      "[data-message-role=\"assistant\"]"
+    ],
+    "activeThreadItem": [
+      "[data-thread-item]:has([aria-current=\"page\"])",
+      "[data-thread-item][aria-current=\"page\"]",
+      "[data-thread-item][data-active=\"true\"]",
+      "[data-thread-item][data-selected=\"true\"]",
+      "[aria-current=\"page\"]"
+    ]
+  },
+  "routeThreadPatterns": [
+    "^/threads?/[^/?#]+/([^/?#]+)",
+    "^/threads?/([^/?#]+)$",
+    "^/(?!settings(?:/|$)|usage(?:/|$)|projects?(?:/|$)|themes?(?:/|$)|login(?:/|$)|auth(?:/|$))[^/?#]+/([^/?#]+)",
+    "^/c/([^/?#]+)",
+    "[?&]thread(?:Id)?=([^&#]+)"
+  ],
+  "theme": {
+    "darkClass": "dark",
+    "cssVars": [
+      "--background",
+      "--foreground",
+      "--card",
+      "--card-foreground",
+      "--popover",
+      "--popover-foreground",
+      "--primary",
+      "--primary-foreground",
+      "--secondary",
+      "--secondary-foreground",
+      "--muted",
+      "--muted-foreground",
+      "--accent",
+      "--accent-foreground",
+      "--destructive",
+      "--destructive-foreground",
+      "--border",
+      "--input",
+      "--ring",
+      "--radius",
+      "--warning",
+      "--success",
+      "--info",
+      "--chart-1",
+      "--chart-2",
+      "--chart-3",
+      "--chart-4",
+      "--chart-5",
+      "--chart-6",
+      "--font-sans",
+      "--font-mono"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "t3tools",
+  "version": "0.1.0",
+  "description": "Windows T3 Code 原生增强插件：上下文/缓存/实时速度监控、运行阶段与多模型组额度卡片、周限额周期用量看板、53周热力图与异常掉缓存排查",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "t3tools": "./bin/t3tools.mjs"
+  },
+  "scripts": {
+    "start": "node ./bin/t3tools.mjs start",
+    "status": "node ./bin/t3tools.mjs status",
+    "doctor": "node ./bin/t3tools.mjs doctor",
+    "install-launcher": "node ./bin/t3tools.mjs install",
+    "uninstall-launcher": "node ./bin/t3tools.mjs uninstall",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
