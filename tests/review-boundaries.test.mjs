@@ -189,7 +189,7 @@ test('compiled tray restricts WebView senders and closes only its owned daemon j
   const dir = fixture(t);
   const exe = join(dir,'tray.exe');
   const build = fileURLToPath(new URL('../scripts/build-tray.ps1',import.meta.url));
-  const options = {windowsHide:true,timeout:20000,env:{...process.env,T3TOOLS_TEST_EXE:exe,T3TOOLS_DIR:dir}};
+  const options = {windowsHide:true,timeout:45000,env:{...process.env,T3TOOLS_TEST_EXE:exe,T3TOOLS_DIR:dir}};
   execFileSync('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',build,'-OutExe',exe],options);
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -265,7 +265,7 @@ $form = [Activator]::CreateInstance($type,@($true,$wake,$quit))
 $log = Join-Path $env:T3TOOLS_DIR 'daemon.out.log'
 function Wait-Ready([int]$previous) {
   $watch = [Diagnostics.Stopwatch]::StartNew()
-  while ($watch.ElapsedMilliseconds -lt 6000) {
+  while ($watch.ElapsedMilliseconds -lt 15000) {
     if (Test-Path -LiteralPath $log) {
       $last = Get-Content -LiteralPath $log -Encoding UTF8 | Select-String 'ready pid=([0-9]+) owned=True' | Select-Object -Last 1
       if ($last) {

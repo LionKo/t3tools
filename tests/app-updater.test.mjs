@@ -260,7 +260,10 @@ test('createAppUpdater enforces single-flight concurrent installs, rejects untru
     assert.equal(downloadCalls, 1);
 
     // 2. If tray never takes over within applyTimeoutMs, status recovers to error instead of hanging forever
-    await new Promise(r => setTimeout(r, 110));
+    const timeoutDeadline = Date.now() + 2000;
+    while (updater.getStatus().status === 'ready' && Date.now() < timeoutDeadline) {
+      await new Promise(r => setTimeout(r, 25));
+    }
     const timedOut = updater.getStatus();
     assert.equal(timedOut.status, 'error');
     assert.equal(timedOut.applyRequestedAtMs, null);

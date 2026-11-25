@@ -92,7 +92,7 @@ jobs:
 
       - name: Run full test suite
         shell: pwsh
-        run: node --test tests/*.test.mjs
+        run: node --test --test-concurrency=2 --test-reporter=spec tests/*.test.mjs
 
       - name: Generate release notes for latest.json
         shell: pwsh
