@@ -201,6 +201,7 @@ export function createHttpServer({
       const mutatingPaths = new Set([
         '/api/settings',
         '/api/errors/ack', '/api/t3/focus-thread', '/api/alerts/test',
+        '/api/runtime-updates/check',
         '/api/sync',
         '/api/cdp/reattach',
         '/api/cdp/toggle',
@@ -220,7 +221,12 @@ export function createHttpServer({
           sendJson(res, 415, { ok: false, error: 'Unsupported Media Type: expected application/json' });
           return;
         }
-        const action = { '/api/errors/ack': 'ackErrors', '/api/t3/focus-thread': 'focusThread', '/api/alerts/test': 'testAlert' }[pathname];
+        const action = {
+          '/api/errors/ack': 'ackErrors',
+          '/api/t3/focus-thread': 'focusThread',
+          '/api/alerts/test': 'testAlert',
+          '/api/runtime-updates/check': 'checkRuntimeUpdates'
+        }[pathname];
         if (action) {
           const body = await readJsonBody(req);
           sendJson(res, 200, { ok: true, data: await handleRpc(action, body) });

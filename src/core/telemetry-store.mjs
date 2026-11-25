@@ -207,6 +207,14 @@ function initializeStore(db) {
   const recentBySessionStmt = db.prepare('SELECT * FROM requests WHERE native_session_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
   const listRolloutDedupeStmt = db.prepare("SELECT dedupe_key FROM requests WHERE source_key LIKE 'codex-rollout:%' AND dedupe_key IS NOT NULL");
   const sourceUsageCountsStmt = db.prepare("SELECT source_key, COUNT(*) AS cnt FROM requests WHERE source_key LIKE ? AND status != 'error' GROUP BY source_key");
+  const rangeUsageSummaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) AS requests,
+      COALESCE(SUM(COALESCE(cost_usd, 0)), 0) AS cost_usd,
+      COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
+    FROM requests
+    WHERE billing_ts_ms >= ? AND billing_ts_ms <= ?
+  `);
   const allQuotasStmt = db.prepare('SELECT * FROM quota_snapshots ORDER BY account_id, kind, window_id');
 
   function getRevision() {
@@ -454,6 +462,15 @@ function initializeStore(db) {
     }));
   }
 
+  function getRangeUsageSummary(startMs, endMs) {
+    const row = rangeUsageSummaryStmt.get(Math.trunc(startMs || 0), Math.trunc(endMs || Date.now()));
+    return {
+      requests: Number(row?.requests) || 0,
+      costUsd: Number((Number(row?.cost_usd) || 0).toFixed(6)),
+      totalTokens: Number(row?.total_tokens) || 0
+    };
+  }
+
   function close() {
     try { db.close(); } catch {}
   }
@@ -480,6 +497,7 @@ function initializeStore(db) {
     },
     listRecentRequestsForThread,
     listQuotaSnapshots,
+    getRangeUsageSummary,
     close
   };
 }

@@ -75,8 +75,14 @@
       if (!j.ok) throw new Error(j.error || '请求失败');
       return j.data;
     }
-    if (['focusThread','ackErrors','testAlert'].includes(action)) {
-      const path = action === 'focusThread' ? '/api/t3/focus-thread' : action === 'testAlert' ? '/api/alerts/test' : '/api/errors/ack';
+    if (['focusThread','ackErrors','testAlert','checkRuntimeUpdates'].includes(action)) {
+      const path = action === 'focusThread'
+        ? '/api/t3/focus-thread'
+        : action === 'testAlert'
+          ? '/api/alerts/test'
+          : action === 'checkRuntimeUpdates'
+            ? '/api/runtime-updates/check'
+            : '/api/errors/ack';
       const res = await fetch(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
       const json = await res.json();
       if (!json.ok) throw new Error(json.error);
@@ -104,10 +110,31 @@
     return (await r.json()).data;
   }
 
+  function safeComputedStyle(el) {
+    try {
+      return typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function getElementRect(el) {
+    if (!el || typeof el.getBoundingClientRect !== 'function') return null;
+    try {
+      const rect = el.getBoundingClientRect();
+      if (!rect || !Number.isFinite(rect.width) || !Number.isFinite(rect.height)) return null;
+      return rect;
+    } catch {
+      return null;
+    }
+  }
+
   function isVisibleElement(el) {
     if (!el || typeof el.getBoundingClientRect !== 'function') return false;
     if (el.closest?.('[data-t3tools]')) return false;
-    const rect = el.getBoundingClientRect();
+    const cs = safeComputedStyle(el);
+    if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false;
+    const rect = getElementRect(el);
     return Boolean(rect && rect.width > 0 && rect.height > 0);
   }
 
@@ -120,6 +147,490 @@
       } catch {}
     }
     return null;
+  }
+
+  function findVisibleAnchor(key) {
+    const list = selectors.anchors?.[key] || [];
+    for (const sel of list) {
+      try {
+        const nodes = typeof document.querySelectorAll === 'function'
+          ? document.querySelectorAll(sel)
+          : (document.querySelector?.(sel) ? [document.querySelector(sel)] : []);
+        for (const el of nodes) {
+          if (isVisibleElement(el)) return el;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  const EXCLUDED_DOCK_TAGS = new Set([
+    'IFRAME', 'WEBVIEW', 'CANVAS', 'SVG', 'VIDEO', 'IMG',
+    'INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'DIALOG', 'HEADER', 'FOOTER', 'NAV'
+  ]);
+  const TRANSIENT_POPUP_SELECTOR = '[role="menu"],[role="listbox"],[role="tooltip"],[data-t3tools]';
+  const CHAT_STREAM_NODE_SELECTOR = '[data-message-role],[data-chat-composer-form],[data-chat-composer-footer]';
+
+  function isVerticalFlexContainer(el) {
+    const cs = safeComputedStyle(el);
+    if (!cs) return false;
+    const disp = String(cs.display || '');
+    const dir = String(cs.flexDirection || '');
+    const wrap = String(cs.flexWrap || '');
+    return (disp === 'flex' || disp === 'inline-flex') && dir === 'column' && wrap !== 'wrap';
+  }
+
+  function isSingleColumnGrid(el) {
+    const cs = safeComputedStyle(el);
+    if (!cs) return false;
+    const disp = String(cs.display || '');
+    if (disp !== 'grid' && disp !== 'inline-grid') return false;
+    const cols = String(cs.gridTemplateColumns || '').trim();
+    if (!cols || cols === 'none') return true;
+    return cols.split(/\s+/).filter(Boolean).length <= 1;
+  }
+
+  function hasVisualCardChrome(el) {
+    const cs = safeComputedStyle(el);
+    if (!cs) return false;
+    const bg = String(cs.backgroundColor || '').trim();
+    const isTransparentBg = !bg || bg === 'transparent' || /rgba\([^)]*,\s*0(?:\.0+)?\s*\)/i.test(bg);
+    const hasBg = !isTransparentBg;
+    const bw = parseFloat(cs.borderTopWidth || '0') + parseFloat(cs.borderLeftWidth || '0') +
+      parseFloat(cs.borderRightWidth || '0') + parseFloat(cs.borderBottomWidth || '0');
+    const ow = parseFloat(cs.outlineWidth || '0');
+    const radius = parseFloat(cs.borderTopLeftRadius || cs.borderRadius || '0');
+    const hasShadow = Boolean(cs.boxShadow && cs.boxShadow !== 'none');
+    const hasBackdrop = Boolean(cs.backdropFilter && cs.backdropFilter !== 'none');
+    return (hasBg && (bw > 0 || ow > 0 || hasShadow || hasBackdrop || radius >= 6)) || bw >= 2 || hasShadow;
+  }
+
+  function isVerticallyStackedBlock(el) {
+    const cs = safeComputedStyle(el);
+    if (!cs) return false;
+    const disp = String(cs.display || '');
+    if (disp !== 'block' && disp !== 'flow-root' && !isSingleColumnGrid(el)) return false;
+    const kids = Array.from(el.children || []).filter(ch => {
+      if (!ch || ch.getAttribute?.('data-t3tools') === '1') return false;
+      return isVisibleElement(ch);
+    });
+    if (!kids.length) return false;
+    for (const ch of kids) {
+      const tag = String(ch.tagName || '').toUpperCase();
+      if (['IFRAME', 'WEBVIEW', 'CANVAS', 'VIDEO'].includes(tag)) return false;
+    }
+    return true;
+  }
+
+  function getMaxChildBottom(el) {
+    let maxBottom = -Infinity;
+    const kids = Array.from(el?.children || []).filter(ch =>
+      ch && ch.getAttribute?.('data-t3tools') !== '1' && isVisibleElement(ch)
+    );
+    for (const ch of kids) {
+      const r = getElementRect(ch);
+      if (r && r.bottom > maxBottom) maxBottom = r.bottom;
+    }
+    return Number.isFinite(maxBottom) ? maxBottom : null;
+  }
+
+  function findPanelContentSummary(panelEl, vh) {
+    const panelRect = getElementRect(panelEl);
+    if (!panelRect) return null;
+    // Descend through full-height transparent scroll/padding wrappers (including header + scroll-body layouts)
+    let listContainer = panelEl;
+    for (let depth = 0; depth < 5 && listContainer; depth++) {
+      const curRect = getElementRect(listContainer) || panelRect;
+      const kids = Array.from(listContainer.children || []).filter(ch =>
+        ch && ch.getAttribute?.('data-t3tools') !== '1' && isVisibleElement(ch)
+      );
+      if (!kids.length) break;
+      let nextContainer = null;
+      if (kids.length === 1) {
+        const only = kids[0];
+        const onlyRect = getElementRect(only);
+        if (onlyRect && onlyRect.height >= curRect.height - 80 && !hasVisualCardChrome(only)) {
+          nextContainer = only;
+        }
+      } else {
+        // Handle [header/tabs or thin resize handle, full-height scroll body] inside a right panel
+        const dominantBody = kids.find(ch => {
+          if (hasVisualCardChrome(ch)) return false;
+          const r = getElementRect(ch);
+          if (!r || r.width < curRect.width * 0.75 || r.height < curRect.height * 0.65) return false;
+          const innerBottom = getMaxChildBottom(ch);
+          return innerBottom !== null && innerBottom < r.bottom - 80;
+        });
+        if (dominantBody) nextContainer = dominantBody;
+      }
+      if (!nextContainer) break;
+      const tag = String(nextContainer.tagName || '').toUpperCase();
+      if (EXCLUDED_DOCK_TAGS.has(tag)) break;
+      listContainer = nextContainer;
+    }
+
+    const contentKids = Array.from(listContainer.children || []).filter(ch =>
+      ch && ch.getAttribute?.('data-t3tools') !== '1' && isVisibleElement(ch)
+    );
+    if (!contentKids.length) {
+      return {
+        listContainer,
+        visualCard: hasVisualCardChrome(panelEl) ? panelEl : null,
+        contentBottom: panelRect.bottom,
+        contentLeft: panelRect.left,
+        contentRight: panelRect.right,
+        contentWidth: panelRect.width,
+        hasSpaceBelow: vh > 0 && (vh - panelRect.bottom) >= 90
+      };
+    }
+
+    let minLeft = Infinity;
+    let maxRight = -Infinity;
+    let maxBottom = -Infinity;
+    for (const ch of contentKids) {
+      const r = getElementRect(ch);
+      if (!r) continue;
+      if (r.left < minLeft) minLeft = r.left;
+      if (r.right > maxRight) maxRight = r.right;
+      if (r.bottom > maxBottom) maxBottom = r.bottom;
+    }
+    if (!Number.isFinite(maxBottom)) maxBottom = panelRect.bottom;
+    if (!Number.isFinite(minLeft)) minLeft = panelRect.left;
+    if (!Number.isFinite(maxRight)) maxRight = panelRect.right;
+
+    const singleVisualCard = contentKids.length === 1 && hasVisualCardChrome(contentKids[0]) ? contentKids[0] : null;
+    return {
+      listContainer,
+      visualCard: singleVisualCard || (hasVisualCardChrome(listContainer) ? listContainer : null),
+      contentBottom: maxBottom,
+      contentLeft: minLeft,
+      contentRight: maxRight,
+      contentWidth: Math.max(0, maxRight - minLeft),
+      hasSpaceBelow: vh > 0 && (vh - maxBottom) >= 90
+    };
+  }
+
+  function resolveDockableContainer(candidateEl, { isCompactCard = false, contentSummary = null } = {}) {
+    // If this is a right rail holding stacked cards with vertical room below, prefer docking as a stacked card inside the rail!
+    if (contentSummary?.hasSpaceBelow && contentSummary.listContainer && !hasVisualCardChrome(contentSummary.listContainer)) {
+      if (isVerticalFlexContainer(contentSummary.listContainer) || isVerticallyStackedBlock(contentSummary.listContainer)) {
+        return { container: contentSummary.listContainer, dockStyle: 'stack' };
+      }
+    }
+
+    let cur = candidateEl;
+    let blockFallback = null;
+    const allowBlock = Boolean(isCompactCard || contentSummary?.hasSpaceBelow);
+    for (let depth = 0; depth <= 5 && cur; depth++) {
+      if (isVerticalFlexContainer(cur)) {
+        if (allowBlock && !hasVisualCardChrome(cur)) {
+          const kids = Array.from(cur.children || []).filter(ch => ch && ch.getAttribute?.('data-t3tools') !== '1' && isVisibleElement(ch));
+          if (kids.length === 1 && hasVisualCardChrome(kids[0]) && (isVerticalFlexContainer(kids[0]) || isVerticallyStackedBlock(kids[0]))) {
+            return { container: kids[0], dockStyle: 'flush' };
+          }
+        }
+        return { container: cur, dockStyle: contentSummary?.hasSpaceBelow && !hasVisualCardChrome(cur) ? 'stack' : 'flush' };
+      }
+      if (allowBlock && isVerticallyStackedBlock(cur)) {
+        if (hasVisualCardChrome(cur) || !blockFallback) {
+          blockFallback = cur;
+        }
+      }
+      const parentRect = getElementRect(cur);
+      const kids = Array.from(cur.children || []).filter(ch => {
+        if (!ch || ch.getAttribute?.('data-t3tools') === '1') return false;
+        return isVisibleElement(ch);
+      });
+      if (!kids.length) break;
+      let dominant = null;
+      if (kids.length === 1) {
+        dominant = kids[0];
+      } else if (parentRect) {
+        dominant = kids.find(ch => {
+          const r = getElementRect(ch);
+          return r && r.width >= parentRect.width * 0.85 && r.height >= parentRect.height * 0.85;
+        }) || null;
+      }
+      if (!dominant) break;
+      const tag = String(dominant.tagName || '').toUpperCase();
+      if (EXCLUDED_DOCK_TAGS.has(tag)) break;
+      cur = dominant;
+    }
+    if (allowBlock && blockFallback) {
+      return {
+        container: blockFallback,
+        dockStyle: hasVisualCardChrome(blockFallback) ? 'flush' : 'stack'
+      };
+    }
+    return null;
+  }
+
+  function findInnerChatAnchor() {
+    return (
+      findVisibleAnchor('composerCard') ||
+      findVisibleAnchor('composerHost') ||
+      findVisibleAnchor('composerFooter') ||
+      findVisibleAnchor('assistantMessages') ||
+      findVisibleAnchor('chatHeader') ||
+      null
+    );
+  }
+
+  function isCompactTopRightCardRect(rect, vw, vh) {
+    if (!rect || vw <= 0 || vh <= 0) return false;
+    return (
+      rect.width >= 180 &&
+      rect.width <= Math.min(540, vw * 0.58) &&
+      rect.height >= 72 &&
+      rect.height < Math.max(360, vh * 0.72) &&
+      rect.top >= 0 &&
+      rect.top <= 180 &&
+      rect.right >= vw - 64 &&
+      rect.right <= vw + 24 &&
+      rect.left >= vw * 0.35
+    );
+  }
+
+  function isTallRightPanelRect(rect, refLeftBound, convRect, vw, vh, isOverlay) {
+    if (!rect || vw <= 0 || vh <= 0) return false;
+    if (rect.width < 180 || rect.width > vw * 0.78) return false;
+    if (rect.height < Math.min(220, vh * 0.35)) return false;
+    if (rect.left < Math.max(vw * 0.24, refLeftBound)) return false;
+    if (rect.right > vw + 24 || rect.right < vw - 80) return false;
+    if (convRect && convRect.height > 0) {
+      const overlapY = Math.min(rect.bottom, convRect.bottom) - Math.max(rect.top, convRect.top);
+      if (overlapY < Math.min(160, convRect.height * 0.35)) return false;
+      if (!isOverlay && convRect.right < vw - 160) {
+        if (rect.left < convRect.right - 36) return false;
+      }
+    }
+    return true;
+  }
+
+  function isModalOrPopupNode(el, rect, vw, vh) {
+    if (!el) return true;
+    if (el.closest?.(TRANSIENT_POPUP_SELECTOR)) return true;
+    const dialogAncestor = el.closest?.('[role="dialog"],[aria-modal="true"]');
+    if (dialogAncestor) {
+      const dRect = getElementRect(dialogAncestor) || rect;
+      const isRightDrawer = Boolean(
+        dRect &&
+        dRect.right >= vw - 48 &&
+        dRect.left >= vw * 0.25 &&
+        dRect.width <= vw * 0.75 &&
+        (dRect.height >= Math.min(320, vh * 0.55) || isCompactTopRightCardRect(dRect, vw, vh))
+      );
+      if (!isRightDrawer) return true;
+    }
+    return false;
+  }
+
+  function containsChatStreamContent(el) {
+    if (!el) return false;
+    if (el.closest?.(CHAT_STREAM_NODE_SELECTOR)) return true;
+    try {
+      if (typeof el.querySelector === 'function' && el.querySelector(CHAT_STREAM_NODE_SELECTOR)) return true;
+    } catch {}
+    return false;
+  }
+
+  function isExcludedRightPanelCandidate(el, chatAnchorEl, convEl, sidebarEl, rect, vw, vh) {
+    if (!el || !isVisibleElement(el)) return true;
+    if (el === document.body || el === document.documentElement || el === sidebarEl) return true;
+    if (chatAnchorEl && (el === chatAnchorEl || el.contains?.(chatAnchorEl) || chatAnchorEl.contains?.(el))) return true;
+    if (convEl && (el === convEl || el.contains?.(convEl))) return true;
+    if (sidebarEl && (el.contains?.(sidebarEl) || sidebarEl.contains?.(el))) return true;
+    if (containsChatStreamContent(el)) return true;
+    const tag = String(el.tagName || '').toUpperCase();
+    if (EXCLUDED_DOCK_TAGS.has(tag)) return true;
+    if (isModalOrPopupNode(el, rect, vw, vh)) return true;
+    return false;
+  }
+
+  function hasPositionedAncestor(el, stopAt) {
+    let cur = el;
+    for (let depth = 0; depth < 6 && cur && cur !== stopAt && cur !== document.documentElement; depth++) {
+      const pos = String(safeComputedStyle(cur)?.position || '');
+      if (pos === 'fixed' || pos === 'absolute' || pos === 'sticky') return true;
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
+  function detectWorkspaceLayout(convEl, sidebarEl, vw, vh) {
+    const convRect = getElementRect(convEl);
+    const sidebarRect = getElementRect(sidebarEl);
+    const chatAnchorEl = findInnerChatAnchor();
+    const minPanelLeft = sidebarRect && sidebarRect.right < vw * 0.45
+      ? Math.round(sidebarRect.right) + 140
+      : 0;
+
+    if (vw <= 0 || vh <= 0) {
+      return { effectiveConvEl: convEl, effectiveConvRect: convRect, rightPanelInfo: null };
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    let splitConvEl = null;
+    let splitConvRect = null;
+
+    const probeDiag = [];
+    const addCandidate = (el, priority, matchedConvEl = null, matchedConvRect = null, { allowCompact = true } = {}) => {
+      if (!el || seen.has(el)) return;
+      seen.add(el);
+      const rect = getElementRect(el);
+      if (!rect) return;
+      if (isExcludedRightPanelCandidate(el, chatAnchorEl, convEl, sidebarEl, rect, vw, vh)) {
+        if (priority === 0 && probeDiag.length < 3) probeDiag.push({ tag: el.tagName, w: Math.round(rect.width), h: Math.round(rect.height), reason: 'excluded' });
+        return;
+      }
+      const cs = safeComputedStyle(el);
+      const pos = String(cs?.position || '');
+      const isOverlay = pos === 'fixed' || pos === 'absolute' || hasPositionedAncestor(el, document.body);
+      const refConvRect = matchedConvRect || convRect;
+      const isCompactCard = Boolean(
+        allowCompact &&
+        isCompactTopRightCardRect(rect, vw, vh) &&
+        (vh - rect.bottom) >= 90 &&
+        (isOverlay || hasVisualCardChrome(el) || Boolean(matchedConvEl) || priority === 0)
+      );
+      const isTall = !isCompactCard && isTallRightPanelRect(rect, minPanelLeft, refConvRect, vw, vh, isOverlay);
+      if (!isTall && !isCompactCard) {
+        if (priority === 0 && probeDiag.length < 3) probeDiag.push({ tag: el.tagName, l: Math.round(rect.left), t: Math.round(rect.top), r: Math.round(rect.right), b: Math.round(rect.bottom), w: Math.round(rect.width), h: Math.round(rect.height), reason: 'geometry' });
+        return;
+      }
+      const isModal = Boolean(el.closest?.('[aria-modal="true"]'));
+      const contentSummary = findPanelContentSummary(el, vh);
+      const hasVerticalStackRoom = Boolean(
+        rect.width <= Math.min(540, vw * 0.58) &&
+        (isCompactCard || contentSummary?.hasSpaceBelow)
+      );
+      const dockMatch = isModal ? null : resolveDockableContainer(el, { isCompactCard, contentSummary });
+      candidates.push({
+        panelEl: el,
+        dockContainer: dockMatch?.container || null,
+        dockStyle: dockMatch?.dockStyle || 'flush',
+        contentSummary,
+        hasVerticalStackRoom,
+        rect,
+        isOverlay,
+        isCompactCard,
+        isModal,
+        priority,
+        matchedConvEl,
+        matchedConvRect
+      });
+    };
+
+    // 1. Walk UP from inner chat anchor (composer / messages / header) to find true chat column & right sibling
+    const walkStart = chatAnchorEl || convEl;
+    if (walkStart) {
+      let cur = walkStart;
+      for (let depth = 0; depth < 10 && cur && cur.parentElement && cur.parentElement !== document.documentElement; depth++) {
+        const parent = cur.parentElement;
+        const curRect = getElementRect(cur);
+        if (curRect && curRect.width >= 180 && curRect.height >= Math.min(220, vh * 0.35)) {
+          for (const sib of Array.from(parent.children || [])) {
+            if (sib === cur) continue;
+            const sibRect = getElementRect(sib);
+            if (!sibRect || sibRect.width < 180 || sibRect.left < curRect.right - 36) continue;
+            const overlapY = Math.min(sibRect.bottom, curRect.bottom) - Math.max(sibRect.top, curRect.top);
+            if (overlapY < Math.min(100, curRect.height * 0.25)) continue;
+            if (!splitConvEl && sibRect.height >= Math.min(220, vh * 0.35)) {
+              splitConvEl = cur;
+              splitConvRect = curRect;
+            }
+            addCandidate(sib, 1 + depth * 0.1, cur, curRect);
+          }
+        }
+        cur = parent;
+      }
+    }
+
+    // 2. Explicit configurable rightPanel selectors
+    for (const sel of (selectors.anchors?.rightPanel || [])) {
+      try {
+        const nodes = typeof document.querySelectorAll === 'function'
+          ? document.querySelectorAll(sel)
+          : (document.querySelector?.(sel) ? [document.querySelector(sel)] : []);
+        for (const el of nodes) addCandidate(el, 0, splitConvEl, splitConvRect);
+      } catch {}
+    }
+
+    // 3. Universal right-edge & top-right card hit-testing via elementsFromPoint
+    if (typeof document.elementsFromPoint === 'function') {
+      const probePoints = [
+        // Top-right zone (catches compact workspace/git/scripts cards like T3 Code's [≡] card at any resolution)
+        [Math.max(0, vw - 40), 64],
+        [Math.max(0, vw - 60), 80],
+        [Math.max(0, vw - 140), 110],
+        [Math.max(0, vw - 180), 140],
+        [Math.max(0, vw - 60), 170],
+        [Math.max(0, vw - 140), 220],
+        // Mid & lower right zone (catches full-height Diff / Preview / Files panels)
+        [Math.max(0, vw - 60), Math.round(vh * 0.45)],
+        [Math.max(0, vw - 60), Math.round(vh * 0.72)]
+      ];
+      for (const [px, py] of probePoints) {
+        if (py <= 0 || py >= vh) continue;
+        let hits = [];
+        try { hits = document.elementsFromPoint(px, py) || []; } catch { hits = []; }
+        for (const hit of hits) {
+          if (!hit || hit.closest?.('[data-t3tools]') || hit.closest?.(CHAT_STREAM_NODE_SELECTOR)) continue;
+          let bestPanel = null;
+          let cur = hit;
+          for (let depth = 0; depth < 14 && cur && cur !== document.body && cur !== document.documentElement; depth++) {
+            if (chatAnchorEl && (cur === chatAnchorEl || cur.contains?.(chatAnchorEl))) break;
+            if (convEl && (cur === convEl || cur.contains?.(convEl))) break;
+            if (sidebarEl && (cur === sidebarEl || cur.contains?.(sidebarEl))) break;
+            if (containsChatStreamContent(cur)) break;
+            const r = getElementRect(cur);
+            if (r && !EXCLUDED_DOCK_TAGS.has(String(cur.tagName || '').toUpperCase())) {
+              const cs = safeComputedStyle(cur);
+              const pos = String(cs?.position || '');
+              const isOverlay = pos === 'fixed' || pos === 'absolute' || hasPositionedAncestor(cur, document.body);
+              const validCompact = isCompactTopRightCardRect(r, vw, vh) && (vh - r.bottom) >= 90 && (isOverlay || hasVisualCardChrome(cur));
+              const validTall = !validCompact && isTallRightPanelRect(r, minPanelLeft, splitConvRect || convRect, vw, vh, isOverlay);
+              if (!isModalOrPopupNode(cur, r, vw, vh) && (validTall || validCompact)) {
+                // For compact floating cards, prefer the actual card with visible chrome over a bare positioning wrapper
+                if (!bestPanel || !validCompact || hasVisualCardChrome(cur) || !hasVisualCardChrome(bestPanel)) {
+                  bestPanel = cur;
+                }
+              }
+            }
+            cur = cur.parentElement;
+          }
+          if (bestPanel) addCandidate(bestPanel, 2.5, splitConvEl, splitConvRect);
+        }
+      }
+    }
+
+    if (!candidates.length) {
+      return {
+        effectiveConvEl: splitConvEl || convEl,
+        effectiveConvRect: splitConvRect || convRect,
+        rightPanelInfo: null,
+        probeDiag
+      };
+    }
+
+    candidates.sort((a, b) => {
+      // Prefer a card directly occupying the top-right slot where the overview card lives, then dockability
+      const dockDiff = (b.dockContainer ? 1 : 0) - (a.dockContainer ? 1 : 0);
+      if (dockDiff !== 0) return dockDiff;
+      const modalDiff = (a.isModal ? 1 : 0) - (b.isModal ? 1 : 0);
+      if (modalDiff !== 0) return modalDiff;
+      if (a.priority !== b.priority) return a.priority - b.priority;
+      return b.rect.height - a.rect.height;
+    });
+
+    const chosen = candidates[0];
+    return {
+      effectiveConvEl: chosen.matchedConvEl || splitConvEl || convEl,
+      effectiveConvRect: chosen.matchedConvRect || splitConvRect || convRect,
+      rightPanelInfo: chosen,
+      probeDiag
+    };
   }
 
   function findComposerMountTarget() {
@@ -272,6 +783,10 @@
   let lastLive = null;
   let lastLiveThreadId = '';
   let lastSettings = null;
+  let lastTodayUsage = null;
+  let lastRuntimeUpdates = null;
+  let dismissedRuntimeUpdateSig = '';
+  try { dismissedRuntimeUpdateSig = localStorage.getItem('t3tools.dismissedRuntimeUpdateSig') || ''; } catch {}
   let activeThreadId = detectActiveThreadId();
   let lastRouteHref = String(location.href || '');
   let consecutiveLiveErrors = 0;
@@ -318,11 +833,298 @@
   let composerMountMode = 'footer-inline';
   let lastComposerHtml = '';
   let overviewMount = null;
+  let overviewPlacementMode = 'float'; // 'docked' | 'avoid' | 'float' | 'fixed'
+  let overviewDockStyle = 'flush'; // 'flush' | 'stack'
+  let lastOverviewHtml = '';
+  let narrowAutoCollapsed = false;
+  let narrowExpandOverride = false;
+  let layoutRafId = 0;
+  let layoutRecheckTimer = null;
+  let layoutResizeObserver = null;
+  const observedLayoutEls = new Set();
+  let lastLayoutDebug = { mode: 'float', docked: false, narrowAutoCollapsed: false, hasRightPanel: false, hasDockContainer: false };
   let sidebarMount = null;
+  let lastSidebarHtml = '';
   let overlayMount = null;
 
   const COMPOSER_INLINE_HOST_STYLE = 'display:inline-flex;align-items:center;position:relative;z-index:20;min-width:0;flex:0 1 auto;overflow:visible;margin-right:6px;';
   const COMPOSER_BLOCK_HOST_STYLE = 'display:block;width:100%;flex:none;overflow:visible;';
+  const OVERVIEW_FLOAT_INIT_STYLE = 'position:fixed;top:56px;right:18px;z-index:35;';
+
+  function updateLayoutResizeTargets(nextTargets) {
+    if (typeof ResizeObserver !== 'function') return;
+    if (!layoutResizeObserver) {
+      layoutResizeObserver = new ResizeObserver(() => scheduleOverviewLayout());
+    }
+    const nextSet = new Set(nextTargets.filter(Boolean));
+    for (const oldEl of observedLayoutEls) {
+      if (!nextSet.has(oldEl)) {
+        try { layoutResizeObserver.unobserve(oldEl); } catch {}
+        observedLayoutEls.delete(oldEl);
+      }
+    }
+    for (const el of nextSet) {
+      if (!observedLayoutEls.has(el)) {
+        try {
+          layoutResizeObserver.observe(el);
+          observedLayoutEls.add(el);
+        } catch {}
+      }
+    }
+  }
+
+  function scheduleOverviewLayout({ withDelayedRecheck = false } = {}) {
+    if (disposed) return;
+    if (!layoutRafId) {
+      if (typeof requestAnimationFrame === 'function') {
+        layoutRafId = requestAnimationFrame(() => {
+          layoutRafId = 0;
+          if (!disposed) reconcileOverviewLayout({ allowRender: true });
+        });
+      } else {
+        reconcileOverviewLayout({ allowRender: true });
+      }
+    }
+    if (withDelayedRecheck) {
+      clearTimeout(layoutRecheckTimer);
+      layoutRecheckTimer = setTimeout(() => {
+        layoutRecheckTimer = null;
+        if (!disposed) reconcileOverviewLayout({ allowRender: true });
+      }, 240);
+    }
+  }
+
+  function applyFloatingHostStyle(host, topPx, rightPx, displayVal, { widthPx = 0, bodyMaxH = 0 } = {}) {
+    host.style.position = 'fixed';
+    host.style.top = `${topPx}px`;
+    host.style.right = `${rightPx}px`;
+    host.style.bottom = '';
+    host.style.left = '';
+    host.style.marginTop = '';
+    host.style.width = widthPx > 0 ? `${widthPx}px` : '';
+    host.style.flex = '';
+    host.style.zIndex = '35';
+    host.style.boxSizing = '';
+    host.style.display = displayVal;
+    if (widthPx > 0) host.style.setProperty('--pt-ov-width', `${widthPx}px`);
+    else host.style.removeProperty?.('--pt-ov-width');
+    if (bodyMaxH > 0) host.style.setProperty('--pt-ov-body-max-h', `${bodyMaxH}px`);
+    else host.style.removeProperty?.('--pt-ov-body-max-h');
+  }
+
+  function applyDockedHostStyle(host, displayVal, { compact = false, dockStyle = 'flush', bodyMaxH = 0 } = {}) {
+    const isRelativeStack = compact || dockStyle === 'stack';
+    host.style.position = isRelativeStack ? 'relative' : 'sticky';
+    host.style.top = '';
+    host.style.right = '';
+    host.style.bottom = isRelativeStack ? '' : '0px';
+    host.style.left = '';
+    host.style.marginTop = dockStyle === 'stack' ? '10px' : '';
+    host.style.width = '100%';
+    host.style.flex = 'none';
+    host.style.zIndex = '5';
+    host.style.boxSizing = 'border-box';
+    host.style.display = displayVal;
+    host.style.removeProperty?.('--pt-ov-width');
+    if (bodyMaxH > 0) host.style.setProperty('--pt-ov-body-max-h', `${bodyMaxH}px`);
+    else host.style.removeProperty?.('--pt-ov-body-max-h');
+  }
+
+  function getEffectiveOverviewCollapsed() {
+    if (overviewPlacementMode === 'docked') return overviewCollapsed;
+    return narrowAutoCollapsed ? true : overviewCollapsed;
+  }
+
+  function reconcileOverviewLayout({ allowRender = false } = {}) {
+    if (disposed || !overviewMount) return false;
+    const cfg = lastLive?.settings || lastSettings || {};
+    const modeSetting = ['adaptive', 'avoid', 'fixed'].includes(cfg.overviewMode) ? cfg.overviewMode : 'adaptive';
+    const baseTop = Number.isFinite(Number(cfg.overviewPosition?.top)) ? Number(cfg.overviewPosition.top) : 56;
+    const baseRight = Number.isFinite(Number(cfg.overviewPosition?.right)) ? Number(cfg.overviewPosition.right) : 18;
+    const hidden = cfg.enabled === false || cfg.showOverviewCard === false;
+    const host = overviewMount.host;
+    const prevMode = overviewPlacementMode;
+    const prevEffectiveCollapsed = getEffectiveOverviewCollapsed();
+
+    if (hidden) {
+      if (host.parentElement !== document.body || !host.isConnected) {
+        document.body.appendChild(host);
+      }
+      applyFloatingHostStyle(host, baseTop, baseRight, 'none');
+      overviewPlacementMode = modeSetting === 'fixed' ? 'fixed' : 'float';
+      updateLayoutResizeTargets([]);
+      return false;
+    }
+
+    const vw = Number(window.innerWidth) || 0;
+    const vh = Number(window.innerHeight) || 0;
+    const rawConvEl = modeSetting !== 'fixed' ? findVisibleAnchor('conversationArea') : null;
+    const sidebarEl = modeSetting !== 'fixed' ? findVisibleAnchor('sidebar') : null;
+    const detected = (modeSetting !== 'fixed' && vw > 0 && vh > 0)
+      ? detectWorkspaceLayout(rawConvEl, sidebarEl, vw, vh)
+      : { effectiveConvEl: rawConvEl, effectiveConvRect: getElementRect(rawConvEl), rightPanelInfo: null };
+    const convEl = detected.effectiveConvEl;
+    const convRect = detected.effectiveConvRect;
+    const rightPanelInfo = detected.rightPanelInfo;
+    let headerEl = modeSetting !== 'fixed' ? findVisibleAnchor('chatHeader') : null;
+    if (!headerEl && convEl && typeof convEl.querySelector === 'function') {
+      const candidateHeader = convEl.querySelector('header');
+      if (isVisibleElement(candidateHeader)) headerEl = candidateHeader;
+    }
+    const headerRect = getElementRect(headerEl);
+
+    updateLayoutResizeTargets([rawConvEl, convEl, headerEl, rightPanelInfo?.panelEl, rightPanelInfo?.dockContainer]);
+
+    // Mode A: Adaptive vertical merge into T3 Code's open right panel / right-rail card
+    let dockedSuccessfully = false;
+    let nextDockStyle = 'flush';
+    const prevDockStyle = overviewDockStyle;
+    if (modeSetting === 'adaptive' && rightPanelInfo?.dockContainer) {
+      const dockEl = rightPanelInfo.dockContainer;
+      nextDockStyle = rightPanelInfo.dockStyle || 'flush';
+      const contentBottom = rightPanelInfo.contentSummary?.contentBottom ?? rightPanelInfo.rect.bottom;
+      const dockBodyMaxH = rightPanelInfo.hasVerticalStackRoom && vh > 0
+        ? Math.max(110, Math.min(340, Math.round(vh - contentBottom - 76)))
+        : 250;
+      if (host.parentElement !== dockEl || host.nextElementSibling !== null || !host.isConnected) {
+        dockEl.appendChild(host);
+      }
+      applyDockedHostStyle(host, 'block', {
+        compact: Boolean(rightPanelInfo.isCompactCard || rightPanelInfo.hasVerticalStackRoom),
+        dockStyle: nextDockStyle,
+        bodyMaxH: dockBodyMaxH
+      });
+      // Safety check: in real browser layouts, verify the docked card wasn't clipped off-screen by overflow:hidden
+      const dockRect = getElementRect(dockEl);
+      const hostRect = getElementRect(host);
+      const clippedOffscreen = Boolean(
+        dockRect && dockRect.height > 0 &&
+        hostRect && hostRect.width > 0 &&
+        (hostRect.top >= Math.min(vh, dockRect.bottom) - 4 || hostRect.bottom > vh + 12)
+      );
+      if (!clippedOffscreen) {
+        dockedSuccessfully = true;
+        overviewPlacementMode = 'docked';
+        overviewDockStyle = nextDockStyle;
+        narrowAutoCollapsed = false;
+        narrowExpandOverride = false;
+      }
+    }
+
+    if (!dockedSuccessfully) {
+      // Fallback / Avoid / Fixed: float on document.body
+      if (host.parentElement !== document.body || !host.isConnected) {
+        document.body.appendChild(host);
+      }
+      overviewDockStyle = 'flush';
+      let computedTop = baseTop;
+      let computedRight = baseRight;
+      let computedWidth = 0;
+      let computedBodyMaxH = 0;
+      let nextMode = modeSetting === 'fixed' ? 'fixed' : 'float';
+
+      if (modeSetting !== 'fixed' && vw > 0 && vh > 0 && (convRect || rightPanelInfo?.rect)) {
+        const contentBottom = rightPanelInfo?.contentSummary?.contentBottom ?? rightPanelInfo?.rect?.bottom ?? 0;
+        const contentRight = rightPanelInfo?.contentSummary?.contentRight ?? rightPanelInfo?.rect?.right ?? vw;
+        const contentWidth = rightPanelInfo?.contentSummary?.contentWidth ?? rightPanelInfo?.rect?.width ?? 0;
+        const canStackVerticallyBelow = Boolean(
+          rightPanelInfo?.hasVerticalStackRoom &&
+          contentBottom > 0 &&
+          (vh - contentBottom) >= 90
+        );
+
+        if (canStackVerticallyBelow) {
+          // Always prefer vertical top-bottom layout directly beneath T3 Code's right card (never left-right!)
+          narrowAutoCollapsed = false;
+          narrowExpandOverride = false;
+          computedTop = Math.min(Math.round(contentBottom) + 10, Math.max(baseTop, Math.round(vh - 72)));
+          computedRight = Math.max(12, Math.round(vw - contentRight));
+          if (contentWidth >= 220 && contentWidth <= 420) {
+            computedWidth = Math.round(contentWidth);
+          }
+          computedBodyMaxH = Math.max(100, Math.min(380, Math.round(vh - computedTop - 68)));
+          nextMode = 'avoid';
+        } else {
+          // Full-height non-dockable panel (no vertical space below): stay strictly to its left
+          const freeRight = Math.min(
+            convRect ? convRect.right : vw,
+            rightPanelInfo?.rect ? rightPanelInfo.rect.left : vw
+          );
+          const convLeft = convRect ? convRect.left : 0;
+          const usableConvWidth = Math.max(0, freeRight - convLeft);
+          if (usableConvWidth > 0 && usableConvWidth < 660) {
+            narrowAutoCollapsed = !narrowExpandOverride;
+          } else if (usableConvWidth >= 700) {
+            narrowExpandOverride = false;
+            narrowAutoCollapsed = false;
+          } else if (narrowExpandOverride) {
+            narrowAutoCollapsed = false;
+          }
+
+          const estWidth = (overviewCollapsed || narrowAutoCollapsed) ? 210 : 304;
+          const rightOffset = Math.max(baseRight, Math.round(vw - freeRight) + 14);
+          const minLeftBound = Math.max(12, Math.round(convLeft) + 12);
+          const maxRightInConv = Math.round(vw - minLeftBound - estWidth);
+          if (maxRightInConv >= 12) {
+            computedRight = Math.min(rightOffset, maxRightInConv);
+          } else {
+            computedRight = Math.max(12, Math.min(rightOffset, Math.max(12, Math.round(vw - estWidth - 12))));
+          }
+
+          const headerBottom = headerRect ? Math.round(headerRect.bottom) + 8 : 0;
+          const convTopBound = convRect && convRect.top > 0 ? Math.round(convRect.top) + 10 : 0;
+          const rawTop = Math.max(baseTop, headerBottom, convTopBound);
+          computedTop = Math.min(rawTop, Math.max(baseTop, Math.round(vh - 80)));
+
+          if (rightOffset > baseRight || rightPanelInfo) {
+            nextMode = 'avoid';
+          }
+        }
+      } else {
+        narrowAutoCollapsed = false;
+        narrowExpandOverride = false;
+      }
+
+      applyFloatingHostStyle(host, computedTop, computedRight, 'block', {
+        widthPx: computedWidth,
+        bodyMaxH: computedBodyMaxH
+      });
+      overviewPlacementMode = nextMode;
+    }
+
+    const summarizeRect = r => r ? {
+      left: Math.round(r.left),
+      top: Math.round(r.top),
+      right: Math.round(r.right),
+      bottom: Math.round(r.bottom),
+      width: Math.round(r.width),
+      height: Math.round(r.height)
+    } : null;
+
+    lastLayoutDebug = {
+      mode: overviewPlacementMode,
+      docked: overviewPlacementMode === 'docked',
+      dockStyle: overviewDockStyle,
+      narrowAutoCollapsed,
+      hasRightPanel: Boolean(rightPanelInfo),
+      isCompactCard: Boolean(rightPanelInfo?.isCompactCard),
+      hasVerticalStackRoom: Boolean(rightPanelInfo?.hasVerticalStackRoom),
+      hasDockContainer: Boolean(rightPanelInfo?.dockContainer),
+      viewport: vw > 0 && vh > 0 ? { width: vw, height: vh } : null,
+      convRect: summarizeRect(convRect),
+      rightPanelRect: summarizeRect(rightPanelInfo?.rect),
+      contentBottom: rightPanelInfo?.contentSummary?.contentBottom != null ? Math.round(rightPanelInfo.contentSummary.contentBottom) : null,
+      rightPanelTag: rightPanelInfo?.panelEl?.tagName || null,
+      dockTag: rightPanelInfo?.dockContainer?.tagName || null,
+      probeDiag: detected.probeDiag || []
+    };
+
+    const changed = prevMode !== overviewPlacementMode || prevDockStyle !== overviewDockStyle || prevEffectiveCollapsed !== getEffectiveOverviewCollapsed();
+    if (changed && allowRender) {
+      renderLiveWidgets();
+    }
+    return changed;
+  }
 
   function ensureMounts() {
     if (disposed) return;
@@ -362,29 +1164,66 @@
       }
     }
 
-    if (!overviewMount || !overviewMount.host.isConnected) {
-      destroyMount(overviewMount);
-      overviewMount = createShadowMount('t3tools-overview', 'position:fixed;top:54px;right:18px;z-index:9990;');
+    let createdOverview = false;
+    if (!overviewMount) {
+      overviewMount = createShadowMount('t3tools-overview', OVERVIEW_FLOAT_INIT_STYLE);
       overviewMount.contentEl.addEventListener('click', onWidgetClick);
-      document.body.appendChild(overviewMount.host);
+      lastOverviewHtml = '';
+      createdOverview = true;
+    }
+    const layoutChanged = reconcileOverviewLayout({ allowRender: false });
+    if (createdOverview || layoutChanged) {
+      renderLiveWidgets();
     }
 
     const sidebar = findAnchor('sidebar');
     if (sidebar) {
+      let createdSidebar = false;
       if (!sidebarMount || !sidebarMount.host.isConnected) {
         destroyMount(sidebarMount);
         sidebarMount = createShadowMount('t3tools-sidebar-btn', 'display:block;width:100%;flex:none;');
-        sidebarMount.contentEl.innerHTML = `
-          <button class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="打开 T3Tools">
-            <span>⚡ T3Tools</span>
-            <span class="pt-muted" style="font-size:10.5px;">看板</span>
-          </button>
-        `;
         sidebarMount.contentEl.addEventListener('click', onWidgetClick);
+        lastSidebarHtml = '';
+        createdSidebar = true;
       }
       if (!sidebar.contains(sidebarMount.host)) {
         sidebar.appendChild(sidebarMount.host);
       }
+      if (createdSidebar) {
+        renderSidebarWidget();
+      }
+    }
+  }
+
+  function renderSidebarWidget() {
+    if (!sidebarMount) return;
+    const cfg = lastLive?.settings || lastSettings || {};
+    sidebarMount.host.style.display = cfg.enabled === false ? 'none' : 'block';
+    const nextHtml = renderSidebarTriggerHtml(
+      {
+        todayUsage: lastLive?.todayUsage ?? lastTodayUsage,
+        runtimeUpdates: lastLive?.runtimeUpdates ?? lastRuntimeUpdates
+      },
+      { dismissedUpdateSig: dismissedRuntimeUpdateSig }
+    );
+    if (nextHtml !== lastSidebarHtml) {
+      sidebarMount.contentEl.innerHTML = nextHtml;
+      lastSidebarHtml = nextHtml;
+    }
+  }
+
+  function navigateToProviderSettings() {
+    if (dashboardOpen) {
+      closePtPopMenu();
+      dashboardOpen = false;
+      renderDashboardOverlay();
+    }
+    const targetPath = '/settings/providers';
+    if (String(location.hash || '').startsWith('#/') || location.protocol === 't3code:') {
+      location.hash = `#${targetPath}`;
+    } else {
+      history.pushState({}, '', targetPath);
+      window.dispatchEvent(new PopStateEvent('popstate'));
     }
   }
 
@@ -430,14 +1269,16 @@
         lastComposerHtml = nextComposerHtml;
       }
     }
-    if (sidebarMount) sidebarMount.host.style.display = cfg.enabled === false ? 'none' : 'block';
+    renderSidebarWidget();
     if (overviewMount) {
-      overviewMount.host.style.display = cfg.enabled === false || cfg.showOverviewCard === false ? 'none' : 'block';
-      if (cfg.overviewPosition) {
-        overviewMount.host.style.top = cfg.overviewPosition.top + 'px';
-        overviewMount.host.style.right = cfg.overviewPosition.right + 'px';
+      reconcileOverviewLayout({ allowRender: false });
+      const docked = overviewPlacementMode === 'docked';
+      const effectiveCollapsed = getEffectiveOverviewCollapsed();
+      const nextOverviewHtml = renderOverviewCardHtml(effectiveLive, effectiveCollapsed, showAllSteps, { docked, dockStyle: overviewDockStyle });
+      if (nextOverviewHtml !== lastOverviewHtml) {
+        overviewMount.contentEl.innerHTML = nextOverviewHtml;
+        lastOverviewHtml = nextOverviewHtml;
       }
-      overviewMount.contentEl.innerHTML = renderOverviewCardHtml(effectiveLive, overviewCollapsed, showAllSteps);
     }
   }
 
@@ -566,7 +1407,16 @@
     if (!btn) return;
     const action = btn.getAttribute('data-pt-action');
     if (action === 'toggle-overview') {
-      overviewCollapsed = !overviewCollapsed;
+      const effectiveCollapsed = getEffectiveOverviewCollapsed();
+      const nextCollapsed = !effectiveCollapsed;
+      if (overviewPlacementMode !== 'docked' && narrowAutoCollapsed && !nextCollapsed) {
+        narrowExpandOverride = true;
+        narrowAutoCollapsed = false;
+        overviewCollapsed = false;
+      } else {
+        narrowExpandOverride = false;
+        overviewCollapsed = nextCollapsed;
+      }
       renderLiveWidgets();
       callRpc('updateSettings', { overviewCollapsed }).catch(() => {});
     } else if (action === 'toggle-all-steps') {
@@ -583,6 +1433,15 @@
       renderDashboardOverlay({ resetScroll: true });
       fetchOverlayStatus();
       refreshDashboard({ force: true });
+    } else if (action === 'open-provider-settings') {
+      navigateToProviderSettings();
+    } else if (action === 'dismiss-runtime-update') {
+      const sig = btn.getAttribute('data-pt-update-sig') || '';
+      if (sig) {
+        dismissedRuntimeUpdateSig = sig;
+        try { localStorage.setItem('t3tools.dismissedRuntimeUpdateSig', sig); } catch {}
+        renderSidebarWidget();
+      }
     }
   }
 
@@ -682,6 +1541,26 @@
         } catch (err) {
           showOverlayToast(err?.message || '发送测试告警失败');
         }
+        return;
+      }
+      if (action === 'check-runtime-updates') {
+        try {
+          const updates = await callRpc('checkRuntimeUpdates', {});
+          if (updates) {
+            lastRuntimeUpdates = updates;
+            if (lastStatus) lastStatus.runtimeUpdates = updates;
+            if (lastLive) lastLive.runtimeUpdates = updates;
+            renderSidebarWidget();
+            renderDashboardOverlay();
+          }
+          showOverlayToast(updates?.hasUpdates ? `发现 ${updates.updateCount} 个运行环境可更新` : '当前运行环境已是最新版本');
+        } catch (err) {
+          showOverlayToast(err?.message || '检查运行环境更新失败');
+        }
+        return;
+      }
+      if (action === 'open-provider-settings') {
+        navigateToProviderSettings();
         return;
       }
       if (action === 'refresh') {
@@ -790,7 +1669,7 @@
     const settingEl = target.closest?.('[data-pt-setting]');
     if (settingEl) {
       const key = settingEl.getAttribute('data-pt-setting');
-      const val = Boolean(settingEl.checked);
+      const val = settingEl.type === 'checkbox' ? Boolean(settingEl.checked) : settingEl.value;
       try {
         const updated = await callRpc('updateSettings', { [key]: val });
         if (updated) {
@@ -887,6 +1766,8 @@
         lastSettings = live.settings;
       }
       if (dashboardOpen && dashState.tab === 'models' && lastLive?.globalAlerts?.unreadCount !== live.globalAlerts?.unreadCount) refreshDashboard();
+      if (live?.todayUsage) lastTodayUsage = live.todayUsage;
+      if (live?.runtimeUpdates) lastRuntimeUpdates = live.runtimeUpdates;
       lastLive = live;
       lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
@@ -909,13 +1790,33 @@
     }
   }
 
-  const domObserver = new MutationObserver(() => {
+  const domObserver = new MutationObserver(mutations => {
     if (disposed) return;
+    if (Array.isArray(mutations) && mutations.length > 0) {
+      const hasForeignMutation = mutations.some(m => {
+        const nodes = [...(m.addedNodes || []), ...(m.removedNodes || [])];
+        if (!nodes.length) return true;
+        return nodes.some(n => !n?.getAttribute || n.getAttribute('data-t3tools') !== '1');
+      });
+      if (!hasForeignMutation) return;
+    }
     syncActiveThread({ triggerPoll: true });
     ensureMounts();
+    scheduleOverviewLayout({ withDelayedRecheck: true });
   });
-  domObserver.observe(document.body, { childList: true, subtree: true });
+  domObserver.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['hidden', 'data-state', 'aria-expanded', 'aria-hidden', 'open']
+  });
 
+  const onViewportResize = () => {
+    if (!disposed) scheduleOverviewLayout();
+  };
+  const onTransitionEnd = () => {
+    if (!disposed) scheduleOverviewLayout();
+  };
   const onKeyDown = e => {
     if (e.key === 'Escape' && dashboardOpen) {
       if (closePtPopMenu()) { e.preventDefault(); return; }
@@ -934,9 +1835,14 @@
   const onClickNavHint = () => {
     if (disposed) return;
     Promise.resolve().then(() => {
-      if (!disposed) syncActiveThread({ triggerPoll: true });
+      if (!disposed) {
+        syncActiveThread({ triggerPoll: true });
+        scheduleOverviewLayout({ withDelayedRecheck: true });
+      }
     });
   };
+  window.addEventListener('resize', onViewportResize);
+  window.addEventListener('transitionend', onTransitionEnd, true);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('hashchange', onRouteChange);
   window.addEventListener('popstate', onRouteChange);
@@ -970,7 +1876,12 @@
       for (const key of Object.keys(selectors.anchors || {})) {
         report[key] = Boolean(findAnchor(key));
       }
-      return { threadId: detectActiveThreadId(), lastLiveThreadId, anchors: report };
+      return {
+        threadId: detectActiveThreadId(),
+        lastLiveThreadId,
+        anchors: report,
+        overviewLayout: { ...lastLayoutDebug }
+      };
     },
     dispose() {
       disposed = true;
@@ -983,12 +1894,23 @@
       clearTimeout(pollTimer);
       clearTimeout(searchTimer);
       clearTimeout(overlayToastTimer);
+      clearTimeout(layoutRecheckTimer);
+      layoutRecheckTimer = null;
+      if (layoutRafId && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(layoutRafId);
+      }
+      layoutRafId = 0;
+      try { layoutResizeObserver?.disconnect(); } catch {}
+      layoutResizeObserver = null;
+      observedLayoutEls.clear();
       for (const entry of pendingRpc.values()) {
         clearTimeout(entry.timer);
         entry.reject(new Error('实例已重载'));
       }
       pendingRpc.clear();
       domObserver.disconnect();
+      window.removeEventListener('resize', onViewportResize);
+      window.removeEventListener('transitionend', onTransitionEnd, true);
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('hashchange', onRouteChange);
       window.removeEventListener('popstate', onRouteChange);
@@ -1000,6 +1922,10 @@
       destroyMount(overlayMount);
       composerMount = overviewMount = sidebarMount = overlayMount = null;
       lastComposerHtml = '';
+      lastOverviewHtml = '';
+      lastSidebarHtml = '';
+      lastTodayUsage = null;
+      lastRuntimeUpdates = null;
       themeSync.dispose();
       if (globalThis.__t3Tools) globalThis.__t3Tools.healthy = false;
     }

@@ -228,6 +228,7 @@ export function createCdpHost({
     attachedTargets: 0,
     message: enabled ? '等待 T3 Code 本地调试端口' : '自动吸附已暂停',
     lastError: '',
+    layoutDiagnostics: null,
     checkedAtMs: 0
   };
 
@@ -490,10 +491,22 @@ export function createCdpHost({
         }
       }
 
+      let latestLayoutDiagnostics = null;
       for (const [id, meta] of clients.entries()) {
         if (!attachedMatchedIds.has(id)) {
           try { meta.client.socket.close(); } catch {}
           clients.delete(id);
+        } else if (!latestLayoutDiagnostics && Number.isInteger(meta.isolatedContextId)) {
+          try {
+            const diag = await meta.client.send('Runtime.evaluate', {
+              expression: '(() => { const d = globalThis.__t3Tools?.diagnoseAnchors?.(); return d ? { anchors: d.anchors, overviewLayout: d.overviewLayout } : null; })()',
+              contextId: meta.isolatedContextId,
+              returnByValue: true
+            });
+            if (diag?.result?.value && typeof diag.result.value === 'object') {
+              latestLayoutDiagnostics = diag.result.value;
+            }
+          } catch {}
         }
       }
 
@@ -508,6 +521,7 @@ export function createCdpHost({
           : (activeCandidate ? '已发现调试端口，等待 T3 Code 主窗口就绪' : '等待 T3 Code 调试接口响应'),
         // Retain attachment errors instead of clearing them at poll end (fixes P2 #19)
         lastError: pollErrors.join('; '),
+        layoutDiagnostics: latestLayoutDiagnostics,
         checkedAtMs: Date.now()
       };
       return lastState;

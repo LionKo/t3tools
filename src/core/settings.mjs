@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = {
   launchOnStartup: false,
   showComposerBar: true,
   showOverviewCard: true,
+  overviewMode: 'adaptive',
   overviewCollapsed: false,
   overviewPosition: { right: 18, top: 56 },
   defaultRangePreset: 'weeklyQuota',
@@ -31,6 +32,7 @@ export const DEFAULT_SETTINGS = {
 
 const VALID_PRESETS = new Set(['weeklyQuota', 'today', '24h', 'week', '7d', '30d', 'all']);
 const VALID_THEMES = new Set(['dark', 'light']);
+const VALID_OVERVIEW_MODES = new Set(['adaptive', 'avoid', 'fixed']);
 
 function clampInt(val, min, max, fallback) {
   const n = Number(val);
@@ -84,6 +86,10 @@ export function sanitizeSettingsPatch(patch) {
   if (Object.prototype.hasOwnProperty.call(patch, 'theme')) {
     if (!VALID_THEMES.has(patch.theme)) throw new Error('theme 必须为 dark 或 light');
     clean.theme = patch.theme;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'overviewMode')) {
+    if (!VALID_OVERVIEW_MODES.has(patch.overviewMode)) throw new Error('overviewMode 必须为 adaptive、avoid 或 fixed');
+    clean.overviewMode = patch.overviewMode;
   }
   if (Object.prototype.hasOwnProperty.call(patch, 'overviewPosition')) {
     const pos = patch.overviewPosition;

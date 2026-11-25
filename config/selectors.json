@@ -34,6 +34,19 @@
       "[data-slot=\"sidebar\"]",
       "aside"
     ],
+    "rightPanel": [
+      "[data-workspace-area]:not([data-workspace-area=\"conversation\"]):not([data-workspace-area=\"sidebar\"])",
+      "[data-slot=\"right-panel\"]",
+      "[data-slot=\"inspector\"]",
+      "[data-slot=\"preview-panel\"]",
+      "[data-slot=\"diff-panel\"]",
+      "[data-slot=\"sheet-content\"][data-side=\"right\"]",
+      "[data-panel-side=\"right\"]",
+      "[data-right-panel]",
+      "[data-side=\"right\"][data-slot]",
+      "aside[data-side=\"right\"]",
+      "[role=\"complementary\"]"
+    ],
     "assistantMessages": [
       "[data-message-role=\"assistant\"] .chat-markdown",
       "[data-message-role=\"assistant\"]"

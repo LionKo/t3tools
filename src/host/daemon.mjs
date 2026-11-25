@@ -8,6 +8,7 @@ import { createT3StateAdapter } from '../adapters/t3-state.mjs';
 import { createAntigravityAdapter } from '../adapters/antigravity.mjs';
 import { createCodexAdapter } from '../adapters/codex.mjs';
 import { createQuotaAdapter } from '../adapters/quota.mjs';
+import { createRuntimeUpdatesAdapter } from '../adapters/runtime-updates.mjs';
 import { createAnalyticsEngine } from '../analytics/engine.mjs';
 import { createCdpHost, readT3ServerOrigin } from './cdp-host.mjs';
 import { createHttpServer } from './http-server.mjs';
@@ -53,7 +54,7 @@ export async function probeRunningDaemon(runtimeFilePath, { fetchImpl = globalTh
   return null;
 }
 
-export function createRuntimeContext(pathOverrides = {}) {
+export function createRuntimeContext(pathOverrides = {}, options = {}) {
   const paths = resolvePaths(pathOverrides);
   const settings = createSettingsStore(paths.pluginSettingsPath);
   const pricing = createPricingResolver(paths.modelRatesPath);
@@ -62,13 +63,20 @@ export function createRuntimeContext(pathOverrides = {}) {
   const antigravityAdapter = createAntigravityAdapter({ paths, store, pricing, t3State });
   const codexAdapter = createCodexAdapter({ paths, store, pricing, t3State });
   const quotaAdapter = createQuotaAdapter({ paths, store, t3State, codexAdapter });
+  const runtimeUpdatesAdapter = createRuntimeUpdatesAdapter({
+    paths,
+    t3State,
+    fetchImpl: options.fetchImpl,
+    enableRemoteCheck: options.enableRemoteUpdateCheck !== false
+  });
   const engine = createAnalyticsEngine({
     store,
     settings,
     t3State,
     antigravityAdapter,
     codexAdapter,
-    quotaAdapter
+    quotaAdapter,
+    runtimeUpdatesAdapter
   });
 
   return {
@@ -81,6 +89,7 @@ export function createRuntimeContext(pathOverrides = {}) {
     antigravityAdapter,
     codexAdapter,
     quotaAdapter,
+    runtimeUpdatesAdapter,
     engine,
     close() {
       store.close();
@@ -99,10 +108,12 @@ export async function startDaemon({
   autoExitGraceMs = 45000,
   autoExitPollMs = 15000,
   checkT3Running = isT3ProcessRunning,
+  fetchImpl = undefined,
+  enableRemoteUpdateCheck = true,
   onAutoExit = null,
   onShutdownRequest = null
 } = {}) {
-  const ctx = createRuntimeContext(pathOverrides);
+  const ctx = createRuntimeContext(pathOverrides, { fetchImpl, enableRemoteUpdateCheck });
   const cfg = ctx.settings.get();
   const port = Number.isInteger(portOverride) ? portOverride : (cfg.port || 17373);
   const candidateToken = String(authTokenOverride || process.env.T3TOOLS_AUTH_TOKEN || '').trim();
@@ -153,6 +164,8 @@ export async function startDaemon({
       httpUrl: `http://127.0.0.1:${boundPort}`,
       cdp: cdpHost ? cdpHost.getStatus() : { connected: false, message: 'CDP 未启用', lastError: '' },
       alerts: ctx.engine.getAlerts(),
+      runtimeUpdates: ctx.engine.getRuntimeUpdates(),
+      todayUsage: ctx.engine.getTodayUsageSummary(),
       settings: ctx.settings.get(),
       diagnostics: {
         antigravity: ctx.antigravityAdapter.getDiagnostics(),
@@ -191,6 +204,8 @@ export async function startDaemon({
       case 'forceSync':
         ctx.engine.syncAll({ force: true });
         return { syncedAtMs: Date.now() };
+      case 'checkRuntimeUpdates':
+        return ctx.engine.checkRuntimeUpdates();
       case 'getLauncherStatus':
         return inspectShortcuts(ctx.paths);
       default:

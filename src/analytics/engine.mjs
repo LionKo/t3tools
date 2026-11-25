@@ -6,13 +6,74 @@ import { detectCacheAnomalies } from './cache-anomalies.mjs';
 import { build53WeekHeatmap, formatLocalDay, summarizeAnalytics } from './heatmap-health.mjs';
 import { computeTurnCacheHit, isUsageStale, summarizeThreadUsageMetrics } from './usage-metrics.mjs';
 
-export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter }) {
+export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter, runtimeUpdatesAdapter = null }) {
   const started = Date.now();
   const monitor = createErrorAlerts(started);
   let ackTsMs = Number(store.getMeta?.('error_ack_ts_ms')) || 0;
   let counts = { unreadCount: 0, unreadRecoveredCount: 0, unreadIncidents: 0, activeBrokenThreads: 0 };
   let countRevision = -1;
   let countDay = '';
+  let cachedTodayKey = '';
+  let cachedTodayRev = -1;
+  let cachedTodayUsage = { day: '', costUsd: 0, totalTokens: 0, requests: 0 };
+
+  function getTodayUsageSummary(now = Date.now()) {
+    const dayKey = formatLocalDay(now);
+    const rev = store.getRevision();
+    if (cachedTodayRev === rev && cachedTodayKey === dayKey) {
+      return cachedTodayUsage;
+    }
+    const startOfToday = new Date(now);
+    startOfToday.setHours(0, 0, 0, 0);
+    const startMs = +startOfToday;
+    const endOfToday = new Date(startOfToday);
+    endOfToday.setDate(endOfToday.getDate() + 1);
+    const maxMs = Math.min(now, +endOfToday - 1);
+    let summary;
+    if (typeof store.getRangeUsageSummary === 'function') {
+      summary = store.getRangeUsageSummary(startMs, maxMs);
+    } else {
+      const rows = store.listAllRequests();
+      let requests = 0;
+      let costUsd = 0;
+      let totalTokens = 0;
+      for (const r of rows) {
+        const ts = Number.isFinite(r?.billingTsMs) ? r.billingTsMs : r?.timestampMs;
+        if (!Number.isFinite(ts) || ts < startMs || ts > maxMs) continue;
+        requests++;
+        if (Number.isFinite(r.costUsd)) costUsd += r.costUsd;
+        totalTokens += (r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheWriteTokens || 0) + (r.outputTokens || 0);
+      }
+      summary = { requests, costUsd: Number(costUsd.toFixed(6)), totalTokens };
+    }
+    cachedTodayUsage = {
+      day: dayKey,
+      costUsd: summary.costUsd,
+      totalTokens: summary.totalTokens,
+      requests: summary.requests
+    };
+    cachedTodayKey = dayKey;
+    cachedTodayRev = rev;
+    return cachedTodayUsage;
+  }
+
+  function getRuntimeUpdates(now = Date.now(), options = {}) {
+    if (!runtimeUpdatesAdapter) {
+      return { updatedAtMs: now, checkedAtMs: null, checksEnabled: true, updateCount: 0, hasUpdates: false, items: [] };
+    }
+    try {
+      return runtimeUpdatesAdapter.readRuntimeUpdates(now, options);
+    } catch {
+      return { updatedAtMs: now, checkedAtMs: null, checksEnabled: true, updateCount: 0, hasUpdates: false, items: [] };
+    }
+  }
+
+  async function checkRuntimeUpdates(now = Date.now()) {
+    if (!runtimeUpdatesAdapter) {
+      return getRuntimeUpdates(now);
+    }
+    return runtimeUpdatesAdapter.checkNow(now);
+  }
   function tickAlerts(now = Date.now()) {
     syncAll();
     const cfg = settings.get();
@@ -267,6 +328,8 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       : [];
     const currentUnread = execution?.threadId && !execution.unresolved
       ? store.countThreadUnread?.(execution.threadId, Math.max(ackTsMs, new Date(now).setHours(0, 0, 0, 0) - 1)) || 0 : 0;
+    const todayUsage = getTodayUsageSummary(now);
+    const runtimeUpdates = getRuntimeUpdates(now);
     return {
       updatedAtMs: now,
       settings: settings.get(),
@@ -274,7 +337,9 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       threadErrors,
       thread: execution,
       context: liveContext,
-      quotas
+      quotas,
+      todayUsage,
+      runtimeUpdates
     };
   }
 
@@ -424,6 +489,9 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
   return {
     syncAll,
     getAlerts, tickAlerts, acknowledgeErrors, testAlert: () => monitor.test(settings.get().alertConfig),
+    getTodayUsageSummary,
+    getRuntimeUpdates,
+    checkRuntimeUpdates,
     getLiveThreadSnapshot,
     exportRequestsCsv: (query, options) => getDashboardData(query, { ...options, csvOnly: true }),
     getDashboardData

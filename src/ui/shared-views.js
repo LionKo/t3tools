@@ -659,7 +659,7 @@ const PT_SHARED_CSS = `
 .pt-btn:disabled { opacity: 0.45; cursor: default; }
 
 .pt-overview-card {
-  width: 304px;
+  width: var(--pt-ov-width, 304px);
   max-width: calc(100vw - 32px);
   border-radius: var(--pt-radius, 10px);
   background: var(--pt-card, #14161b);
@@ -668,7 +668,43 @@ const PT_SHARED_CSS = `
   overflow: hidden;
   backdrop-filter: blur(10px);
 }
-.pt-overview-card.collapsed { width: auto; min-width: 196px; }
+.pt-overview-card.collapsed { width: var(--pt-ov-width, auto); min-width: 196px; }
+.pt-overview-card.docked {
+  width: 100%;
+  max-width: none;
+  border-radius: 0 0 var(--pt-radius, 10px) var(--pt-radius, 10px);
+  border: 0;
+  border-top: 1px solid var(--pt-border, rgba(255,255,255,0.12));
+  box-shadow: none;
+  backdrop-filter: none;
+}
+.pt-overview-card.docked.docked-stack {
+  border-radius: var(--pt-radius, 12px);
+  border: 1px solid var(--pt-border, rgba(255,255,255,0.12));
+}
+.pt-overview-card.docked.collapsed {
+  width: 100%;
+  min-width: 0;
+}
+.pt-overview-card.docked .pt-overview-body {
+  max-height: var(--pt-ov-body-max-h, 250px);
+}
+.pt-overview-card.docked .pt-step-list {
+  max-height: 112px;
+}
+.pt-overview-card.docked .pt-ov-quota-grid:not(.single) {
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+}
+.pt-dock-pill {
+  font-size: 9.5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid var(--pt-border, rgba(255,255,255,0.12));
+  color: var(--pt-muted, #9ca3af);
+  background: var(--pt-card, #14161b);
+  line-height: 1.5;
+  flex: none;
+}
 .pt-overview-header {
   display: flex;
   align-items: center;
@@ -697,7 +733,7 @@ const PT_SHARED_CSS = `
 }
 .pt-overview-body {
   padding: 7px 9px;
-  max-height: 420px;
+  max-height: var(--pt-ov-body-max-h, 420px);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -1476,9 +1512,81 @@ const PT_SHARED_CSS = `
   padding-top: 10px;
   font-size: 11.5px;
 }
-.pt-sidebar-trigger {
+.pt-sidebar-stack {
   width: calc(100% - 16px);
   margin: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.pt-sidebar-update-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px 4px 8px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--pt-accent, #6366f1) 36%, var(--pt-border, rgba(255,255,255,0.12)));
+  background: color-mix(in srgb, var(--pt-accent, #6366f1) 11%, var(--pt-card, #14161b));
+  color: var(--pt-fg, #f3f4f6);
+  font-size: 11px;
+  line-height: 1.3;
+}
+.pt-sidebar-update-row:hover {
+  border-color: var(--pt-accent, #6366f1);
+}
+.pt-sidebar-update-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 1px 0;
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font: inherit;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.pt-sidebar-update-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--pt-accent, #6366f1);
+  flex: none;
+}
+.pt-sidebar-update-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pt-sidebar-update-dismiss {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--pt-muted, #9ca3af);
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex: none;
+}
+.pt-sidebar-update-dismiss:hover {
+  color: var(--pt-fg, #f3f4f6);
+  background: color-mix(in srgb, var(--pt-fg, #fff) 10%, transparent);
+}
+.pt-sidebar-trigger {
+  width: 100%;
+  margin: 0;
   padding: 7px 10px;
   border-radius: 8px;
   border: 1px solid var(--pt-border, rgba(255,255,255,0.12));
@@ -1493,6 +1601,16 @@ const PT_SHARED_CSS = `
   gap: 6px;
 }
 .pt-sidebar-trigger:hover { border-color: var(--pt-accent, #6366f1); }
+.pt-sidebar-cost {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--pt-muted, #9ca3af);
+  white-space: nowrap;
+  flex: none;
+}
+.pt-sidebar-trigger:hover .pt-sidebar-cost {
+  color: var(--pt-fg, #f3f4f6);
+}
 
 /* ===== Account Quotas Panel (EasyCLIProxyAPI-inspired + T3Tools) ===== */
 .pt-quota-strip {
@@ -2852,6 +2970,74 @@ function renderComposerBarHtml(live, options = {}) {
   `;
 }
 
+function formatRuntimeUpdateSignature(updatable = []) {
+  return updatable
+    .map(it => `${it.driver}:${it.latestVersion}`)
+    .sort()
+    .join('|');
+}
+
+function renderSidebarTriggerHtml(live = null, options = {}) {
+  const dismissedSig = String(options?.dismissedUpdateSig || '');
+  const todayUsage = live?.todayUsage && typeof live.todayUsage === 'object' ? live.todayUsage : null;
+  const hasTodayCost = todayUsage != null && Number.isFinite(Number(todayUsage.costUsd));
+  const todayCostText = hasTodayCost ? fmtUsd(todayUsage.costUsd) : '';
+  const todayReqs = hasTodayCost ? (Number(todayUsage.requests) || 0) : 0;
+  const todayTokens = hasTodayCost ? (Number(todayUsage.totalTokens) || 0) : 0;
+
+  const runtimeUpdates = live?.runtimeUpdates && typeof live.runtimeUpdates === 'object' ? live.runtimeUpdates : null;
+  const runtimeItems = Array.isArray(runtimeUpdates?.items) ? runtimeUpdates.items : [];
+  const updatable = runtimeItems.filter(it => it && it.hasUpdate && it.latestVersion);
+  const updateSig = formatRuntimeUpdateSignature(updatable);
+  const showUpdateBanner = updatable.length > 0 && (!dismissedSig || dismissedSig !== updateSig);
+
+  const versionSummary = runtimeItems
+    .filter(it => it && it.currentVersion)
+    .map(it => `${it.displayName} ${it.currentVersion}${it.hasUpdate && it.latestVersion ? ` → ${it.latestVersion}` : ''}`)
+    .join(' · ');
+
+  const triggerTitleParts = ['打开 T3Tools 看板'];
+  if (hasTodayCost) {
+    triggerTitleParts.push(`今日费用 ${todayCostText}（${todayReqs} 次 · ${fmtTokens(todayTokens)} tokens）`);
+  }
+  if (versionSummary) {
+    triggerTitleParts.push(versionSummary);
+  }
+
+  let updateRowHtml = '';
+  if (showUpdateBanner) {
+    const label = updatable.length === 1
+      ? `${updatable[0].displayName} ${updatable[0].latestVersion} 可更新`
+      : `${updatable.map(it => it.displayName).join(' / ')} 有更新`;
+    const detailTip = updatable
+      .map(it => `${it.displayName} ${it.currentVersion || '?'} → ${it.latestVersion}`)
+      .join(' · ') + ' · 点击前往 T3 Code 运行环境更新';
+    updateRowHtml = `
+      <div class="pt-sidebar-update-row" data-pt-runtime-update="${esc(updateSig)}">
+        <button type="button" class="pt-sidebar-update-btn" data-pt-action="open-provider-settings" title="${esc(detailTip)}">
+          <span class="pt-sidebar-update-dot" aria-hidden="true"></span>
+          <span class="pt-sidebar-update-text">↑ ${esc(label)}</span>
+        </button>
+        <button type="button" class="pt-sidebar-update-dismiss" data-pt-action="dismiss-runtime-update" data-pt-update-sig="${esc(updateSig)}" title="忽略当前版本提醒" aria-label="忽略当前版本提醒">×</button>
+      </div>
+    `;
+  }
+
+  const rightSlotHtml = hasTodayCost
+    ? `<span class="pt-sidebar-cost pt-mono" data-pt-today-cost="1">今日 ${esc(todayCostText)}</span>`
+    : `<span class="pt-muted" style="font-size:10.5px;">看板</span>`;
+
+  return `
+    <div class="pt-sidebar-stack">
+      ${updateRowHtml}
+      <button type="button" class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="${esc(triggerTitleParts.join(' · '))}">
+        <span>⚡ T3Tools</span>
+        ${rightSlotHtml}
+      </button>
+    </div>
+  `;
+}
+
 function compactPoolTitle(poolLabel = '', poolKey = '') {
   if (poolKey === '3p' || /claude.*gpt/i.test(poolLabel)) return 'Claude/GPT';
   if (poolKey === 'gemini') return 'Gemini';
@@ -2953,7 +3139,9 @@ function renderCompactOverviewQuotasHtml(quotas, { preferredPool, now, unresolve
   return `<div class="pt-ov-quota-grid${isSinglePool ? ' single' : ''}">${tilesHtml}</div>`;
 }
 
-function renderOverviewCardHtml(live, collapsed, showAllSteps = false) {
+function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options = {}) {
+  const docked = Boolean(options?.docked);
+  const dockStyle = options?.dockStyle === 'stack' ? 'stack' : 'flush';
   const thread = live?.thread;
   const unresolved = Boolean(thread?.unresolved);
   const activeAccountId = !unresolved
@@ -3026,9 +3214,12 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false) {
     ? `<span class="pt-badge pt-badge-warn" style="margin-left:4px;">排队 ${esc(thread.queuedRuns)}</span>`
     : '';
 
+  const headerTitle = docked ? '已合并到右侧面板 · 点击折叠 / 展开' : '折叠 / 展开';
+  const dockPill = docked ? '<span class="pt-dock-pill">已合并</span>' : '';
+
   return `
-    <div class="pt-overview-card${collapsed ? ' collapsed' : ''}">
-      <div class="pt-overview-header" data-pt-action="toggle-overview" title="折叠 / 展开">
+    <div class="pt-overview-card${collapsed ? ' collapsed' : ''}${docked ? (dockStyle === 'stack' ? ' docked docked-stack' : ' docked') : ''}" data-pt-overview-mode="${docked ? 'docked' : 'floating'}">
+      <div class="pt-overview-header" data-pt-action="toggle-overview" title="${headerTitle}">
         <div style="display:flex;align-items:center;gap:6px;min-width:0;">
           <span class="pt-dot pt-tone-${phaseTone}${isRunning ? ' pt-dot-pulse' : ''}"></span>
           <strong style="white-space:nowrap;">${esc(phaseLabel)}</strong>
@@ -3037,7 +3228,10 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false) {
             ${!unresolved && thread?.run?.durationMs != null ? esc(fmtDuration(thread.run.durationMs)) : ''}${collapsed ? esc(collapsedQuota) : ''}
           </span>
         </div>
-        <span class="pt-muted" style="font-size:10.5px;flex:none;">${collapsed ? '展开 ▾' : '收起 ▴'}</span>
+        <span style="display:inline-flex;align-items:center;gap:6px;flex:none;">
+          ${dockPill}
+          <span class="pt-muted" style="font-size:10.5px;flex:none;">${collapsed ? '展开 ▾' : '收起 ▴'}</span>
+        </span>
       </div>
       ${collapsed ? '' : `
         <div class="pt-overview-body">
@@ -4312,13 +4506,24 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) 
         </div>
         <div class="setting-row">
           <div>
-            <div class="setting-label">显示右上角悬浮卡</div>
+            <div class="setting-label">显示运行进度与额度面板</div>
             <div class="setting-desc">展示当前会话步骤进度与账号额度池</div>
           </div>
           <label class="pt-switch">
             <input type="checkbox" data-pt-setting="showOverviewCard" ${cfg.showOverviewCard !== false ? 'checked' : ''} />
             <span class="pt-switch-track"></span>
           </label>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">右侧面板防遮挡策略</div>
+            <div class="setting-desc">T3 Code 打开右侧面板时自动合体停靠，或贴齐对话区边界避让</div>
+          </div>
+          <select class="pt-select" aria-label="右侧面板防遮挡策略" data-pt-setting="overviewMode" style="max-width:290px;">
+            <option value="adaptive"${(cfg.overviewMode || 'adaptive') === 'adaptive' ? ' selected' : ''}>自适应合并 + 自动避让（推荐）</option>
+            <option value="avoid"${cfg.overviewMode === 'avoid' ? ' selected' : ''}>仅自动避让浮窗</option>
+            <option value="fixed"${cfg.overviewMode === 'fixed' ? ' selected' : ''}>固定视口右上角</option>
+          </select>
         </div>
       </div>
 
@@ -4373,6 +4578,59 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) 
           </div>
           <button type="button" class="pt-btn" data-pt-action="test-alert">发送测试</button>
         </div>
+      </div>
+
+      <div class="settings-group-title">运行环境版本与更新</div>
+      <div class="pt-card">
+        ${(() => {
+          const ru = statusData?.runtimeUpdates;
+          const items = Array.isArray(ru?.items) ? ru.items : [];
+          if (!items.length) {
+            return `
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">暂未检测到已启用的运行环境</div>
+                  <div class="setting-desc">Codex 直接读取 T3 Code 缓存，Antigravity 自动比对官方版本清单</div>
+                </div>
+                <button type="button" class="pt-btn" data-pt-action="check-runtime-updates">检查更新</button>
+              </div>
+            `;
+          }
+          const rows = items.map(it => {
+            const sourceText = it.source === 't3-cache'
+              ? '来源：T3 Code 缓存'
+              : it.source === 'antigravity-manifest'
+                ? '来源：官方清单'
+                : '来源：本地已安装版本';
+            const badgeHtml = it.hasUpdate && it.latestVersion
+              ? `<span class="pt-badge pt-badge-warn pt-mono">可更新至 ${esc(it.latestVersion)}</span>`
+              : it.status === 'current'
+                ? '<span class="pt-badge pt-badge-ok">最新</span>'
+                : '<span class="pt-badge pt-badge-muted">未检查</span>';
+            return `
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">${esc(it.displayName)} <span class="pt-mono pt-muted" style="font-size:11px;font-weight:400;">${esc(it.currentVersion || '未知版本')}</span></div>
+                  <div class="setting-desc">${esc(sourceText)}</div>
+                </div>
+                ${badgeHtml}
+              </div>
+            `;
+          }).join('');
+          return `
+            ${rows}
+            <div class="setting-row">
+              <div>
+                <div class="setting-label">更新操作</div>
+                <div class="setting-desc">前往 T3 Code「运行环境」执行安全升级，避免与运行中会话冲突</div>
+              </div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                <button type="button" class="pt-btn" data-pt-action="check-runtime-updates">检查更新</button>
+                <button type="button" class="pt-btn" data-pt-action="open-provider-settings">前往运行环境</button>
+              </div>
+            </div>
+          `;
+        })()}
       </div>
 
       <div class="settings-group-title">服务信息</div>
