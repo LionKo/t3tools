@@ -90,7 +90,7 @@ function groupWindowsByPool(windows = []) {
 }
 
 export function createQuotaAdapter({ paths, store, t3State, codexAdapter }) {
-  function readAllQuotas(now = Date.now()) {
+  function readAllQuotas(now = Date.now(), { persist = true } = {}) {
     const instances = t3State.readProviderInstances();
     const cacheByInstance = new Map();
 
@@ -266,7 +266,7 @@ export function createQuotaAdapter({ paths, store, t3State, codexAdapter }) {
       });
     }
 
-    if (snapshotBuffer.length) {
+    if (persist && snapshotBuffer.length) {
       try { store.saveQuotaSnapshots(snapshotBuffer); } catch {}
     }
 

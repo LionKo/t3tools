@@ -79,7 +79,9 @@ test('assembled client bundle has valid JS syntax and handles desktop Requests t
   assert.equal(html.includes('>Codex<'), false);
   // Floating card includes shortcut button to All Quotas panel and never renders warning icons or error banners
   assert.ok(html.includes('data-pt-action="open-quotas"'));
-  assert.ok(code.includes('<span>⚡ T3Tools</span>'));
+  assert.ok(code.includes('<span class="pt-sidebar-logo-text">T3</span>'));
+  assert.ok(code.includes('<span class="pt-sidebar-status-dot"></span>'));
+  assert.equal(code.includes('⚡ T3Tools'), false);
   assert.equal(code.includes('用量 & 缓存看板'), false);
   assert.equal(code.includes('⚠'), false);
 
@@ -653,6 +655,9 @@ test('injected client isolates composer TPS per conversation across SPA switches
   const footer = new FakeEl('div');
   footer.setAttribute('data-chat-composer-footer', 'true');
   body.appendChild(footer);
+  const sidebar = new FakeEl('aside');
+  body.appendChild(sidebar);
+  const sidebarHtml = () => sidebar.children.find(c => c.id === 't3tools-sidebar-btn')?.shadowRoot?.children?.[1]?.innerHTML || '';
   const sidebarActive = new FakeEl('li');
   sidebarActive.setAttribute('data-thread-item', '2d40c3ef-6556-4e58-b87d-dbf308ba9990:thread-sidebar-only');
   sidebarActive.setAttribute('aria-current', 'page');
@@ -682,10 +687,11 @@ test('injected client isolates composer TPS per conversation across SPA switches
     documentElement: new FakeEl('html'),
     createElement: tag => new FakeEl(tag),
     querySelector: sel => {
+      if (sel === 'aside') return sidebar;
       if (sel.includes('data-thread-item') || sel.includes('aria-current')) return sidebarActive;
       return null;
     },
-    querySelectorAll: sel => (sel === '[data-chat-composer-footer]' ? [footer] : [])
+    querySelectorAll: sel => (sel === '[data-chat-composer-footer]' ? [footer] : sel === 'aside' ? [sidebar] : [])
   };
 
   const timers = new Set();
@@ -758,6 +764,7 @@ test('injected client isolates composer TPS per conversation across SPA switches
     // 2. Simulate an in-flight poll for thread-a, then SPA switch to thread-b WITHOUT hashchange (DOM mutation only)
     for (const fn of windowListeners.get('popstate') || []) fn();
     assert.equal(pendingBridge.length, 1);
+    assert.match(sidebarHtml(), /data-state="attached"/);
     const slowReqA = pendingBridge.shift();
     assert.equal(slowReqA.params.threadId, 'thread-a');
 
@@ -767,15 +774,20 @@ test('injected client isolates composer TPS per conversation across SPA switches
     assert.equal(composerHost().style.display, 'none');
     assert.equal(composerHtml().includes('111<span'), false);
     assert.equal(pendingBridge.length, 1);
+    assert.match(sidebarHtml(), /data-state="attached"/);
     const reqB = pendingBridge.shift();
     assert.equal(reqB.params.threadId, 'thread-b');
 
     // Thread-b responds with 222 tok/s; then delayed slowReqA arrives later and MUST be ignored
-    sandbox.__t3ToolsReceive(reqB.id, { ok: true, data: makeLive('thread-b', 222) });
+    sandbox.__t3ToolsReceive(reqB.id, { ok: true, data: { ...makeLive('thread-b', 222),
+      settings: { ...makeLive('thread-b', 222).settings, sidebarUsageRange: '7d' },
+      sidebarUsage: { preset: 'today', totalTokens: 987, costUsd: 99.81 } } });
     await flush();
     assert.equal(composerHost().style.display, 'inline-flex');
     assert.ok(composerHtml().includes('222<span class="pt-usage-unit">tok/s</span>'));
 
+    assert.doesNotMatch(sidebarHtml(), /99\.81|data-pt-sidebar-range="today"/);
+    assert.match(sidebarHtml(), /近7天|近 7 天|7天/);
     sandbox.__t3ToolsReceive(slowReqA.id, { ok: true, data: makeLive('thread-a', 111) });
     await flush();
     assert.ok(composerHtml().includes('222<span class="pt-usage-unit">tok/s</span>'));

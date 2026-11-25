@@ -697,6 +697,33 @@ namespace T3ToolsTray
         }
     }
 
+    internal static class TrayLog
+    {
+        private static readonly object Gate = new object();
+        private static readonly string DirectoryPath = Environment.GetEnvironmentVariable("T3TOOLS_DIR") ??
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".t3tools");
+
+        public static void Append(string path, string line)
+        {
+            lock (Gate)
+            {
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    File.AppendAllText(path, line + Environment.NewLine, Encoding.UTF8);
+                }
+                catch (Exception ex) { Trace.TraceError(ex.ToString()); }
+            }
+        }
+
+        public static void Event(string message, bool error = false)
+        {
+            string line = "[" + DateTime.UtcNow.ToString("o") + "] [tray] " + message;
+            Append(Path.Combine(DirectoryPath, "daemon.out.log"), line);
+            if (error) Append(Path.Combine(DirectoryPath, "daemon.err.log"), line);
+        }
+    }
+
     internal sealed class ChildProcessJob : IDisposable
     {
         private IntPtr _handle;
@@ -704,7 +731,11 @@ namespace T3ToolsTray
         public ChildProcessJob()
         {
             _handle = NativeMethods.CreateJobObject(IntPtr.Zero, null);
-            if (_handle == IntPtr.Zero) return;
+            if (_handle == IntPtr.Zero)
+            {
+                TrayLog.Event("CreateJobObject failed win32=" + Marshal.GetLastWin32Error(), true);
+                return;
+            }
 
             var info = new NativeMethods.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
             info.BasicLimitInformation.LimitFlags = NativeMethods.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
@@ -714,7 +745,8 @@ namespace T3ToolsTray
             try
             {
                 Marshal.StructureToPtr(info, ptr, false);
-                NativeMethods.SetInformationJobObject(_handle, NativeMethods.JobObjectExtendedLimitInformation, ptr, (uint)length);
+                if (!NativeMethods.SetInformationJobObject(_handle, NativeMethods.JobObjectExtendedLimitInformation, ptr, (uint)length))
+                    TrayLog.Event("SetInformationJobObject failed win32=" + Marshal.GetLastWin32Error(), true);
             }
             finally
             {
@@ -727,9 +759,10 @@ namespace T3ToolsTray
             if (_handle == IntPtr.Zero || process == null) return;
             try
             {
-                NativeMethods.AssignProcessToJobObject(_handle, process.Handle);
+                if (!NativeMethods.AssignProcessToJobObject(_handle, process.Handle))
+                    TrayLog.Event("AssignProcessToJobObject failed win32=" + Marshal.GetLastWin32Error(), true);
             }
-            catch { }
+            catch (Exception ex) { TrayLog.Event(ex.ToString(), true); }
         }
 
         public void Dispose()
@@ -1430,7 +1463,18 @@ namespace T3ToolsTray
         private volatile bool _exiting;
         private readonly object _daemonStartLock = new object();
         private int _pollingNow;
-        private bool _daemonBootStarted;
+        private bool _recovering;
+        private int _generation;
+        private bool _breakerOpen;
+        private bool _started;
+        private int _healthMisses;
+        private DateTime _healthySince;
+        private int _displayedPid;
+        private readonly Queue<DateTime> _restartTimes = new Queue<DateTime>();
+        private System.Threading.Timer _retryTimer;
+        private Action _recordExit;
+        private Func<bool> _drainLogs;
+        private Process _expectedExit;
         private bool _webViewStarted;
         private bool _pageReady;
         private bool _darkTheme = true;
@@ -1503,18 +1547,80 @@ namespace T3ToolsTray
             NativeMethods.ApplyTitleBarTheme(this.Handle, _darkTheme);
         }
 
-        private void StartDaemonBootOnce()
+        private void StartSupervisor()
         {
-            if (_daemonBootStarted) return;
-            _daemonBootStarted = true;
-            ThreadPool.QueueUserWorkItem(delegate { EnsureDaemonStartedAndPoll(); });
+            lock (_daemonStartLock)
+            {
+                if (_started || _exiting) return;
+                _started = true;
+                QueueRecovery(false, true);
+            }
+        }
+
+        private void QueueRecovery(bool manual, bool initial = false)
+        {
+            lock (_daemonStartLock)
+            {
+                if (_exiting || _recovering) return;
+                if (manual)
+                {
+                    _restartTimes.Clear();
+                    _breakerOpen = false;
+                    if (_retryTimer != null) _retryTimer.Dispose();
+                    _retryTimer = null;
+                }
+                if (_breakerOpen || _retryTimer != null) return;
+                int delay = 0;
+                if (!initial && !manual)
+                {
+                    DateTime now = DateTime.UtcNow;
+                    while (_restartTimes.Count > 0 && (now - _restartTimes.Peek()).TotalMinutes >= 2)
+                        _restartTimes.Dequeue();
+                    if (_restartTimes.Count >= 5)
+                    {
+                        _breakerOpen = true;
+                        _lastDaemonError = "后台多次重启失败，请右键选择“重启后台服务”";
+                        TrayLog.Event("automatic recovery paused", true);
+                        SafeInvoke(delegate { UpdateTrayIndicator(); });
+                        return;
+                    }
+                    delay = new int[] { 1000, 2000, 5000, 10000, 15000 }[_restartTimes.Count];
+                    _restartTimes.Enqueue(now);
+                }
+                System.Threading.Timer scheduled = null;
+                scheduled = new System.Threading.Timer(delegate
+                {
+                    lock (_daemonStartLock)
+                    {
+                        if (_exiting || _retryTimer != scheduled) return;
+                        scheduled.Dispose();
+                        _retryTimer = null;
+                        _recovering = true;
+                        _generation++;
+                        _healthMisses = 0;
+                    }
+                    try { EnsureDaemonStartedAndPoll(manual); }
+                    catch (Exception ex) { TrayLog.Event("recovery failed: " + ex, true); }
+                    finally
+                    {
+                        lock (_daemonStartLock)
+                        {
+                            _recovering = false;
+                            if (!_exiting && (!_daemonReady || (_ownsDaemon && _daemonProcess != null && _daemonProcess.HasExited)))
+                                QueueRecovery(false);
+                        }
+                    }
+                }, null, Timeout.Infinite, Timeout.Infinite);
+                _retryTimer = scheduled;
+                scheduled.Change(delay, Timeout.Infinite);
+            }
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             _lastShownUtc = DateTime.UtcNow;
-            StartDaemonBootOnce();
+            StartSupervisor();
             EnsureWebViewInitialized();
         }
 
@@ -1524,7 +1630,7 @@ namespace T3ToolsTray
             {
                 CreateHandle();
                 value = false;
-                StartDaemonBootOnce();
+                StartSupervisor();
             }
             base.SetVisibleCore(value);
         }
@@ -1886,6 +1992,7 @@ namespace T3ToolsTray
                 "\uE80F",
                 delegate { ShowMainWindow(); }
             ));
+            entries.Add(FluentTrayMenuEntry.Item("重启后台服务", "\uE72C", delegate { QueueRecovery(true); }));
             entries.Add(FluentTrayMenuEntry.Item(
                 "重启",
                 "\uE72C",
@@ -2106,19 +2213,29 @@ namespace T3ToolsTray
             return "node.exe";
         }
 
-        private void EnsureDaemonStartedAndPoll()
+        private void EnsureDaemonStartedAndPoll(bool manual)
         {
             string existingUrl;
             int existingPid;
-            if (TryProbeRuntimeDaemon(out existingUrl, out existingPid))
+            bool healthy = TryProbeRuntimeDaemon(out existingUrl, out existingPid);
+            lock (_daemonStartLock)
             {
-                _daemonUrl = existingUrl;
-                _daemonPid = existingPid;
-                _ownsDaemon = false;
-                _daemonReady = true;
-                SafeInvoke(delegate { if (this.Visible) EnsureWebViewInitialized(); });
-                PollStatusAsync();
-                return;
+                if (_exiting) return;
+                bool sameChild = _daemonProcess != null && !_daemonProcess.HasExited && _daemonProcess.Id == existingPid;
+                if (healthy && !(manual && sameChild))
+                {
+                    if (!sameChild) StopChild("switching to external daemon", false);
+                    _daemonUrl = existingUrl;
+                    _daemonPid = existingPid;
+                    _ownsDaemon = sameChild;
+                    _daemonReady = true;
+                    TrayLog.Event("ready pid=" + existingPid + " owned=" + sameChild);
+                    PollStatusAsync();
+                    return;
+                }
+                _daemonReady = false;
+                _healthySince = DateTime.MinValue;
+                StopChild(manual ? "manual restart" : "health probe failed", healthy && sameChild);
             }
 
             string nodeExe;
@@ -2141,52 +2258,93 @@ namespace T3ToolsTray
                 psi.CreateNoWindow = true;
                 psi.RedirectStandardOutput = true;
                 psi.RedirectStandardError = true;
+                psi.StandardOutputEncoding = Encoding.UTF8;
+                psi.StandardErrorEncoding = Encoding.UTF8;
                 psi.EnvironmentVariables["T3TOOLS_AUTH_TOKEN"] = _authToken;
 
                 var proc = new Process();
                 proc.StartInfo = psi;
-                proc.EnableRaisingEvents = true;
 
                 string outLog = Path.Combine(_pluginDataDir, "daemon.out.log");
                 string errLog = Path.Combine(_pluginDataDir, "daemon.err.log");
+                var streamsEnded = new CountdownEvent(2);
                 proc.OutputDataReceived += delegate(object s, DataReceivedEventArgs args)
                 {
-                    if (args.Data != null) AppendLogSafe(outLog, args.Data);
+                    if (args.Data == null) streamsEnded.Signal();
+                    else TrayLog.Append(outLog, args.Data);
                 };
                 proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs args)
                 {
-                    if (args.Data != null) AppendLogSafe(errLog, args.Data);
+                    if (args.Data == null) streamsEnded.Signal();
+                    else TrayLog.Append(errLog, args.Data);
                 };
 
                 lock (_daemonStartLock)
                 {
                     if (_exiting) { proc.Dispose(); return; }
                     proc.Start();
+                    int childPid = proc.Id;
+                    var uptime = Stopwatch.StartNew();
+                    object exitGate = new object();
+                    bool recorded = false;
+                    Action record = delegate
+                    {
+                        lock (exitGate)
+                        {
+                            if (recorded) return;
+                            recorded = true;
+                            int code = proc.ExitCode;
+                            bool expected = _exiting || ReferenceEquals(_expectedExit, proc);
+                            TrayLog.Event(string.Format("exited pid={0} uptimeSeconds={1:F2} code={2} (0x{2:X8}) {3}",
+                                childPid, uptime.Elapsed.TotalSeconds, code, expected ? "expected" : "unexpected"), !expected);
+                            if (!expected) ThreadPool.QueueUserWorkItem(delegate
+                            {
+                                lock (_daemonStartLock)
+                                {
+                                    if (!ReferenceEquals(proc, _daemonProcess) || !_ownsDaemon || _exiting) return;
+                                    _daemonReady = false;
+                                    QueueRecovery(false);
+                                }
+                            });
+                        }
+                    };
+                    _recordExit = record;
+                    _drainLogs = delegate { return streamsEnded.Wait(500); };
+                    TrayLog.Event("spawn pid=" + childPid);
+                    proc.Exited += delegate { record(); };
                     _childJob.AddProcess(proc);
                     _daemonProcess = proc;
                     _daemonPid = proc.Id;
                     _ownsDaemon = true;
                     proc.BeginOutputReadLine();
                     proc.BeginErrorReadLine();
+                    proc.EnableRaisingEvents = true;
                 }
                 _lastDaemonError = "";
 
-                for (int i = 0; i < 25; i++)
+                var startupWait = Stopwatch.StartNew();
+                while (startupWait.Elapsed.TotalSeconds < 40)
                 {
                     if (_exiting || proc.HasExited) break;
                     string probeUrl;
                     int probePid;
                     if (TryProbeRuntimeDaemon(out probeUrl, out probePid))
                     {
-                        _daemonUrl = probeUrl;
-                        _daemonPid = probePid;
-                        _ownsDaemon = probePid == proc.Id;
-                        _daemonReady = true;
+                        lock (_daemonStartLock)
+                        {
+                            if (_exiting) return;
+                            _daemonUrl = probeUrl;
+                            _daemonPid = probePid;
+                            _ownsDaemon = probePid == proc.Id;
+                            _daemonReady = true;
+                        }
+                        TrayLog.Event("ready pid=" + probePid + " owned=" + _ownsDaemon);
                         break;
                     }
                     Thread.Sleep(250);
                 }
 
+                if (_exiting) return;
                 if (!_daemonReady)
                 {
                     _lastDaemonError = proc.HasExited
@@ -2204,6 +2362,8 @@ namespace T3ToolsTray
             }
             catch (Exception ex)
             {
+                if (_exiting) return;
+                TrayLog.Event("daemon start failed: " + ex, true);
                 _lastDaemonError = "启动后台服务失败: " + ex.Message;
                 SafeInvoke(delegate { OnWebViewError(_lastDaemonError); });
             }
@@ -2211,10 +2371,43 @@ namespace T3ToolsTray
             PollStatusAsync();
         }
 
-        private static void AppendLogSafe(string path, string line)
+        // Caller holds _daemonStartLock. This handle always belongs to a child spawned here.
+        private void StopChild(string reason, bool requestShutdown)
         {
-            try { File.AppendAllText(path, line + Environment.NewLine, Encoding.UTF8); }
-            catch { }
+            Process child = _daemonProcess;
+            if (child == null) return;
+            if (!child.HasExited)
+            {
+                _expectedExit = child;
+                if (requestShutdown && _ownsDaemon && child.Id == _daemonPid)
+                {
+                    TrayLog.Event("graceful shutdown pid=" + child.Id + " reason=" + reason);
+                    string liveUrl;
+                    int livePid;
+                    try
+                    {
+                        if (TryProbeRuntimeDaemon(out liveUrl, out livePid) && livePid == child.Id)
+                            HttpPostJson(liveUrl + "/api/shutdown", "{}", 1500);
+                    }
+                    catch (Exception ex) { TrayLog.Event("shutdown request failed: " + ex.Message, true); }
+                    child.WaitForExit(3500);
+                }
+                if (!child.HasExited)
+                {
+                    TrayLog.Event("forced kill pid=" + child.Id + " reason=" + reason, true);
+                    child.Kill();
+                    if (!child.WaitForExit(1200)) throw new TimeoutException("Child process still alive");
+                }
+            }
+            if (_drainLogs != null && !_drainLogs())
+                TrayLog.Event("timed out draining daemon output pid=" + child.Id, true);
+            _drainLogs = null;
+            if (_recordExit != null) _recordExit();
+            _recordExit = null;
+            child.Dispose();
+            _daemonProcess = null;
+            _expectedExit = null;
+            _ownsDaemon = false;
         }
 
         private bool TryProbeRuntimeDaemon(out string url, out int pid)
@@ -2248,11 +2441,11 @@ namespace T3ToolsTray
             if (pid <= 0 || string.IsNullOrEmpty(started)) return false;
             try
             {
-                var status = HttpGetJson(url + "/api/status", 1200);
+                var status = HttpGetJson(url + "/api/health", 1200);
                 if (status != null && GetBool(status, "ok", false))
                 {
                     var payload = GetDict(status, "data");
-                    if (GetInt(payload, "pid", 0) != pid || GetString(payload, "startedAtMs", "") != started) return false;
+                    if (GetString(payload, "state", "") != "running" || GetInt(payload, "pid", 0) != pid || GetString(payload, "startedAtMs", "") != started) return false;
                     data = payload;
                     return true;
                 }
@@ -2306,13 +2499,51 @@ namespace T3ToolsTray
         private void PollStatusWorker()
         {
             if (_exiting) return;
+            int generation;
+            lock (_daemonStartLock)
+            {
+                if (_recovering) return;
+                generation = _generation;
+            }
             bool running = IsT3CodeUiRunning();
 
             Dictionary<string, object> statusData;
             string nextUrl;
             int nextPid;
-            TryProbeRuntimeDaemon(out nextUrl, out nextPid, out statusData);
-            SafeInvoke(delegate { ApplyStatus(running, nextUrl, nextPid, statusData); });
+            bool healthy = TryProbeRuntimeDaemon(out nextUrl, out nextPid, out statusData);
+            lock (_daemonStartLock)
+            {
+                if (_recovering || _exiting || generation != _generation) return;
+                if (healthy)
+                {
+                    _healthMisses = 0;
+                    if (_healthySince == DateTime.MinValue) _healthySince = DateTime.UtcNow;
+                    if ((DateTime.UtcNow - _healthySince).TotalSeconds >= 60) _restartTimes.Clear();
+                }
+                else
+                {
+                    _healthySince = DateTime.MinValue;
+                    if (++_healthMisses >= 3) QueueRecovery(false);
+                }
+            }
+            if (healthy)
+            {
+                try
+                {
+                    var full = GetDict(HttpGetJson(nextUrl + "/api/status", 2500), "data");
+                    if (GetInt(full, "pid", 0) == nextPid &&
+                        GetString(full, "startedAtMs", "") == GetString(statusData, "startedAtMs", "")) statusData = full;
+                }
+                catch (Exception ex) { Trace.TraceWarning("status: " + ex.Message); }
+            }
+            SafeInvoke(delegate
+            {
+                lock (_daemonStartLock)
+                {
+                    if (_recovering || generation != _generation) return;
+                    ApplyStatus(running, nextUrl, nextPid, statusData);
+                }
+            });
         }
 
         private void ApplyStatus(bool running, string nextUrl, int nextPid, Dictionary<string, object> statusData)
@@ -2322,7 +2553,8 @@ namespace T3ToolsTray
             _t3UiRunning = running;
             if (statusData != null)
             {
-                bool moved = _daemonUrl != nextUrl || _daemonPid != nextPid;
+                bool moved = _displayedPid != nextPid || _daemonUrl != nextUrl;
+                _displayedPid = nextPid;
                 _daemonUrl = nextUrl;
                 _daemonPid = nextPid;
                 _daemonReady = true;
@@ -2341,7 +2573,7 @@ namespace T3ToolsTray
                 if (string.IsNullOrEmpty(_lastDaemonError)) _lastDaemonError = "后台服务未就绪";
             }
 
-            if (statusData != null)
+            if (statusData != null && statusData.ContainsKey("cdp"))
             {
                 _daemonVersion = GetString(statusData, "version", _daemonVersion);
                 _daemonPid = GetInt(statusData, "pid", _daemonPid);
@@ -2459,7 +2691,7 @@ namespace T3ToolsTray
             if (!string.IsNullOrEmpty(_lastDaemonError))
             {
                 nextBadge = TrayBadgeState.Paused;
-                trayTooltip = "T3Tools - 服务异常";
+                trayTooltip = "T3Tools - " + _lastDaemonError;
             }
             else if (_daemonReady && _unreadErrors > 0)
             {
@@ -2626,7 +2858,12 @@ namespace T3ToolsTray
         private void CleanupBeforeExit()
         {
             if (_cleanedUp) return;
-            lock (_daemonStartLock) { _exiting = true; }
+            lock (_daemonStartLock)
+            {
+                _exiting = true;
+                if (_retryTimer != null) _retryTimer.Dispose();
+                _retryTimer = null;
+            }
             _cleanedUp = true;
 
             try { SystemEvents.SessionEnding -= OnSessionEnding; } catch { }
@@ -2668,22 +2905,11 @@ namespace T3ToolsTray
             this.Icon = null;
             if (windowImage != null) windowImage.Dispose();
 
-            if (_daemonProcess != null)
+            lock (_daemonStartLock)
             {
-                try { if (_ownsDaemon && !_daemonProcess.HasExited && _daemonProcess.Id == _daemonPid) HttpPostJson(_daemonUrl + "/api/shutdown", "{}", 1500); }
-                catch { }
-                try
-                {
-                    if (_daemonProcess != null && !_daemonProcess.HasExited)
-                    {
-                        _daemonProcess.WaitForExit(2000);
-                        if (!_daemonProcess.HasExited) _daemonProcess.Kill();
-                    }
-                }
-                catch { }
+                try { StopChild("tray exit", true); }
+                catch (Exception ex) { TrayLog.Event("shutdown failed: " + ex, true); }
             }
-
-            try { if (_daemonProcess != null) _daemonProcess.Dispose(); } catch { }
             try { _childJob.Dispose(); } catch { }
         }
 
@@ -2796,13 +3022,17 @@ namespace T3ToolsTray
                         bool acquired = false;
                         try
                         {
-                            acquired = mutex.WaitOne(4000);
+                            acquired = mutex.WaitOne(9000);
                         }
                         catch (AbandonedMutexException)
                         {
                             acquired = true;
                         }
-                        if (!acquired) return;
+                        if (!acquired)
+                        {
+                            TrayLog.Event("--wait-restart mutex wait timeout", true);
+                            return;
+                        }
                     }
                     else
                     {

@@ -93,12 +93,12 @@ test('injected HTTP dashboard applies settings, authenticates forced refresh and
       querySelector:()=>null,querySelectorAll:s=>s==='[data-chat-composer-footer]'?[footer]:[]},
     getComputedStyle:()=>({getPropertyValue:()=>''}),location:{hash:'#/env/thread'},
     window:new EventTarget(),MutationObserver:class {observe(){} disconnect(){}},
-    URLSearchParams, clearTimeout:id=>timers.delete(id),setTimeout:(fn,ms)=>{timers.set(fn,ms);return fn;},
+    AbortController, URLSearchParams, clearTimeout:id=>timers.delete(id),setTimeout:(fn,ms)=>{timers.set(fn,ms);return fn;},
     fetch:async(url,options)=>{
       events.push({url,options});
       if(url.includes('/api/dashboard')) return gate.promise;
       const settings={showComposerBar:false,showOverviewCard:false,pollIntervalMs:7000,overviewPosition:{top:70,right:9}};
-      return {json:async()=>({ok:true,data:{settings,thread:{},quotas:{groups:[]}}})};
+      return {ok:true,json:async()=>({ok:true,data:{settings,thread:{},quotas:{groups:[]}}})};
     }
   };
   runInNewContext(buildClientBundle({transport:'http',authToken:'fixture'}),context);
@@ -114,7 +114,8 @@ test('injected HTTP dashboard applies settings, authenticates forced refresh and
   assert.equal(sync.headers['X-T3Tools-Token'],'fixture');
   assert.equal(sync.headers['Content-Type'],'application/json');
   context.__t3Tools.dispose();
-  gate.resolve({json:async()=>({ok:true,data:{}})});
+  assert.ok(events.find(e => e.url.includes('/api/dashboard')).options.signal.aborted);
+  gate.resolve({ok:true,json:async()=>({ok:true,data:{}})});
   await delay(0);
   assert.equal(mounted.size,0);
   assert.equal(timers.size,0);
@@ -158,7 +159,7 @@ test('CDP handshake settles on close and disable waits for pending discovery', a
 
 test('startup failure after bind releases the database and listener', async t => {
   const root=fixture(t);
-  const paths={home:root,appData:root,pluginDataDir:root};
+  const paths={home:root,codexHome:join(root,'.codex'),appData:root,pluginDataDir:root};
   const options={pathOverrides:paths,enableCdp:false,portOverride:0};
   mkdirSync(join(root,'runtime.json'));
   await assert.rejects(startDaemon(options));
@@ -188,7 +189,7 @@ test('compiled tray restricts WebView senders and closes only its owned daemon j
   const dir = fixture(t);
   const exe = join(dir,'tray.exe');
   const build = fileURLToPath(new URL('../scripts/build-tray.ps1',import.meta.url));
-  const options = {windowsHide:true,timeout:20000,env:{...process.env,T3TOOLS_TEST_EXE:exe}};
+  const options = {windowsHide:true,timeout:20000,env:{...process.env,T3TOOLS_TEST_EXE:exe,T3TOOLS_DIR:dir}};
   execFileSync('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',build,'-OutExe',exe],options);
   const script = `
 $ErrorActionPreference = 'Stop'
@@ -237,4 +238,68 @@ try {
   const testScript = join(dir,'check.ps1');
   writeFileSync(testScript,script);
   execFileSync('powershell.exe',['-NoProfile','-ExecutionPolicy','Bypass','-File',testScript], options);
+  // Exercise the real supervisor without taking the installed tray's mutex or opening its window.
+  const cli = join(dir, 'fixture-daemon.mjs');
+  const cliModule = new URL('../bin/t3tools.mjs', import.meta.url).href;
+  writeFileSync(cli, `import { existsSync, unlinkSync } from 'node:fs';
+    import { join } from 'node:path';
+    const root = process.env.T3TOOLS_DIR;
+    for (const name of ['USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'CODEX_HOME', 'T3_DATA_DIR']) process.env[name] = root;
+    process.argv.splice(2, Infinity, 'start', '--port=0', '--no-cdp');
+    await import(${JSON.stringify(cliModule)});
+    const crash = join(root, 'crash-once');
+    setInterval(() => {
+      if (existsSync(crash)) { unlinkSync(crash); throw new Error('fixture daemon crash'); }
+    }, 50).unref();
+  `);
+  writeFileSync(join(dir, 'tray-config.json'), JSON.stringify({ cliPath: cli, nodeExe: process.execPath }));
+  writeFileSync(testScript, `
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$assembly = [Reflection.Assembly]::LoadFrom($env:T3TOOLS_TEST_EXE)
+$type = $assembly.GetType('T3ToolsTray.T3ToolsTrayForm')
+$flags = [Reflection.BindingFlags]'Instance,NonPublic'
+$wake = [Threading.AutoResetEvent]::new($false)
+$quit = [Threading.AutoResetEvent]::new($false)
+$form = [Activator]::CreateInstance($type,@($true,$wake,$quit))
+$log = Join-Path $env:T3TOOLS_DIR 'daemon.out.log'
+function Wait-Ready([int]$previous) {
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  while ($watch.ElapsedMilliseconds -lt 6000) {
+    if (Test-Path -LiteralPath $log) {
+      $last = Get-Content -LiteralPath $log -Encoding UTF8 | Select-String 'ready pid=([0-9]+) owned=True' | Select-Object -Last 1
+      if ($last) {
+        $childId = [int]$last.Matches[0].Groups[1].Value
+        if ($childId -ne $previous) { return $childId }
+      }
+    }
+    Start-Sleep -Milliseconds 50
+  }
+  throw "fixture daemon never became ready (previous=$previous)"
+}
+try {
+  $type.GetMethod('StartSupervisor',$flags).Invoke($form,@())
+  $first = Wait-Ready 0
+  $child = $type.GetField('_daemonProcess',$flags).GetValue($form)
+  if ($child.Id -ne $first) { throw 'fixture child mismatch' }
+  [IO.File]::WriteAllText((Join-Path $env:T3TOOLS_DIR 'crash-once'), '1')
+  $second = Wait-Ready $first
+} finally {
+  $type.GetMethod('CleanupBeforeExit',$flags).Invoke($form,@())
+  $form.Dispose()
+  $wake.Dispose()
+  $quit.Dispose()
+}
+if (Test-Path (Join-Path $env:T3TOOLS_DIR 'runtime.json')) { throw 'stale runtime after exit' }
+`);
+  execFileSync('powershell.exe',['-STA','-NoProfile','-ExecutionPolicy','Bypass','-File',testScript],options);
+  const lifecycle = readFileSync(join(dir, 'daemon.out.log'), 'utf8');
+  assert.match(lifecycle, /守护进程已启动/);
+  assert.match(lifecycle, /graceful shutdown pid=/);
+  assert.match(lifecycle, /code=0 \(0x00000000\) expected/);
+  assert.doesNotMatch(lifecycle, /forced kill/);
+  const errors = readFileSync(join(dir, 'daemon.err.log'), 'utf8');
+  assert.match(errors, /\[uncaughtException\] Error: fixture daemon crash/);
+  assert.match(errors, /exited pid=.*code=1 \(0x00000001\) unexpected/);
+
 });

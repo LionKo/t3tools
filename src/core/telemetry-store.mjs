@@ -95,6 +95,7 @@ function initializeStore(db) {
     CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests(status, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_errcode_ts ON requests(error_code, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_requests_billing_ts ON requests(billing_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source_key);
     CREATE INDEX IF NOT EXISTS idx_requests_thread_ts ON requests(t3_thread_id, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_session_ts ON requests(native_session_id, timestamp_ms DESC);
@@ -217,7 +218,15 @@ function initializeStore(db) {
   `);
   const allQuotasStmt = db.prepare('SELECT * FROM quota_snapshots ORDER BY account_id, kind, window_id');
 
+  const dataVersion = db.prepare('PRAGMA data_version');
+  const nextBilling = db.prepare('SELECT MIN(billing_ts_ms) AS ts FROM requests WHERE billing_ts_ms > ?');
+  let lastVersion = dataVersion.get().data_version;
   function getRevision() {
+    const version = dataVersion.get().data_version;
+    if (version !== lastVersion) {
+      lastVersion = version;
+      revision++;
+    }
     return revision;
   }
 
@@ -479,6 +488,7 @@ function initializeStore(db) {
     getMeta: key => db.prepare('SELECT value FROM store_meta WHERE key=?').get(key)?.value,
     setMeta: (key, value) => db.prepare('INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)').run(key, String(value)),
     getRevision,
+    nextBillingAfter: ms => nextBilling.get(ms).ts ?? Infinity,
     getSourceStamp,
     replaceSourceRequests,
     syncThreadLinks,

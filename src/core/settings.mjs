@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS = {
   overviewCollapsed: false,
   overviewPosition: { right: 18, top: 56 },
   defaultRangePreset: 'weeklyQuota',
+  sidebarUsageRange: 'today',
   pollIntervalMs: 2500,
   alertConfig: { enabled: true, desktopNotification: true, injectedBanner: false, mode: 'smart',
     burstThreshold: 2, burstWindowMs: 300000, cooldownMs: 120000 },
@@ -83,6 +84,10 @@ export function sanitizeSettingsPatch(patch) {
     if (!VALID_PRESETS.has(patch.defaultRangePreset)) throw new Error('不支持的 defaultRangePreset');
     clean.defaultRangePreset = patch.defaultRangePreset;
   }
+  if (Object.prototype.hasOwnProperty.call(patch, 'sidebarUsageRange')) {
+    if (!VALID_PRESETS.has(patch.sidebarUsageRange)) throw new Error('不支持的 sidebarUsageRange');
+    clean.sidebarUsageRange = patch.sidebarUsageRange;
+  }
   if (Object.prototype.hasOwnProperty.call(patch, 'theme')) {
     if (!VALID_THEMES.has(patch.theme)) throw new Error('theme 必须为 dark 或 light');
     clean.theme = patch.theme;
@@ -133,11 +138,20 @@ export function sanitizeSettingsPatch(patch) {
 }
 
 function mergeSettings(base, rawPatch) {
-  let safePatch = {};
-  try {
-    safePatch = sanitizeSettingsPatch(rawPatch || {});
-  } catch {
-    safePatch = {};
+  const safePatch = {};
+  for (const key of Object.keys(base)) {
+    if (!rawPatch || !Object.hasOwn(rawPatch, key)) continue;
+    const value = rawPatch[key];
+    if (base[key] && typeof base[key] === 'object' && value && typeof value === 'object') {
+      for (const field of Object.keys(base[key])) {
+        if (!Object.hasOwn(value, field)) continue;
+        try {
+          Object.assign(safePatch[key] ??= {}, sanitizeSettingsPatch({ [key]: { [field]: value[field] } })[key]);
+        } catch { /* Preserve the default for this field. */ }
+      }
+    } else {
+      try { Object.assign(safePatch, sanitizeSettingsPatch({ [key]: value })); } catch {}
+    }
   }
   return {
     ...base,

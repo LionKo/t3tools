@@ -121,8 +121,9 @@ export function readT3ServerOrigin(serverRuntimePath) {
   }
 }
 
-export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket } = {}) {
+export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket, signal } = {}) {
   return new Promise((resolve, reject) => {
+    signal?.throwIfAborted();
     const socket = new WebSocketImpl(wsUrl);
     const pending = new Map();
     const listeners = new Set();
@@ -141,13 +142,22 @@ export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket }
       pending.clear();
     };
 
+    // Abort a pending handshake immediately when discovery is stopped.
+    const abortHandshake = () => {
+      clearTimeout(connectTimer);
+      try { socket.close(); } catch {}
+      reject(new Error('CDP 连接已取消'));
+    };
+    signal?.addEventListener('abort', abortHandshake, { once: true });
     socket.addEventListener('error', () => {
+      signal?.removeEventListener('abort', abortHandshake);
       clearTimeout(connectTimer);
       failAll('CDP 连接错误');
       reject(new Error('CDP 连接不可用'));
     });
 
     socket.addEventListener('close', () => {
+      signal?.removeEventListener('abort', abortHandshake);
       clearTimeout(connectTimer);
       failAll('CDP 连接已关闭');
       listeners.clear();
@@ -171,6 +181,7 @@ export function connectCdpSocket(wsUrl, { WebSocketImpl = globalThis.WebSocket }
     });
 
     socket.addEventListener('open', () => {
+      signal?.removeEventListener('abort', abortHandshake);
       clearTimeout(connectTimer);
       resolve({
         socket,
@@ -217,6 +228,7 @@ export function createCdpHost({
   const clients = new Map();
   const bootId = randomUUID();
   let stopped = false;
+  let discovery = new AbortController();
   let enabled = Boolean(initialEnabled);
   let activePoll = null;
   let timer = null;
@@ -290,7 +302,8 @@ export function createCdpHost({
   }
 
   async function attachTarget(target, serverOrigin) {
-    const client = await connectImpl(target.webSocketDebuggerUrl);
+    const client = await connectImpl(target.webSocketDebuggerUrl, { signal: discovery.signal });
+    if (stopped || !enabled) { client.socket.close(); throw new Error('挂载已取消'); }
     const targetOrigin = canonicalOrigin(target.url);
     const meta = {
       targetId: target.id,
@@ -388,13 +401,13 @@ export function createCdpHost({
     await installInTopIsolatedWorld(meta, bundleSource);
   }
 
-  function pollOnce() {
+  function pollOnce(forceInstall = false) {
     if (stopped || !enabled) return Promise.resolve(lastState);
-    activePoll ??= runPoll().finally(() => { activePoll = null; });
+    activePoll ??= runPoll(forceInstall).finally(() => { activePoll = null; });
     return activePoll;
   }
 
-  async function runPoll() {
+  async function runPoll(forceInstall) {
     const pollErrors = [];
 
     try {
@@ -431,10 +444,11 @@ export function createCdpHost({
       let attachedMatchedIds = new Set();
 
       for (const cand of candidates) {
+        if (stopped || !enabled) break;
         let valid = [];
         try {
           const res = await fetchImpl(`http://127.0.0.1:${cand.port}/json/list`, {
-            redirect: 'error', signal: AbortSignal.timeout(3000)
+            redirect: 'error', signal: AbortSignal.any([discovery.signal, AbortSignal.timeout(3000)])
           });
           if (!res.ok) {
             pollErrors.push(`端口 ${cand.port} 返回 ${res.status}`);
@@ -456,6 +470,7 @@ export function createCdpHost({
 
         let attachedOnThisPort = 0;
         for (const target of valid) {
+          if (stopped || !enabled) break;
           const existing = clients.get(target.id);
           try {
             if (existing && existing.wsUrl !== target.webSocketDebuggerUrl) {
@@ -466,8 +481,8 @@ export function createCdpHost({
               await attachTarget(target, serverOrigin);
             } else {
               const meta = clients.get(target.id);
-              const check = await meta.client.send('Runtime.evaluate', {
-                expression: `Boolean(globalThis.__t3Tools && globalThis.__t3Tools.version === ${JSON.stringify(version)} && globalThis.__t3Tools.bootId === ${JSON.stringify(bootId)} && globalThis.__t3Tools.healthy !== false)`,
+              const check = !forceInstall && Number.isInteger(meta.isolatedContextId) && await meta.client.send('Runtime.evaluate', {
+                expression: `Boolean(globalThis.__t3Tools && globalThis.__t3Tools.version === ${JSON.stringify(version)} && globalThis.__t3Tools.bootId === ${JSON.stringify(bootId)} && globalThis.__t3Tools.healthy === true && typeof globalThis.__t3ToolsBridge === 'function' && typeof globalThis.__t3ToolsReceive === 'function')`,
                 contextId: meta.isolatedContextId,
                 returnByValue: true
               });
@@ -540,16 +555,22 @@ export function createCdpHost({
   }
 
   async function detachAllClients() {
-    for (const meta of clients.values()) {
-      try {
-        if (Number.isInteger(meta.isolatedContextId)) {
-          await meta.client.send('Runtime.evaluate', {
-            expression: 'globalThis.__t3Tools?.dispose?.()',
-            contextId: meta.isolatedContextId
-          }).catch(() => {});
-        }
-        meta.client.socket.close();
-      } catch {}
+    const targets = [...clients.values()];
+    let timer;
+    try {
+      await Promise.race([
+        Promise.allSettled(targets.filter(meta => Number.isInteger(meta.isolatedContextId)).map(meta =>
+          meta.client.send('Runtime.evaluate', {
+            expression: 'globalThis.__t3Tools?.dispose?.()', contextId: meta.isolatedContextId
+          })
+        )),
+        new Promise(resolve => { timer = setTimeout(resolve, 800); })
+      ]);
+    } finally {
+      clearTimeout(timer);
+      for (const meta of targets) {
+        try { meta.client.socket.close(); } catch {}
+      }
     }
     clients.clear();
   }
@@ -575,6 +596,7 @@ export function createCdpHost({
   }
 
   function start() {
+    if (discovery.signal.aborted) discovery = new AbortController();
     stopped = false;
     if (!enabled) {
       lastState = {
@@ -621,15 +643,16 @@ export function createCdpHost({
     if (stopped) return getStatus();
     if (!enabled) enabled = true;
     clearTimer();
-    const st = await pollOnce();
+    await activePoll;
+    const st = await pollOnce(true);
     scheduleNextPoll();
     return st;
   }
 
   async function stop() {
     stopped = true;
+    discovery.abort();
     clearTimer();
-    await activePoll;
     await detachAllClients();
     lastState = { ...lastState, connected: false, attachedTargets: 0 };
   }

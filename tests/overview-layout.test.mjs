@@ -165,14 +165,15 @@ function createHarness({ vw = 1440, vh = 900, initialSettings = {} } = {}) {
       unobserve() {}
       disconnect() { resizeDisconnected = true; }
     },
-    URLSearchParams,
+    AbortController, URLSearchParams,
     clearTimeout: id => timers.delete(id),
     setTimeout: (fn, ms) => { timers.set(fn, ms); return fn; },
     fetch: async url => {
       if (url.includes('/api/settings')) {
-        return { json: async () => ({ ok: true, data: liveSettings }) };
+        return { ok: true, json: async () => ({ ok: true, data: liveSettings }) };
       }
       return {
+        ok: true,
         json: async () => ({
           ok: true,
           data: {

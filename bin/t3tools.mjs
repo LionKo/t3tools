@@ -44,6 +44,22 @@ async function cmdStart() {
   const autoPatchDebugArg = args.includes('--patch-debug-arg') || args.includes('--tray-host');
   const autoExitWhenT3Gone = args.includes('--auto-exit');
 
+  function exitAfterFlush(code) {
+    const deadline = setTimeout(() => process.exit(code), 100);
+    process.stdout.write('', () => process.stderr.write('', () => {
+      clearTimeout(deadline);
+      process.exit(code);
+    }));
+  }
+
+  process.on('uncaughtException', err => {
+    console.error(`[${new Date().toISOString()}] [uncaughtException]`, err?.stack || err);
+    exitAfterFlush(1);
+  });
+  process.on('unhandledRejection', err => {
+    console.error(`[${new Date().toISOString()}] [unhandledRejection]`, err?.stack || err);
+  });
+
   const daemon = await startDaemon({
     portOverride,
     enableCdp,
@@ -52,11 +68,11 @@ async function cmdStart() {
     autoExitWhenT3Gone,
     onAutoExit: () => {
       console.log('[T3Tools] 检测到 T3 Code 已关闭，守护进程自动退出。');
-      process.exit(0);
+      exitAfterFlush(0);
     },
     onShutdownRequest: () => {
       console.log('[T3Tools] 收到托盘退出指令，守护进程已优雅停止。');
-      process.exit(0);
+      exitAfterFlush(0);
     }
   });
   console.log(`[${new Date().toISOString()}] [T3Tools v${daemon.version}] 守护进程已启动 (PID ${process.pid})`);
@@ -66,20 +82,13 @@ async function cmdStart() {
     console.log('  - 联动生命周期: 已启用（T3 Code 关闭后自动退出，零常驻）');
   }
 
-  process.on('uncaughtException', err => {
-    console.error(`[${new Date().toISOString()}] [uncaughtException]`, err?.stack || err);
-  });
-  process.on('unhandledRejection', err => {
-    console.error(`[${new Date().toISOString()}] [unhandledRejection]`, err?.stack || err);
-  });
-
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async signal => {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`\n[${new Date().toISOString()}] [T3Tools] 正在停止...`);
-    await daemon.stop();
-    process.exit(0);
+    await daemon.stop(signal);
+    exitAfterFlush(0);
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -217,7 +226,7 @@ async function cmdUninstall() {
 
 async function cmdStatus() {
   const paths = resolvePaths();
-  const existing = await probeRunningDaemon(paths.runtimeFilePath);
+  const existing = await probeRunningDaemon(paths.runtimeFilePath, { fullStatus: true });
   if (!existing) {
     console.log('守护进程未运行。');
     return;

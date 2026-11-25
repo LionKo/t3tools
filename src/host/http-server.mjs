@@ -77,6 +77,7 @@ export function createHttpServer({
   settings,
   handleRpc,
   getDaemonStatus,
+  getHealth,
   buildClientBundle,
   buildFallbackHtml,
   onSettingsUpdated = null,
@@ -89,13 +90,14 @@ export function createHttpServer({
 }) {
   let boundPort = port;
 
-  function allowedOriginSet() {
+  function allowedOriginSet(localOnly) {
     const set = new Set([
       `http://127.0.0.1:${boundPort}`,
       `http://localhost:${boundPort}`,
       `http://[::1]:${boundPort}`
     ]);
-    for (const o of getAllowedOrigins() || []) {
+    // Health probes only need local origins and must never read the T3 runtime file.
+    for (const o of localOnly ? [] : getAllowedOrigins() || []) {
       if (o) set.add(o);
     }
     return set;
@@ -121,9 +123,10 @@ export function createHttpServer({
 
       // 2. Strict Origin validation BEFORE dispatch
       const origin = req.headers.origin;
-      const allowed = allowedOriginSet();
+      const reqUrl = new URL(req.url || '/', `http://127.0.0.1:${boundPort}`);
+      const pathname = reqUrl.pathname;
       if (origin) {
-        if (!allowed.has(origin)) {
+        if (!allowedOriginSet(pathname === '/api/health').has(origin)) {
           sendJson(res, 403, { ok: false, error: 'Forbidden Origin' });
           return;
         }
@@ -139,8 +142,10 @@ export function createHttpServer({
         return;
       }
 
-      const reqUrl = new URL(req.url || '/', `http://127.0.0.1:${boundPort}`);
-      const pathname = reqUrl.pathname;
+      if (req.method === 'GET' && pathname === '/api/health') {
+        sendJson(res, 200, { ok: true, data: getHealth() });
+        return;
+      }
 
       if (req.method === 'GET' && pathname === '/') {
         const currentSettings = settings.get();
@@ -306,6 +311,7 @@ export function createHttpServer({
       server.once('error', reject);
       server.listen(port, '127.0.0.1', () => {
         server.off('error', reject);
+        server.on('error', err => console.error(new Date().toISOString(), '[http]', err.stack || err));
         const addr = server.address();
         boundPort = typeof addr === 'object' && addr ? addr.port : port;
         resolve({ host: '127.0.0.1', port: boundPort });
@@ -317,6 +323,7 @@ export function createHttpServer({
     return new Promise(resolve => {
       try {
         server.close(() => resolve());
+        server.closeAllConnections();
       } catch {
         resolve();
       }

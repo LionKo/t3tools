@@ -224,6 +224,21 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
                   <button type="button" class="pt-seg-opt" role="radio" data-pt-theme="light">浅色</button>
                 </div>
               </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">左下角用量统计时间</div>
+                  <div class="setting-desc">选择 T3 Code 侧边栏左下角展示的 tokens 与费用统计周期</div>
+                </div>
+                <select class="pt-select" aria-label="左下角用量统计时间" data-pt-setting="sidebarUsageRange" style="max-width:290px;">
+                  <option value="today">今日</option>
+                  <option value="24h">近 24 小时</option>
+                  <option value="weeklyQuota">本周限额周期</option>
+                  <option value="week">本周（自然周）</option>
+                  <option value="7d">近 7 天</option>
+                  <option value="30d">近 30 天</option>
+                  <option value="all">全部历史</option>
+                </select>
+              </div>
             </div>
 
             <div class="settings-group-title">异常通知</div>
@@ -467,6 +482,10 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       let dashData = null;
       let focusErrorsOnRender = false;
       let statusData = null;
+      let settingsSeq = 0;
+      let statusSeq = 0;
+      let saveQueue = Promise.resolve();
+      const pendingSettings = new Map();
       let hostState = { t3UiRunning: false, launchOnStartup: false };
       let dashReqSeq = 0;
       let isRefreshing = false;
@@ -660,7 +679,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         for (const el of document.querySelectorAll('[data-alert-setting]')) {
           const key = el.dataset.alertSetting;
           if (cfg.alertConfig) {
-            if (el === document.activeElement) continue;
+            if (pendingSettings.has('alert.' + key) || (el.type === 'number' && el === document.activeElement)) continue;
             if (el.type === 'number') el.value = cfg.alertConfig[key] / (key.endsWith('Ms') ? 1000 : 1);
             else if (key === 'mode') el.value = cfg.alertConfig[key];
             else el.checked = cfg.alertConfig[key];
@@ -677,14 +696,15 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
         for (const el of document.querySelectorAll('[data-pt-setting]')) {
           const key = el.getAttribute('data-pt-setting');
-          if (Object.prototype.hasOwnProperty.call(cfg, key)) {
-            el.checked = Boolean(cfg[key]);
+          if (!pendingSettings.has(key) && Object.prototype.hasOwnProperty.call(cfg, key)) {
+            if (el.type === 'checkbox') el.checked = Boolean(cfg[key]);
+            else el.value = String(cfg[key] ?? '');
           }
         }
         const autoStartEl = document.querySelector('[data-pt-host-setting="launchOnStartup"]');
-        if (autoStartEl) autoStartEl.checked = Boolean(hostState.launchOnStartup);
+        if (autoStartEl && !pendingSettings.has('launchOnStartup')) autoStartEl.checked = Boolean(hostState.launchOnStartup);
 
-        if ((cfg.theme === 'light' || cfg.theme === 'dark') && Date.now() - lastThemeMutationAt > 2500) {
+        if (!pendingSettings.has('theme') && (cfg.theme === 'light' || cfg.theme === 'dark') && Date.now() - lastThemeMutationAt > 2500) {
           const curTheme = document.documentElement.getAttribute('data-theme');
           if (curTheme !== cfg.theme) {
             applyTheme(cfg.theme, { notifyHost: true });
@@ -801,11 +821,39 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         }
       }
 
+      function saveSetting(key, patch) {
+        const seq = ++settingsSeq;
+        pendingSettings.set(key, seq);
+        const write = saveQueue.then(async () => {
+          try {
+            const res = await postApi('/api/settings', patch);
+            if (!res?.ok) throw new Error(res?.error || '保存失败');
+            statusData = { ...statusData, settings: res.data };
+            postHostMessage({ action: 'settingsChanged', settings: res.data });
+            return true;
+          } catch (error) {
+            showToast(error.message || '保存失败');
+            return false;
+          } finally {
+            if (pendingSettings.get(key) === seq) pendingSettings.delete(key);
+            settingsSeq++;
+            renderShellStatus();
+          }
+        });
+        saveQueue = write.catch(() => {});
+        return write;
+      }
+
       async function fetchStatus() {
+        const seq = ++statusSeq;
+        const settingsAtStart = settingsSeq;
         try {
           const r = await fetch(apiBase + '/api/status');
           const j = await r.json();
-          if (j.ok) {
+          if (j.ok && seq === statusSeq) {
+            if (statusData?.settings && (settingsAtStart !== settingsSeq || pendingSettings.size)) {
+              j.data.settings = statusData.settings;
+            }
             const changed = statusData && (
               statusData.alerts?.unreadCount !== j.data.alerts?.unreadCount ||
               statusData.alerts?.unreadIncidents !== j.data.alerts?.unreadIncidents
@@ -904,10 +952,8 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           const next = themeBtn.getAttribute('data-pt-theme') === 'light' ? 'light' : 'dark';
           lastThemeMutationAt = Date.now();
           applyTheme(next, { notifyHost: true, animate: true });
-          const res = await postApi('/api/settings', { theme: next }).catch(() => null);
-          if (res?.ok) {
-            if (statusData) statusData.settings = res.data;
-            postHostMessage({ action: 'settingsChanged', settings: res.data });
+          if (!await saveSetting('theme', { theme: next }) && !pendingSettings.has('theme')) {
+            applyTheme(statusData?.settings?.theme || boot.theme, { notifyHost: true });
           }
           return;
         }
@@ -984,10 +1030,8 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           const next = isDark ? 'light' : 'dark';
           lastThemeMutationAt = Date.now();
           applyTheme(next, { notifyHost: true, animate: true });
-          const res = await postApi('/api/settings', { theme: next }).catch(() => null);
-          if (res?.ok) {
-            if (statusData) statusData.settings = res.data;
-            postHostMessage({ action: 'settingsChanged', settings: res.data });
+          if (!await saveSetting('theme', { theme: next }) && !pendingSettings.has('theme')) {
+            applyTheme(statusData?.settings?.theme || boot.theme, { notifyHost: true });
           }
           return;
         }
@@ -1052,29 +1096,26 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           const key = e.target.dataset.alertSetting;
           const value = e.target.type === 'number' ? e.target.valueAsNumber * (key.endsWith('Ms') ? 1000 : 1)
             : key === 'mode' ? e.target.value : e.target.checked;
-          const res = await postApi('/api/settings',{alertConfig:{[key]:value}});
-          showToast(res.ok ? '设置已保存' : res.error);
-          await fetchStatus();
+          const saved = await saveSetting('alert.' + key, { alertConfig: { [key]: value } });
+          if (saved) showToast('设置已保存');
+          else if (e.target.type === 'number' && statusData?.settings?.alertConfig) {
+            e.target.value = statusData.settings.alertConfig[key] / (key.endsWith('Ms') ? 1000 : 1);
+          }
           return;
         }
         const settingEl = e.target.closest?.('[data-pt-setting]');
         if (settingEl) {
           const key = settingEl.getAttribute('data-pt-setting');
-          const val = Boolean(settingEl.checked);
-          const res = await postApi('/api/settings', { [key]: val }).catch(() => null);
-          if (res?.ok) {
-            if (statusData) statusData.settings = res.data;
-            postHostMessage({ action: 'settingsChanged', settings: res.data });
-            showToast('设置已保存');
-          }
-          fetchStatus();
+          const val = settingEl.type === 'checkbox' ? Boolean(settingEl.checked) : settingEl.value;
+          if (await saveSetting(key, { [key]: val })) showToast('设置已保存');
           return;
         }
         const hostSettingEl = e.target.closest?.('[data-pt-host-setting="launchOnStartup"]');
         if (hostSettingEl) {
           const val = Boolean(hostSettingEl.checked);
+          if (!await saveSetting('launchOnStartup', { launchOnStartup: val })) return;
+          hostSettingEl.checked = val;
           postHostMessage({ action: 'setAutoStart', enabled: val });
-          await postApi('/api/settings', { launchOnStartup: val }).catch(() => {});
           showToast(val ? '已开启开机自动启动' : '已关闭开机自动启动');
           return;
         }

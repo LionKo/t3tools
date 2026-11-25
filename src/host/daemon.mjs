@@ -29,7 +29,7 @@ export const PLUGIN_VERSION = pkg.version;
 /**
  * Check if a T3Tools daemon is already running and responsive (single-instance guard).
  */
-export async function probeRunningDaemon(runtimeFilePath, { fetchImpl = globalThis.fetch } = {}) {
+export async function probeRunningDaemon(runtimeFilePath, { fetchImpl = globalThis.fetch, fullStatus = false } = {}) {
   if (!runtimeFilePath || !existsSync(runtimeFilePath)) return null;
   let rt;
   try {
@@ -45,10 +45,10 @@ export async function probeRunningDaemon(runtimeFilePath, { fetchImpl = globalTh
     if (err?.code === 'ESRCH') return null;
   }
   try {
-    const res = await fetchImpl(`${rt.url}/api/status`, { signal: AbortSignal.timeout(1500), redirect: 'error' });
+    const res = await fetchImpl(`${rt.url}/api/${fullStatus ? 'status' : 'health'}`, { signal: AbortSignal.timeout(1500), redirect: 'error' });
     if (res.ok) {
       const json = await res.json();
-      if (json?.ok && json.data?.pid === rt.pid && json.data?.startedAtMs === rt.startedAtMs) return { ...rt, status: json.data };
+      if (json?.ok && (fullStatus || json.data?.state === 'running') && json.data?.pid === rt.pid && json.data?.startedAtMs === rt.startedAtMs) return { ...rt, status: json.data };
     }
   } catch {}
   return null;
@@ -157,6 +157,8 @@ export async function startDaemon({
   refreshFixedShortcutPorts();
 
   function getDaemonStatus() {
+    const now = Date.now();
+    const settings = ctx.settings.get();
     return {
       version: PLUGIN_VERSION,
       pid: process.pid,
@@ -164,9 +166,10 @@ export async function startDaemon({
       httpUrl: `http://127.0.0.1:${boundPort}`,
       cdp: cdpHost ? cdpHost.getStatus() : { connected: false, message: 'CDP 未启用', lastError: '' },
       alerts: ctx.engine.getAlerts(),
-      runtimeUpdates: ctx.engine.getRuntimeUpdates(),
-      todayUsage: ctx.engine.getTodayUsageSummary(),
-      settings: ctx.settings.get(),
+      runtimeUpdates: ctx.engine.getRuntimeUpdates(now),
+      todayUsage: ctx.engine.getTodayUsageSummary(now),
+      sidebarUsage: ctx.engine.getSidebarUsageSummary(now, { preset: settings.sidebarUsageRange }),
+      settings,
       diagnostics: {
         antigravity: ctx.antigravityAdapter.getDiagnostics(),
         codex: ctx.codexAdapter.getDiagnostics()
@@ -225,6 +228,7 @@ export async function startDaemon({
     engine: ctx.engine,
     settings: ctx.settings,
     getDaemonStatus,
+    getHealth: () => ({ version: PLUGIN_VERSION, pid: process.pid, startedAtMs, state: stopped ? 'stopping' : 'running' }),
     buildClientBundle: opts => buildClientBundle({ ...opts, version: PLUGIN_VERSION }),
     buildFallbackHtml: opts => buildFallbackHtml({ ...opts, version: PLUGIN_VERSION }),
     onSettingsUpdated: async (updated, patch) => {
@@ -266,7 +270,7 @@ export async function startDaemon({
       return res;
     },
     onShutdown: async () => {
-      await stop();
+      await stop('HTTP shutdown request');
       if (typeof onShutdownRequest === 'function') onShutdownRequest();
     }
   });
@@ -308,7 +312,7 @@ export async function startDaemon({
     // (after startup grace period + 2 consecutive misses so T3 restarts/updates survive smoothly)
     ctx.engine.tickAlerts();
   } catch (err) {
-    await stop();
+    await stop('startup failure');
     throw err;
   }
   alertTimer = setInterval(() => {
@@ -317,24 +321,30 @@ export async function startDaemon({
   alertTimer.unref();
   let consecutiveGone = 0;
 
-  function stop() {
-    return stopPromise ??= closeResources();
+  function stop(reason = 'requested') {
+    if (!stopPromise) {
+      stopped = true;
+      console.log(`[${new Date().toISOString()}] [daemon] stopping: ${reason}`);
+      stopPromise = closeResources();
+    }
+    return stopPromise;
   }
 
   async function closeResources() {
-    stopped = true;
     clearInterval(alertTimer);
     if (watchdogTimer) {
       clearInterval(watchdogTimer);
       watchdogTimer = null;
     }
-    try { await cdpHost?.stop(); } catch {}
-    try { await httpServer.close(); } catch {}
-    try { ctx.close(); } catch {}
+    try { await cdpHost?.stop(); } catch (err) { console.error('[daemon] CDP shutdown failed', err); }
+    try { await httpServer.close(); } catch (err) { console.error('[daemon] HTTP shutdown failed', err); }
+    try { ctx.close(); } catch (err) { console.error('[daemon] store shutdown failed', err); }
     try {
       const current = JSON.parse(readFileSync(ctx.paths.runtimeFilePath, 'utf8'));
       if (current.pid === process.pid && current.port === boundPort && current.startedAtMs === startedAtMs) unlinkSync(ctx.paths.runtimeFilePath);
-    } catch {}
+    } catch (err) {
+      if (err.code !== 'ENOENT') console.error('[daemon] runtime cleanup failed', err);
+    }
   }
 
   if (autoExitWhenT3Gone) {
@@ -353,7 +363,7 @@ export async function startDaemon({
       }
       consecutiveGone++;
       if (consecutiveGone >= 2) {
-        await stop();
+        await stop('T3 exited');
         if (typeof onAutoExit === 'function') onAutoExit();
       }
     }, autoExitPollMs);

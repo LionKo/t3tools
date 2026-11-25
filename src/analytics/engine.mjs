@@ -14,13 +14,42 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
   let countRevision = -1;
   let countDay = '';
   let cachedTodayKey = '';
+  let todayFrom = 0, todayUntil = 0;
   let cachedTodayRev = -1;
   let cachedTodayUsage = { day: '', costUsd: 0, totalTokens: 0, requests: 0 };
+  let cachedSidebarKey = '';
+  let cachedSidebarRev = -1;
+  let sidebarUntil = 0;
+  let cachedSidebarAtMs = 0;
+  let cachedSidebarUsage = { preset: 'today', day: '', costUsd: 0, totalTokens: 0, requests: 0 };
+
+  function computeRangeUsage(startMs, maxMs, poolMatch = null) {
+    if (!poolMatch && typeof store.getRangeUsageSummary === 'function') {
+      return store.getRangeUsageSummary(startMs, maxMs);
+    }
+    const rows = cachedRev === store.getRevision() ? cachedAllRequests : store.listAllRequests();
+    let requests = 0;
+    let costUsd = 0;
+    let totalTokens = 0;
+    let priced = 0;
+    for (const r of rows) {
+      const ts = Number.isFinite(r?.billingTsMs) ? r.billingTsMs : r?.timestampMs;
+      if (poolMatch ? !poolMatch(r) : !Number.isFinite(ts) || ts < startMs || ts > maxMs) continue;
+      requests++;
+      if (Number.isFinite(r.costUsd)) {
+        costUsd += r.costUsd;
+        priced++;
+      }
+      totalTokens += (r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheWriteTokens || 0) + (r.outputTokens || 0);
+    }
+    if (poolMatch) return { requests, costUsd: requests && !priced ? null : costUsd, totalTokens };
+    return { requests, costUsd: Number(costUsd.toFixed(6)), totalTokens };
+  }
 
   function getTodayUsageSummary(now = Date.now()) {
     const dayKey = formatLocalDay(now);
     const rev = store.getRevision();
-    if (cachedTodayRev === rev && cachedTodayKey === dayKey) {
+    if (cachedTodayRev === rev && cachedTodayKey === dayKey && now >= todayFrom && now < todayUntil) {
       return cachedTodayUsage;
     }
     const startOfToday = new Date(now);
@@ -29,32 +58,66 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const endOfToday = new Date(startOfToday);
     endOfToday.setDate(endOfToday.getDate() + 1);
     const maxMs = Math.min(now, +endOfToday - 1);
-    let summary;
-    if (typeof store.getRangeUsageSummary === 'function') {
-      summary = store.getRangeUsageSummary(startMs, maxMs);
-    } else {
-      const rows = store.listAllRequests();
-      let requests = 0;
-      let costUsd = 0;
-      let totalTokens = 0;
-      for (const r of rows) {
-        const ts = Number.isFinite(r?.billingTsMs) ? r.billingTsMs : r?.timestampMs;
-        if (!Number.isFinite(ts) || ts < startMs || ts > maxMs) continue;
-        requests++;
-        if (Number.isFinite(r.costUsd)) costUsd += r.costUsd;
-        totalTokens += (r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheWriteTokens || 0) + (r.outputTokens || 0);
-      }
-      summary = { requests, costUsd: Number(costUsd.toFixed(6)), totalTokens };
-    }
+    const summary = computeRangeUsage(startMs, maxMs);
     cachedTodayUsage = {
       day: dayKey,
       costUsd: summary.costUsd,
       totalTokens: summary.totalTokens,
       requests: summary.requests
     };
+    todayFrom = now;
+    todayUntil = Math.min(now + 10000, store.nextBillingAfter?.(now) ?? now + 1);
     cachedTodayKey = dayKey;
     cachedTodayRev = rev;
     return cachedTodayUsage;
+  }
+
+  function getSidebarUsageSummary(now = Date.now(), { quotas = null, preset = null } = {}) {
+    const rangePreset = preset || settings.get().sidebarUsageRange || 'today';
+    const dayKey = formatLocalDay(now);
+    if (rangePreset === 'today') {
+      const today = getTodayUsageSummary(now);
+      return { preset: 'today', ...today };
+    }
+    const rev = store.getRevision();
+    const weekly = rangePreset === 'weeklyQuota';
+    let quotaWindows = [];
+    if (weekly) {
+      const q = quotas || quotaAdapter?.readAllQuotas?.(now, { persist: false }) || null;
+      quotaWindows = q?.flatWindows || [];
+    }
+    const range = resolveDateRange(rangePreset, { now, quotaWindows });
+    const startMs = Number.isFinite(range.start) ? range.start : 0;
+    const maxMs = Number.isFinite(range.end) ? Math.max(startMs, Math.min(now, range.end)) : now;
+    const cacheKey = `${rangePreset}|${dayKey}|${JSON.stringify(range.pools.map(p => [p.key, p.state, p.state === 'active' ? p.startMs : null, p.resetsAtMs]))}`;
+    if (
+      cachedSidebarRev === rev &&
+      cachedSidebarKey === cacheKey &&
+      now >= cachedSidebarAtMs && now < sidebarUntil
+    ) {
+      return { ...cachedSidebarUsage, startMs, endMs: maxMs };
+    }
+    // Weekly pools can each have a different start, including a trailing-week fallback.
+    const summary = computeRangeUsage(startMs, maxMs, weekly ? range.match : null);
+    sidebarUntil = Math.min(now + 10000, store.nextBillingAfter?.(now) ?? now + 1);
+    if (weekly || range.status === 'rolling') {
+      const width = weekly ? 7 * 86400000 : now - startMs;
+      const first = store.nextBillingAfter?.(now - width - 1) ?? now - width;
+      sidebarUntil = Math.min(sidebarUntil, first + width + 1);
+    }
+    cachedSidebarUsage = {
+      preset: rangePreset,
+      day: dayKey,
+      startMs,
+      endMs: maxMs,
+      costUsd: summary.costUsd,
+      totalTokens: summary.totalTokens,
+      requests: summary.requests
+    };
+    cachedSidebarKey = cacheKey;
+    cachedSidebarRev = rev;
+    cachedSidebarAtMs = now;
+    return cachedSidebarUsage;
   }
 
   function getRuntimeUpdates(now = Date.now(), options = {}) {
@@ -202,6 +265,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
    */
   function getLiveThreadSnapshot(requestedThreadId = '', { now = Date.now(), allowFallback = true } = {}) {
     syncAll();
+    const cfg = settings.get();
     const execution = t3State.readThreadExecution(requestedThreadId, now, { allowFallback });
     const quotas = quotaAdapter.readAllQuotas(now);
 
@@ -329,16 +393,18 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const currentUnread = execution?.threadId && !execution.unresolved
       ? store.countThreadUnread?.(execution.threadId, Math.max(ackTsMs, new Date(now).setHours(0, 0, 0, 0) - 1)) || 0 : 0;
     const todayUsage = getTodayUsageSummary(now);
+    const sidebarUsage = getSidebarUsageSummary(now, { quotas, preset: cfg.sidebarUsageRange });
     const runtimeUpdates = getRuntimeUpdates(now);
     return {
       updatedAtMs: now,
-      settings: settings.get(),
+      settings: cfg,
       globalAlerts: { ...counts, otherUnreadCount: Math.max(0, counts.unreadCount - currentUnread), latestAlert: monitor.snapshot().latestAlert },
       threadErrors,
       thread: execution,
       context: liveContext,
       quotas,
       todayUsage,
+      sidebarUsage,
       runtimeUpdates
     };
   }
@@ -490,6 +556,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     syncAll,
     getAlerts, tickAlerts, acknowledgeErrors, testAlert: () => monitor.test(settings.get().alertConfig),
     getTodayUsageSummary,
+    getSidebarUsageSummary,
     getRuntimeUpdates,
     checkRuntimeUpdates,
     getLiveThreadSnapshot,

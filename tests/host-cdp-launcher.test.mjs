@@ -284,6 +284,13 @@ test('createCdpHost isolates execution world, rejects untrusted context RPC, and
     assert.ok(sentMethods.some(m => m.method === 'Page.createIsolatedWorld' && m.params.frameId === 'frame-top'));
     assert.ok(sentMethods.some(m => m.method === 'Runtime.addBinding' && m.params.name === CDP_BRIDGE_BINDING && m.params.executionContextName === 't3tools-isolated'));
 
+    const installs = () => sentMethods.filter(call => call.method === 'Runtime.addBinding').length;
+    const initialInstalls = installs();
+    await host.pollOnce();
+    assert.equal(installs(), initialInstalls);
+    assert.ok(sentMethods.some(call => call.params?.expression?.includes("typeof globalThis.__t3ToolsReceive === 'function'")));
+    await host.reattachNow();
+    assert.equal(installs(), initialInstalls + 1);
     assert.equal((await host.focusThread({threadId:'target'})).method,'route');
     assert.ok(sentMethods.some(call=>call.method==='Page.bringToFront'));
     // Untrusted frame / main-world executionContextId (99 != 42) MUST be ignored
@@ -455,5 +462,40 @@ test('Tray daemon control API: authTokenOverride, tray settings persistence, CDP
   } finally {
     await daemon?.stop();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CDP stop has one total deadline for multiple hung target evaluations', async () => {
+  const hanging = Promise.withResolvers();
+  const evaluating = Promise.withResolvers();
+  const targets = ['a', 'b'].map(id => ({ type: 'page', id, title: 'T3 Code', url: 't3code://app/',
+    webSocketDebuggerUrl: 'ws://localhost:9000/devtools/page/' + id }));
+  let hang = false;
+  let closes = 0;
+  const host = createCdpHost({ paths: {}, getFixedPorts: () => [9000], buildClientBundle: () => 'true',
+    fetchImpl: async () => ({ ok: true, json: async () => targets }),
+    connectImpl: async () => ({
+      socket: { addEventListener() {}, close() { closes++; } }, onEvent() {},
+      async send(method) {
+        if (method === 'Page.getFrameTree') return { frameTree: { frame: { id: 'top', url: 't3code://app/' } } };
+        if (method === 'Page.createIsolatedWorld') return { executionContextId: 42 };
+        if (hang && method === 'Runtime.evaluate') { evaluating.resolve(); return hanging.promise; }
+        return { result: { value: true } };
+      }
+    })
+  });
+  assert.equal((await host.pollOnce()).attachedTargets, 2);
+  hang = true;
+  const poll = host.pollOnce();
+  await evaluating.promise;
+  const start = performance.now();
+  try {
+    await host.stop();
+    assert.ok(performance.now() - start < 1350);
+    assert.equal(closes, 2);
+    assert.equal(host.getStatus().connected, false);
+  } finally {
+    hanging.resolve({ result: { value: true } });
+    await poll;
   }
 });

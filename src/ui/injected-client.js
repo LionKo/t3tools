@@ -12,7 +12,7 @@
   if (
     globalThis.__t3Tools?.version === VERSION &&
     globalThis.__t3Tools?.bootId === BOOT_ID &&
-    globalThis.__t3Tools.healthy
+    globalThis.__t3Tools.healthy && typeof globalThis.__t3ToolsReceive === 'function'
   ) {
     return;
   }
@@ -32,11 +32,48 @@
     clearTimeout(entry.timer);
     pendingRpc.delete(id);
     if (reply?.ok) entry.resolve(reply.data);
-    else entry.reject(new Error(reply?.error || 'RPC 调用失败'));
+    else entry.reject(Object.assign(new Error(reply?.error || 'RPC 调用失败'), { receivedReply: true }));
   };
 
+  const httpRequests = new Set();
+  let transportState = 'waiting';
+  let transportFailures = 0;
+
   async function callRpc(action, params = {}) {
-    if (transport === 'cdp' && typeof globalThis.__t3ToolsBridge === 'function') {
+    let controller;
+    let timeout;
+    try {
+      if (transport !== 'cdp') {
+        controller = new AbortController();
+        httpRequests.add(controller);
+        timeout = setTimeout(() => controller.abort(), 8000);
+      }
+      const data = await requestRpc(action, params, controller?.signal);
+      transportFailures = 0;
+      transportState = 'connected';
+      return data;
+    } catch (err) {
+      if (err.receivedReply) {
+        transportFailures = 0;
+        transportState = 'connected';
+      } else if (++transportFailures >= 2) {
+        transportState = 'disconnected';
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+      httpRequests.delete(controller);
+    }
+  }
+
+  async function requestRpc(action, params, signal) {
+    async function http(url, options) {
+      const response = await fetch(url, { ...options, signal });
+      if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status), { receivedReply: response.status < 500 });
+      return response;
+    }
+    if (transport === 'cdp') {
+      if (typeof globalThis.__t3ToolsBridge !== 'function') throw new Error('CDP 桥接已断开');
       return new Promise((resolve, reject) => {
         const id = `rpc_${++rpcSeq}_${Date.now()}`;
         const timer = setTimeout(() => {
@@ -51,14 +88,13 @@
     if (action === 'getLive') {
       const qs = new URLSearchParams({ allowFallback: '0' });
       if (params.threadId) qs.set('threadId', params.threadId);
-      const r = await fetch(`${apiBase}/api/live?${qs.toString()}`);
+      const r = await http(`${apiBase}/api/live?${qs.toString()}`);
       const j = await r.json();
-      if (!j.ok) throw new Error(j.error || '请求失败');
+      if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
       return j.data;
     }
     if (action === 'exportRequestsCsv') {
-      const res = await fetch(apiBase + '/api/requests.csv?' + new URLSearchParams(params));
-      if (!res.ok) throw new Error('CSV HTTP ' + res.status);
+      const res = await http(apiBase + '/api/requests.csv?' + new URLSearchParams(params));
       return { csv: '\uFEFF' + await res.text(), filename: 't3tools-requests.csv' };
     }
     if (action === 'getDashboard') {
@@ -68,11 +104,11 @@
         if (!skip.has(k) && v !== undefined && v !== null && v !== '') sp.set(k, String(v));
       }
       if (params.force) {
-        await callRpc('forceSync');
+        await requestRpc('forceSync', {}, signal);
       }
-      const r = await fetch(`${apiBase}/api/dashboard?${sp.toString()}`);
+      const r = await http(`${apiBase}/api/dashboard?${sp.toString()}`);
       const j = await r.json();
-      if (!j.ok) throw new Error(j.error || '请求失败');
+      if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
       return j.data;
     }
     if (['focusThread','ackErrors','testAlert','checkRuntimeUpdates'].includes(action)) {
@@ -83,31 +119,33 @@
           : action === 'checkRuntimeUpdates'
             ? '/api/runtime-updates/check'
             : '/api/errors/ack';
-      const res = await fetch(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
+      const res = await http(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
       const json = await res.json();
-      if (!json.ok) throw new Error(json.error);
+      if (!json.ok) throw Object.assign(new Error(json.error), { receivedReply: true });
       return json.data;
     }
     if (action === 'updateSettings') {
-      const r = await fetch(`${apiBase}/api/settings`, {
+      const r = await http(`${apiBase}/api/settings`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(params || {})
       });
       const j = await r.json();
-      if (!j.ok) throw new Error(j.error || '保存失败');
+      if (!j.ok) throw Object.assign(new Error(j.error || '保存失败'), { receivedReply: true });
       return j.data;
     }
     if (action === 'forceSync') {
-      const response = await fetch(apiBase + '/api/sync', {
+      const response = await http(apiBase + '/api/sync', {
         method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' }, body: '{}'
       });
       const result = await response.json();
-      if (!result.ok) throw new Error(result.error || '刷新失败');
+      if (!result.ok) throw Object.assign(new Error(result.error || '刷新失败'), { receivedReply: true });
       return result.data;
     }
-    const r = await fetch(`${apiBase}/api/status`);
-    return (await r.json()).data;
+    const r = await http(`${apiBase}/api/status`);
+    const reply = await r.json();
+    if (!reply.ok) throw Object.assign(new Error(reply.error || '请求失败'), { receivedReply: true });
+    return reply.data;
   }
 
   function safeComputedStyle(el) {
@@ -783,13 +821,15 @@
   let lastLive = null;
   let lastLiveThreadId = '';
   let lastSettings = null;
+  let settingsRevision = 0;
   let lastTodayUsage = null;
+  let lastSidebarUsage = null;
   let lastRuntimeUpdates = null;
   let dismissedRuntimeUpdateSig = '';
   try { dismissedRuntimeUpdateSig = localStorage.getItem('t3tools.dismissedRuntimeUpdateSig') || ''; } catch {}
   let activeThreadId = detectActiveThreadId();
   let lastRouteHref = String(location.href || '');
-  let consecutiveLiveErrors = 0;
+
   let lastDash = null;
   let lastStatus = null;
   let dashLoading = false;
@@ -937,7 +977,7 @@
 
   function reconcileOverviewLayout({ allowRender = false } = {}) {
     if (disposed || !overviewMount) return false;
-    const cfg = lastLive?.settings || lastSettings || {};
+    const cfg = lastSettings || lastLive?.settings || {};
     const modeSetting = ['adaptive', 'avoid', 'fixed'].includes(cfg.overviewMode) ? cfg.overviewMode : 'adaptive';
     const baseTop = Number.isFinite(Number(cfg.overviewPosition?.top)) ? Number(cfg.overviewPosition.top) : 56;
     const baseRight = Number.isFinite(Number(cfg.overviewPosition?.right)) ? Number(cfg.overviewPosition.right) : 18;
@@ -1197,14 +1237,22 @@
 
   function renderSidebarWidget() {
     if (!sidebarMount) return;
-    const cfg = lastLive?.settings || lastSettings || {};
+    const cfg = lastSettings || lastLive?.settings || {};
     sidebarMount.host.style.display = cfg.enabled === false ? 'none' : 'block';
+    const badgeStatus = transportState === 'connected' ? 'attached' : transportState;
+    const activeRange = cfg.sidebarUsageRange || 'today';
+    if (lastSidebarUsage?.preset !== activeRange) lastSidebarUsage = null;
     const nextHtml = renderSidebarTriggerHtml(
       {
-        todayUsage: lastLive?.todayUsage ?? lastTodayUsage,
+        settings: cfg,
+        todayUsage: activeRange === 'today' ? lastTodayUsage : null,
+        sidebarUsage: lastSidebarUsage,
         runtimeUpdates: lastLive?.runtimeUpdates ?? lastRuntimeUpdates
       },
-      { dismissedUpdateSig: dismissedRuntimeUpdateSig }
+      {
+        dismissedUpdateSig: dismissedRuntimeUpdateSig,
+        status: badgeStatus
+      }
     );
     if (nextHtml !== lastSidebarHtml) {
       sidebarMount.contentEl.innerHTML = nextHtml;
@@ -1239,7 +1287,7 @@
 
   function renderLiveWidgets() {
     const currentThreadId = detectActiveThreadId();
-    const cfg = lastLive?.settings || lastSettings || {};
+    const cfg = lastSettings || lastLive?.settings || {};
     const matched = hasMatchingLiveForThread(lastLive, currentThreadId);
     const effectiveLive = matched
       ? lastLive
@@ -1297,11 +1345,13 @@
   }
 
   async function fetchOverlayStatus() {
+    const initialSettings = lastSettings;
+    const revision = settingsRevision;
     try {
       const st = await callRpc('getStatus');
       if (disposed) return;
       lastStatus = st;
-      if (st?.settings) lastSettings = st.settings;
+      if (st?.settings && revision === settingsRevision && lastSettings === initialSettings) lastSettings = st.settings;
       if (dashboardOpen) renderDashboardOverlay();
     } catch {}
   }
@@ -1343,7 +1393,7 @@
       version: VERSION,
       sideCollapsed: dashSideCollapsed,
       statusData: lastStatus,
-      fallbackSettings: lastLive?.settings || lastSettings,
+      fallbackSettings: lastSettings || lastLive?.settings,
       loading: dashLoading,
       error: dashError,
       toastText: overlayToastText
@@ -1657,6 +1707,7 @@
       try {
         const updated = await callRpc('updateSettings', { alertConfig: { [key]: value } });
         if (updated) {
+          settingsRevision++;
           lastSettings = updated;
           if (lastStatus) lastStatus.settings = updated;
         }
@@ -1673,10 +1724,12 @@
       try {
         const updated = await callRpc('updateSettings', { [key]: val });
         if (updated) {
+          settingsRevision++;
           lastSettings = updated;
           if (lastLive) lastLive.settings = updated;
           if (lastStatus) lastStatus.settings = updated;
           renderLiveWidgets();
+          if (key === 'sidebarUsageRange') pollLive({ force: true });
         }
         showOverlayToast('设置已保存');
       } catch (err) {
@@ -1744,6 +1797,7 @@
     if (disposed) return;
     if (!force && inFlightPolls > 0) return;
     const reqSeq = ++liveRequestSeq;
+    const settingsAtStart = settingsRevision;
     inFlightPolls++;
     try {
       ensureMounts();
@@ -1758,8 +1812,7 @@
         syncActiveThread({ triggerPoll: true });
         return;
       }
-      consecutiveLiveErrors = 0;
-      if (live?.settings) {
+      if (live?.settings && settingsAtStart === settingsRevision) {
         if (!lastSettings && typeof live.settings.overviewCollapsed === 'boolean') {
           overviewCollapsed = live.settings.overviewCollapsed;
         }
@@ -1767,20 +1820,21 @@
       }
       if (dashboardOpen && dashState.tab === 'models' && lastLive?.globalAlerts?.unreadCount !== live.globalAlerts?.unreadCount) refreshDashboard();
       if (live?.todayUsage) lastTodayUsage = live.todayUsage;
+      if (live?.sidebarUsage) lastSidebarUsage = live.sidebarUsage;
       if (live?.runtimeUpdates) lastRuntimeUpdates = live.runtimeUpdates;
       lastLive = live;
       lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
     } catch {
       if (disposed || reqSeq !== liveRequestSeq) return;
-      consecutiveLiveErrors++;
+      renderSidebarWidget();
       const nowThreadId = detectActiveThreadId();
       if (nowThreadId !== activeThreadId) {
         syncActiveThread({ triggerPoll: true });
         return;
       }
       // Clear stale snapshot on daemon disconnect/timeout or when switching to a thread that fails to load
-      if (consecutiveLiveErrors >= 2 || lastLiveThreadId !== nowThreadId) {
+      if (transportState === 'disconnected' || lastLiveThreadId !== nowThreadId) {
         lastLive = null;
         lastLiveThreadId = '';
         renderLiveWidgets();
@@ -1857,7 +1911,7 @@
     pollTimer = setTimeout(async () => {
       await pollLive();
       schedulePoll();
-    }, (lastLive?.settings || lastSettings)?.pollIntervalMs || 2500);
+    }, (lastSettings || lastLive?.settings)?.pollIntervalMs || 2500);
   }
   schedulePoll();
 
@@ -1885,6 +1939,7 @@
     },
     dispose() {
       disposed = true;
+      for (const controller of httpRequests) controller.abort();
       dashboardOpen = false;
       dashRequestSeq++;
       liveRequestSeq++;
@@ -1925,6 +1980,7 @@
       lastOverviewHtml = '';
       lastSidebarHtml = '';
       lastTodayUsage = null;
+      lastSidebarUsage = null;
       lastRuntimeUpdates = null;
       themeSync.dispose();
       if (globalThis.__t3Tools) globalThis.__t3Tools.healthy = false;

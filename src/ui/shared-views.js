@@ -1587,7 +1587,7 @@ const PT_SHARED_CSS = `
 .pt-sidebar-trigger {
   width: 100%;
   margin: 0;
-  padding: 7px 10px;
+  padding: 6px 9px;
   border-radius: 8px;
   border: 1px solid var(--pt-border, rgba(255,255,255,0.12));
   background: var(--pt-card, #14161b);
@@ -1597,18 +1597,113 @@ const PT_SHARED_CSS = `
   cursor: pointer;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
+  gap: 7px;
+  transition: border-color .15s ease, background-color .15s ease;
 }
-.pt-sidebar-trigger:hover { border-color: var(--pt-accent, #6366f1); }
-.pt-sidebar-cost {
+.pt-sidebar-trigger:hover {
+  border-color: var(--pt-accent, #6366f1);
+}
+.pt-sidebar-logo {
+  position: relative;
+  width: 21px;
+  height: 21px;
+  border-radius: 5.5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1b1e25, #0b0c0f);
+  border: 1.25px solid #6366f1;
+  color: #f3f4f6;
+  box-sizing: border-box;
+  flex: none;
+}
+.pt-sidebar-logo-text {
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+.pt-sidebar-status-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  box-sizing: border-box;
+  border: 1.5px solid #0b0c0f;
+  background: #9ca3af;
+  transition: background-color .2s ease, box-shadow .2s ease;
+}
+.pt-sidebar-logo[data-state="attached"] .pt-sidebar-status-dot {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.8);
+}
+.pt-sidebar-logo[data-state="waiting"] .pt-sidebar-status-dot {
+  background: #6366f1;
+  box-shadow: 0 0 5px rgba(99, 102, 241, 0.7);
+}
+.pt-sidebar-logo[data-state="disconnected"] .pt-sidebar-status-dot {
+  background: #9ca3af;
+  box-shadow: none;
+}
+.pt-sidebar-today {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--pt-muted, #9ca3af);
   white-space: nowrap;
   flex: none;
 }
-.pt-sidebar-trigger:hover .pt-sidebar-cost {
+.pt-sidebar-metrics {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-evenly;
+  gap: 6px;
+}
+.pt-sidebar-metric {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2.5px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pt-sidebar-val {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--pt-fg, #f3f4f6);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.015em;
+}
+.pt-sidebar-unit {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--pt-muted, #9ca3af);
+}
+.pt-sidebar-sep {
+  width: 1px;
+  height: 11px;
+  background: var(--pt-border, rgba(255,255,255,0.14));
+  flex: none;
+}
+.pt-sidebar-fallback {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  font-size: 11px;
+  color: var(--pt-muted, #9ca3af);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pt-sidebar-trigger:hover .pt-sidebar-today,
+.pt-sidebar-trigger:hover .pt-sidebar-unit,
+.pt-sidebar-trigger:hover .pt-sidebar-fallback {
   color: var(--pt-fg, #f3f4f6);
 }
 
@@ -2977,13 +3072,44 @@ function formatRuntimeUpdateSignature(updatable = []) {
     .join('|');
 }
 
+const SIDEBAR_USAGE_RANGE_META = {
+  today: { short: '今日', full: '今日' },
+  '24h': { short: '24h', full: '近 24 小时' },
+  weeklyQuota: { short: '本周期', full: '本周限额周期' },
+  week: { short: '本周', full: '本周' },
+  '7d': { short: '7天', full: '近 7 天' },
+  '30d': { short: '30天', full: '近 30 天' },
+  all: { short: '累计', full: '全部历史' }
+};
+
+function resolveSidebarRangeMeta(preset) {
+  return SIDEBAR_USAGE_RANGE_META[String(preset || '')] || SIDEBAR_USAGE_RANGE_META.today;
+}
+
+function resolveSidebarBadgeState(live = null, options = {}) {
+  const explicit = String(options?.status || '').trim();
+  if (explicit === 'attached' || explicit === 'waiting' || explicit === 'disconnected') {
+    return explicit;
+  }
+  if (!live || typeof live !== 'object') return 'waiting';
+  return 'attached';
+}
+
 function renderSidebarTriggerHtml(live = null, options = {}) {
   const dismissedSig = String(options?.dismissedUpdateSig || '');
-  const todayUsage = live?.todayUsage && typeof live.todayUsage === 'object' ? live.todayUsage : null;
-  const hasTodayCost = todayUsage != null && Number.isFinite(Number(todayUsage.costUsd));
-  const todayCostText = hasTodayCost ? fmtUsd(todayUsage.costUsd) : '';
-  const todayReqs = hasTodayCost ? (Number(todayUsage.requests) || 0) : 0;
-  const todayTokens = hasTodayCost ? (Number(todayUsage.totalTokens) || 0) : 0;
+  const badgeState = resolveSidebarBadgeState(live, options);
+  const usage = (live?.sidebarUsage && typeof live.sidebarUsage === 'object')
+    ? live.sidebarUsage
+    : (live?.todayUsage && typeof live.todayUsage === 'object' ? live.todayUsage : null);
+  const rangePreset = String(live?.sidebarUsage?.preset || (usage ? 'today' : live?.settings?.sidebarUsageRange) || 'today');
+  const rangeMeta = resolveSidebarRangeMeta(rangePreset);
+  const hasUsageCost = usage?.costUsd != null && Number.isFinite(Number(usage.costUsd));
+  const hasUsageTokens = usage?.totalTokens != null && Number.isFinite(Number(usage.totalTokens));
+  const hasUsage = hasUsageCost || hasUsageTokens;
+  const costText = hasUsageCost ? fmtUsd(usage.costUsd) : '-';
+  const reqs = hasUsage ? (Number(usage.requests) || 0) : 0;
+  const tokens = hasUsageTokens ? (Number(usage.totalTokens) || 0) : 0;
+  const tokensText = hasUsageTokens ? fmtTokens(tokens) : '-';
 
   const runtimeUpdates = live?.runtimeUpdates && typeof live.runtimeUpdates === 'object' ? live.runtimeUpdates : null;
   const runtimeItems = Array.isArray(runtimeUpdates?.items) ? runtimeUpdates.items : [];
@@ -2996,9 +3122,15 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
     .map(it => `${it.displayName} ${it.currentVersion}${it.hasUpdate && it.latestVersion ? ` → ${it.latestVersion}` : ''}`)
     .join(' · ');
 
-  const triggerTitleParts = ['打开 T3Tools 看板'];
-  if (hasTodayCost) {
-    triggerTitleParts.push(`今日费用 ${todayCostText}（${todayReqs} 次 · ${fmtTokens(todayTokens)} tokens）`);
+  const statusText = badgeState === 'disconnected'
+    ? '服务未连接'
+    : badgeState === 'waiting'
+      ? '正在连接'
+      : '已连接';
+
+  const triggerTitleParts = [`打开 T3Tools 看板（${statusText}）`];
+  if (hasUsage) {
+    triggerTitleParts.push(`${rangeMeta.full} ${tokensText} tokens · 费用 ${costText}（${reqs} 次）`);
   }
   if (versionSummary) {
     triggerTitleParts.push(versionSummary);
@@ -3023,16 +3155,32 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
     `;
   }
 
-  const rightSlotHtml = hasTodayCost
-    ? `<span class="pt-sidebar-cost pt-mono" data-pt-today-cost="1">今日 ${esc(todayCostText)}</span>`
-    : `<span class="pt-muted" style="font-size:10.5px;">看板</span>`;
+  const triggerTitle = triggerTitleParts.join(' · ');
+  const bodyHtml = usage
+    ? `
+        <span class="pt-sidebar-today" data-pt-sidebar-range="${esc(rangePreset)}">${esc(rangeMeta.short)}</span>
+        <span class="pt-sidebar-metrics">
+          <span class="pt-sidebar-metric" data-pt-today-tokens="1">
+            <span class="pt-sidebar-val pt-mono">${esc(tokensText)}</span>
+            <span class="pt-sidebar-unit">tok</span>
+          </span>
+          <span class="pt-sidebar-sep" aria-hidden="true"></span>
+          <span class="pt-sidebar-metric" data-pt-today-cost="1">
+            <span class="pt-sidebar-val pt-mono">${esc(costText)}</span>
+          </span>
+        </span>
+      `
+    : `<span class="pt-sidebar-fallback">${esc(rangeMeta.short)}用量看板</span>`;
 
   return `
     <div class="pt-sidebar-stack">
       ${updateRowHtml}
-      <button type="button" class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="${esc(triggerTitleParts.join(' · '))}">
-        <span>⚡ T3Tools</span>
-        ${rightSlotHtml}
+      <button type="button" class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="${esc(triggerTitle)}" aria-label="${esc(triggerTitle)}">
+        <span class="pt-sidebar-logo" data-state="${esc(badgeState)}" aria-hidden="true">
+          <span class="pt-sidebar-logo-text">T3</span>
+          <span class="pt-sidebar-status-dot"></span>
+        </span>
+        ${bodyHtml}
       </button>
     </div>
   `;
@@ -4472,7 +4620,7 @@ const PT_VIEW_TITLES = {
 const PT_VIEWS_WITH_FILTERS = new Set(['overview', 'models', 'requests']);
 
 function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) {
-  const cfg = statusData?.settings || fallbackSettings || {};
+  const cfg = fallbackSettings || statusData?.settings || {};
   const alertCfg = cfg.alertConfig || {};
   const cdp = statusData?.cdp || {};
   const daemonInfo = statusData
@@ -4523,6 +4671,21 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) 
             <option value="adaptive"${(cfg.overviewMode || 'adaptive') === 'adaptive' ? ' selected' : ''}>自适应合并 + 自动避让（推荐）</option>
             <option value="avoid"${cfg.overviewMode === 'avoid' ? ' selected' : ''}>仅自动避让浮窗</option>
             <option value="fixed"${cfg.overviewMode === 'fixed' ? ' selected' : ''}>固定视口右上角</option>
+          </select>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">左下角用量统计时间</div>
+            <div class="setting-desc">选择侧边栏左下角展示的 tokens 与费用统计周期</div>
+          </div>
+          <select class="pt-select" aria-label="左下角用量统计时间" data-pt-setting="sidebarUsageRange" style="max-width:290px;">
+            <option value="today"${(cfg.sidebarUsageRange || 'today') === 'today' ? ' selected' : ''}>今日</option>
+            <option value="24h"${cfg.sidebarUsageRange === '24h' ? ' selected' : ''}>近 24 小时</option>
+            <option value="weeklyQuota"${cfg.sidebarUsageRange === 'weeklyQuota' ? ' selected' : ''}>本周限额周期</option>
+            <option value="week"${cfg.sidebarUsageRange === 'week' ? ' selected' : ''}>本周（自然周）</option>
+            <option value="7d"${cfg.sidebarUsageRange === '7d' ? ' selected' : ''}>近 7 天</option>
+            <option value="30d"${cfg.sidebarUsageRange === '30d' ? ' selected' : ''}>近 30 天</option>
+            <option value="all"${cfg.sidebarUsageRange === 'all' ? ' selected' : ''}>全部历史</option>
           </select>
         </div>
       </div>
