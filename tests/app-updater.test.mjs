@@ -44,6 +44,13 @@ test('isAllowedUpdateUrl, detectInstallContext and selectUpdatePackage enforce s
   assert.equal(isAllowedUpdateUrl('http://github.com/LionKo/t3tools/releases/latest/download/latest.json'), false);
   assert.equal(isAllowedUpdateUrl('https://evil.example.com/latest.json'), false);
 
+  // Guard Inno Setup script against invalid constants and ensure UTF-8 BOM for non-ASCII labels
+  const issRaw = readFileSync(new URL('../installer/T3Tools.iss', import.meta.url));
+  assert.equal(issRaw[0] === 0xef && issRaw[1] === 0xbb && issRaw[2] === 0xbf, true, 'T3Tools.iss should have UTF-8 BOM');
+  const issText = issRaw.toString('utf8');
+  assert.equal(/\{userprofile\}/i.test(issText), false, 'Inno Setup does not support {userprofile}; use GetEnv("USERPROFILE")');
+  assert.match(issText, /GetEnv\('USERPROFILE'\)/);
+
   const tmp = mkdtempSync(join(tmpdir(), 't3tools-upd-ctx-'));
   try {
     // Dev checkout with .git must disallow auto-update

@@ -1,4 +1,4 @@
-#ifndef MyAppVersion
+﻿#ifndef MyAppVersion
   #define MyAppVersion "0.1.0"
 #endif
 #ifndef MyStageDir
@@ -70,6 +70,7 @@ procedure StopRunningT3Tools();
 var
   ResultCode: Integer;
   InstalledExe: String;
+  UserProfileDir: String;
   LegacyExe: String;
 begin
   InstalledExe := ExpandConstant('{app}\T3Tools.exe');
@@ -78,11 +79,15 @@ begin
     Exec(InstalledExe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(800);
   end;
-  LegacyExe := ExpandConstant('{userprofile}\.t3tools\T3Tools.exe');
-  if FileExists(LegacyExe) then
+  UserProfileDir := GetEnv('USERPROFILE');
+  if UserProfileDir <> '' then
   begin
-    Exec(LegacyExe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(500);
+    LegacyExe := AddBackslash(UserProfileDir) + '.t3tools\T3Tools.exe';
+    if FileExists(LegacyExe) then
+    begin
+      Exec(LegacyExe, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Sleep(500);
+    end;
   end;
 end;
 
