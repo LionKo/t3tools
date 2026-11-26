@@ -446,3 +446,37 @@ test('resolved session incidents never resurrect or re-alert, failedRuns align w
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('indexed tickAlerts matches full-history recovery when an unlinked native session recovers before a later linked success', () => {
+  const dir = mkdtempSync(join(tmpdir(), 't3-native-recover-'));
+  const file = join(dir, 'store.sqlite');
+  const store = createTelemetryStore(file);
+  try {
+    const baseNow = +new Date(2026, 10, 26, 12, 0, 0);
+    const base = { accountId: 'acct', providerDriver: 'antigravity', modelId: 'gemini-4-neon', inputTokens: 100, outputTokens: 50 };
+    store.replaceSourceRequests('src-nat', '1', [
+      // Unlinked native failure on session S (empty-string t3ThreadId)
+      { ...base, id: 'e1', timestampMs: baseNow - 3000, status: 'error', errorCode: 'eof', nativeSessionId: 'S', t3ThreadId: '' },
+      // Unlinked native recovery on session S (empty-string t3ThreadId)
+      { ...base, id: 's1', timestampMs: baseNow - 2000, status: 'success', nativeSessionId: 'S', t3ThreadId: '' },
+      // Newer linked success on thread T sharing native session S
+      { ...base, id: 's2', timestampMs: baseNow - 1000, status: 'success', nativeSessionId: 'S', t3ThreadId: 'T' }
+    ]);
+    const adapter = { syncAll() {} };
+    const engine = createAnalyticsEngine({
+      store,
+      settings: { get: () => DEFAULT_SETTINGS },
+      antigravityAdapter: adapter,
+      codexAdapter: adapter,
+      quotaAdapter: { readAllQuotas: () => ({ flatWindows: [] }) },
+      t3State: { readFailedRuns: () => [] }
+    });
+    engine.tickAlerts(baseNow);
+    const dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow });
+    assert.equal(dash.errorInsights.summary.activeBrokenThreads, 0);
+    assert.equal(engine.getAlerts().activeBrokenThreads, 0);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -16,9 +16,12 @@ import { createHttpServer } from './http-server.mjs';
 import { createAppUpdater } from './app-updater.mjs';
 import {
   inspectShortcuts,
+  inspectShortcutsAsync,
   isT3ProcessRunning,
   patchT3Launchers,
+  patchT3LaunchersAsync,
   patchT3ShortcutsDebugArg,
+  patchT3ShortcutsDebugArgAsync,
   launchT3WithDebugPort,
   relaunchT3WithDebugPort
 } from './windows-launcher.mjs';
@@ -85,7 +88,8 @@ export function createRuntimeContext(pathOverrides = {}, options = {}) {
     codexAdapter,
     quotaAdapter,
     runtimeUpdatesAdapter,
-    folderSync
+    folderSync,
+    deferFolderSync: Boolean(options.deferFolderSync)
   });
 
   return {
@@ -102,6 +106,7 @@ export function createRuntimeContext(pathOverrides = {}, options = {}) {
     folderSync,
     engine,
     close() {
+      try { t3State.close?.(); } catch {}
       store.close();
     }
   };
@@ -126,7 +131,11 @@ export async function startDaemon({
   onAutoExit = null,
   onShutdownRequest = null
 } = {}) {
-  const ctx = createRuntimeContext(pathOverrides, { fetchImpl, enableRemoteUpdateCheck });
+  const ctx = createRuntimeContext(pathOverrides, {
+    fetchImpl,
+    enableRemoteUpdateCheck,
+    deferFolderSync: true
+  });
   const appUpdater = createAppUpdater({
     currentVersion: PLUGIN_VERSION,
     settings: ctx.settings,
@@ -142,16 +151,88 @@ export async function startDaemon({
     ? candidateToken
     : randomBytes(24).toString('hex');
 
-  if (process.platform === 'win32') {
+  let fixedShortcutPorts = [];
+  function applyInspectedShortcutPorts(inspected) {
+    if (Array.isArray(inspected?.shortcuts)) {
+      fixedShortcutPorts = inspected.shortcuts.map(s => s.fixedPort).filter(p => Number.isInteger(p) && p > 0);
+    }
+    return fixedShortcutPorts;
+  }
+
+  function runStartupShortcutSetup() {
+    if (process.platform !== 'win32') return;
+    let patchedResult = null;
     if (autoPatchLauncher) {
-      try { patchT3Launchers(ctx.paths); } catch {}
+      try { patchedResult = patchT3Launchers(ctx.paths); } catch {}
     } else if (autoPatchDebugArg && cfg.autoPatchLauncher !== false) {
-      try { patchT3ShortcutsDebugArg(ctx.paths); } catch {}
+      try { patchedResult = patchT3ShortcutsDebugArg(ctx.paths); } catch {}
+    }
+    if (Array.isArray(patchedResult?.shortcuts)) {
+      applyInspectedShortcutPorts(patchedResult);
+    } else if (enableCdp) {
+      refreshFixedShortcutPorts();
     }
   }
 
+  let shortcutSetupAbort = null;
+
+  async function runStartupShortcutSetupAsync() {
+    if (process.platform !== 'win32' || stopped) return;
+    shortcutSetupAbort = new AbortController();
+    const signal = shortcutSetupAbort.signal;
+    try {
+      const latestCfg = ctx.settings.get();
+      let patchedResult = null;
+      if (autoPatchLauncher) {
+        try {
+          patchedResult = await patchT3LaunchersAsync(ctx.paths, {
+            signal,
+            shouldProceed: () => !stopped
+          });
+        } catch {}
+      } else if (autoPatchDebugArg && latestCfg.autoPatchLauncher !== false) {
+        try {
+          patchedResult = await patchT3ShortcutsDebugArgAsync(ctx.paths, {
+            signal,
+            shouldProceed: () => !stopped && ctx.settings.get().autoPatchLauncher !== false
+          });
+        } catch {}
+      }
+      if (stopped) return;
+      if (Array.isArray(patchedResult?.shortcuts)) {
+        applyInspectedShortcutPorts(patchedResult);
+      } else if (enableCdp) {
+        try {
+          const inspected = await inspectShortcutsAsync(ctx.paths, { signal });
+          if (!stopped) applyInspectedShortcutPorts(inspected);
+        } catch {}
+      }
+    } finally {
+      shortcutSetupAbort = null;
+    }
+  }
+
+  function refreshFixedShortcutPorts() {
+    if (process.platform !== 'win32' || !enableCdp) return fixedShortcutPorts;
+    try {
+      const inspected = inspectShortcuts(ctx.paths);
+      applyInspectedShortcutPorts(inspected);
+    } catch {}
+    return fixedShortcutPorts;
+  }
+
+  async function refreshFixedShortcutPortsAsync() {
+    if (process.platform !== 'win32' || !enableCdp) return fixedShortcutPorts;
+    try {
+      const inspected = await inspectShortcutsAsync(ctx.paths);
+      if (!stopped) applyInspectedShortcutPorts(inspected);
+    } catch {}
+    return fixedShortcutPorts;
+  }
+
   if (!deferInitialSync) {
-    ctx.engine.syncAll({ force: true });
+    runStartupShortcutSetup();
+    ctx.engine.syncAll({ force: true, includeFolderSync: false });
   }
 
   const startedAtMs = Date.now();
@@ -166,18 +247,6 @@ export async function startDaemon({
     if (now - activeCdpThreadAtMs > ACTIVE_CDP_THREAD_TTL_MS) return '';
     return activeCdpThreadId;
   }
-
-  // Discover any fixed debugging ports already set on T3 Code shortcuts (fixes P2 #19)
-  let fixedShortcutPorts = [];
-  function refreshFixedShortcutPorts() {
-    if (process.platform !== 'win32' || !enableCdp) return fixedShortcutPorts;
-    try {
-      const inspected = inspectShortcuts(ctx.paths);
-      fixedShortcutPorts = inspected.shortcuts.map(s => s.fixedPort).filter(p => Number.isInteger(p) && p > 0);
-    } catch {}
-    return fixedShortcutPorts;
-  }
-  refreshFixedShortcutPorts();
 
   function getDaemonStatus({ fresh = false } = {}) {
     const now = Date.now();
@@ -231,13 +300,20 @@ export async function startDaemon({
       case 'exportRequestsCsv':
         return ctx.engine.exportRequestsCsv(params || {});
       case 'getDashboard':
-        return ctx.engine.getDashboardData(params || {}, { forceSync: Boolean(params.force) });
+        if (params?.force) {
+          ctx.engine.syncAll({ force: true, includeFolderSync: false });
+          await ctx.folderSync.syncAsync({ force: true });
+        }
+        return ctx.engine.getDashboardData(params || {}, { forceSync: false });
       case 'getSettings':
         return ctx.settings.get();
       case 'updateSettings': {
         const updated = ctx.settings.update(params || {});
         if (params?.multiMachineSync) {
-          try { ctx.folderSync.sync({ force: true }); } catch {}
+          ctx.folderSync.invalidate?.();
+          if (updated?.multiMachineSync?.enabled && String(updated?.multiMachineSync?.syncDir || '').trim()) {
+            ctx.folderSync.syncAsync({ force: true }).catch(() => {});
+          }
         }
         if (enableAppUpdateCheck && params?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
           appUpdater.checkForUpdates({ force: false }).catch(() => {});
@@ -245,13 +321,14 @@ export async function startDaemon({
         return updated;
       }
       case 'forceSync':
-        ctx.engine.syncAll({ force: true });
+        ctx.engine.syncAll({ force: true, includeFolderSync: false });
+        await ctx.folderSync.syncAsync({ force: true });
         return { syncedAtMs: Date.now(), multiMachineSync: ctx.folderSync.getStatus() };
       case 'triggerMultiMachineSync':
-        ctx.engine.syncAll({ force: true });
-        return ctx.folderSync.sync({ force: true });
+        ctx.engine.syncAll({ force: true, includeFolderSync: false });
+        return ctx.folderSync.syncAsync({ force: true });
       case 'clearRemoteSyncData':
-        return ctx.folderSync.clearRemoteData();
+        return ctx.folderSync.clearRemoteDataAsync();
       case 'checkRuntimeUpdates':
         return ctx.engine.checkRuntimeUpdates();
       case 'checkAppUpdate':
@@ -291,14 +368,17 @@ export async function startDaemon({
         try { patchT3ShortcutsDebugArg(ctx.paths); } catch {}
       }
       if (patch?.multiMachineSync) {
-        try { ctx.folderSync.sync({ force: true }); } catch {}
+        ctx.folderSync.invalidate?.();
+        if (updated?.multiMachineSync?.enabled && String(updated?.multiMachineSync?.syncDir || '').trim()) {
+          ctx.folderSync.syncAsync({ force: true }).catch(() => {});
+        }
       }
       if (enableAppUpdateCheck && patch?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
         appUpdater.checkForUpdates({ force: false }).catch(() => {});
       }
     },
     onReattachCdp: async () => {
-      refreshFixedShortcutPorts();
+      await refreshFixedShortcutPortsAsync();
       if (!cdpHost) return { enabled: false, connected: false, message: 'CDP 未启用', lastError: '' };
       return cdpHost.reattachNow();
     },
@@ -334,6 +414,8 @@ export async function startDaemon({
   });
 
   let initialSyncTimer = null;
+  let initialShortcutTimer = null;
+  let folderSyncTimer = null;
   let alertTimer = null;
   let watchdogTimer = null;
   let stopped = false;
@@ -378,22 +460,47 @@ export async function startDaemon({
     throw err;
   }
   if (deferInitialSync) {
+    // Let HTTP /api/health respond immediately before background sync & shortcut checks run
     initialSyncTimer = setTimeout(() => {
       initialSyncTimer = null;
       if (stopped) return;
       try {
-        ctx.engine.syncAll({ force: true });
+        ctx.engine.syncAll({ force: true, includeFolderSync: false, nonBlocking: true });
         ctx.engine.tickAlerts();
       } catch (err) {
         console.warn('首次后台同步失败', err?.message || err);
       }
-    }, 0);
+      if (!stopped) {
+        ctx.folderSync.syncAsync({ force: true }).catch(() => {});
+      }
+    }, 50);
     initialSyncTimer.unref?.();
+
+    initialShortcutTimer = setTimeout(() => {
+      initialShortcutTimer = null;
+      if (stopped) return;
+      runStartupShortcutSetupAsync().catch(() => {});
+    }, 300);
+    initialShortcutTimer.unref?.();
+  } else {
+    try {
+      await ctx.folderSync.syncAsync({ force: true });
+    } catch {}
   }
-  alertTimer = setInterval(() => {
-    try { ctx.engine.tickAlerts(); } catch (err) { console.warn('告警同步失败', err.message); }
-  }, 5000);
-  alertTimer.unref();
+  if (!stopped) {
+    folderSyncTimer = setInterval(() => {
+      if (stopped) return;
+      const syncCfg = ctx.settings.get()?.multiMachineSync;
+      if (!syncCfg?.enabled || !String(syncCfg.syncDir || '').trim()) return;
+      ctx.folderSync.syncAsync().catch(() => {});
+    }, 15000);
+    folderSyncTimer.unref?.();
+    alertTimer = setInterval(() => {
+      if (stopped) return;
+      try { ctx.engine.tickAlerts(); } catch (err) { console.warn('告警同步失败', err.message); }
+    }, 5000);
+    alertTimer.unref();
+  }
   let consecutiveGone = 0;
 
   function stop(reason = 'requested') {
@@ -407,9 +514,19 @@ export async function startDaemon({
 
   async function closeResources() {
     appUpdater.stop();
+    ctx.folderSync.stop?.();
+    try { shortcutSetupAbort?.abort(); } catch {}
     if (initialSyncTimer) {
       clearTimeout(initialSyncTimer);
       initialSyncTimer = null;
+    }
+    if (initialShortcutTimer) {
+      clearTimeout(initialShortcutTimer);
+      initialShortcutTimer = null;
+    }
+    if (folderSyncTimer) {
+      clearInterval(folderSyncTimer);
+      folderSyncTimer = null;
     }
     clearInterval(alertTimer);
     if (watchdogTimer) {
@@ -418,6 +535,7 @@ export async function startDaemon({
     }
     try { await cdpHost?.stop(); } catch (err) { console.error('[daemon] CDP shutdown failed', err); }
     try { await httpServer.close(); } catch (err) { console.error('[daemon] HTTP shutdown failed', err); }
+    try { await ctx.folderSync.whenIdle?.(1500); } catch (err) { console.error('[daemon] folderSync shutdown failed', err); }
     try { ctx.close(); } catch (err) { console.error('[daemon] store shutdown failed', err); }
     try {
       const current = JSON.parse(readFileSync(ctx.paths.runtimeFilePath, 'utf8'));
@@ -427,7 +545,7 @@ export async function startDaemon({
     }
   }
 
-  if (autoExitWhenT3Gone) {
+  if (autoExitWhenT3Gone && !stopped) {
     watchdogTimer = setInterval(async () => {
       if (stopped) return;
       if (Date.now() - startedAtMs < autoExitGraceMs) return;

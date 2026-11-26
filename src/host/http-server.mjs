@@ -266,8 +266,10 @@ export function createHttpServer({
         }
         if (pathname === '/api/sync') {
           await readJsonBody(req);
-          engine.syncAll({ force: true });
-          sendJson(res, 200, { ok: true, data: { syncedAtMs: Date.now() } });
+          const data = typeof handleRpc === 'function'
+            ? await handleRpc('forceSync', {})
+            : (engine.syncAll({ force: true }), { syncedAtMs: Date.now() });
+          sendJson(res, 200, { ok: true, data });
           return;
         }
         if (pathname === '/api/cdp/reattach') {

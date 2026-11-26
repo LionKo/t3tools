@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 function fileStamp(filePath) {
   return [filePath, `${filePath}-wal`].map(p => {
     try {
-      const s = statSync(p);
-      return `${s.mtimeMs}:${s.size}`;
+      const s = statSync(p, { bigint: true });
+      return `${s.dev}:${s.ino}:${s.birthtimeNs}:${s.mtimeNs}:${s.size}`;
     } catch {
       return '';
     }
@@ -117,11 +117,125 @@ export function createT3StateAdapter(paths) {
   let cachedIndex = null;
 
   let previousUndatedFailures = null;
-  function openReadOnly() {
-    if (!paths.stateDbPath || !existsSync(paths.stateDbPath)) return null;
+  let sharedConn = null; // { db, fileKey, schemaVersionStmt, schemaVersion, tables, stmts, openedAtMs }
+  let idleCloseTimer = null;
+  let maxLifeCloseTimer = null;
+  // Short bounded window: coalesces back-to-back calls within one poll burst while guaranteeing
+  // Windows file handles close promptly so T3 Code can replace/delete statev2.sqlite between polls.
+  const IDLE_CLOSE_MS = 180;
+  const MAX_CONN_LIFETIME_MS = 400;
+
+  function closeSharedDb() {
+    if (idleCloseTimer) {
+      clearTimeout(idleCloseTimer);
+      idleCloseTimer = null;
+    }
+    if (maxLifeCloseTimer) {
+      clearTimeout(maxLifeCloseTimer);
+      maxLifeCloseTimer = null;
+    }
+    if (sharedConn) {
+      const db = sharedConn.db;
+      sharedConn = null;
+      try { db.close(); } catch {}
+    }
+  }
+
+  function scheduleIdleClose() {
+    if (idleCloseTimer) clearTimeout(idleCloseTimer);
+    idleCloseTimer = setTimeout(() => {
+      idleCloseTimer = null;
+      closeSharedDb();
+    }, IDLE_CLOSE_MS);
+    idleCloseTimer.unref?.();
+  }
+
+  function getDbIdentity(dbPath) {
+    try {
+      const s = statSync(dbPath, { bigint: true });
+      return `${s.dev}:${s.ino}:${s.birthtimeNs}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function getSharedConn() {
+    if (!paths.stateDbPath) {
+      closeSharedDb();
+      return null;
+    }
+    const fileKey = getDbIdentity(paths.stateDbPath);
+    if (!fileKey) {
+      closeSharedDb();
+      return null;
+    }
+    const nowMs = Date.now();
+    if (sharedConn && sharedConn.fileKey === fileKey && (nowMs - sharedConn.openedAtMs) < MAX_CONN_LIFETIME_MS) {
+      try {
+        const curSchema = sharedConn.schemaVersionStmt.get()?.schema_version;
+        if (curSchema === sharedConn.schemaVersion) {
+          scheduleIdleClose();
+          return sharedConn;
+        }
+      } catch {}
+    }
+    closeSharedDb();
     const db = new DatabaseSync(paths.stateDbPath, { readOnly: true });
-    db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 1000;');
-    return db;
+    try {
+      // Fail fast on SQLITE_BUSY so an exclusive writer on T3 Code's statev2.sqlite never stalls /api/health
+      db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 0;');
+      const schemaVersionStmt = db.prepare('PRAGMA schema_version');
+      const schemaVersion = schemaVersionStmt.get()?.schema_version;
+      const tables = getExistingTables(db);
+      const stmts = Object.create(null);
+      sharedConn = { db, fileKey, schemaVersionStmt, schemaVersion, tables, stmts, openedAtMs: nowMs };
+      maxLifeCloseTimer = setTimeout(() => {
+        maxLifeCloseTimer = null;
+        closeSharedDb();
+      }, MAX_CONN_LIFETIME_MS);
+      maxLifeCloseTimer.unref?.();
+      scheduleIdleClose();
+      return sharedConn;
+    } catch (err) {
+      try { db.close(); } catch {}
+      throw err;
+    }
+  }
+
+  // Lazy per-feature statement preparation so an incompatible column on one table never breaks unrelated queries
+  function prepareCached(conn, key, requiredTable, sql) {
+    if (!conn.tables.has(requiredTable)) return null;
+    if (!Object.prototype.hasOwnProperty.call(conn.stmts, key)) {
+      conn.stmts[key] = conn.db.prepare(sql);
+    }
+    return conn.stmts[key];
+  }
+
+  function isSqliteBusyError(err) {
+    return err?.errcode === 5 || err?.errcode === 6 || /database is locked|database table is locked|SQLITE_BUSY/i.test(String(err?.message || ''));
+  }
+
+  function withReadOnlyConn(fn) {
+    let conn = getSharedConn();
+    if (!conn) return null;
+    try {
+      return fn(conn);
+    } catch (firstErr) {
+      if (isSqliteBusyError(firstErr)) {
+        closeSharedDb();
+        throw firstErr;
+      }
+      // Self-heal once if T3 Code replaced/migrated statev2.sqlite while handle was cached
+      closeSharedDb();
+      conn = getSharedConn();
+      if (!conn) throw firstErr;
+      try {
+        return fn(conn);
+      } catch (secondErr) {
+        closeSharedDb();
+        throw secondErr;
+      }
+    }
   }
 
   function getExistingTables(db) {
@@ -145,139 +259,147 @@ export function createT3StateAdapter(paths) {
     const stamp = fileStamp(paths.stateDbPath);
     if (cachedIndex && cachedIndexStamp === stamp) return cachedIndex;
 
-    const threadsById = new Map();
-    const nativeToThread = new Map();
-    const threadToNatives = new Map();
-    const providerThreadToNative = new Map();
+    const emptyIndex = () => ({
+      threadsById: new Map(),
+      nativeToThread: new Map(),
+      threadToNatives: new Map(),
+      providerThreadToNative: new Map(),
+      latestThreadId: null,
+      recentThreads: []
+    });
 
-    let db;
     try {
-      db = openReadOnly();
-      if (!db) {
-        return { threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId: null, recentThreads: [] };
-      }
-      const tables = getExistingTables(db);
+      const result = withReadOnlyConn(({ db, tables }) => {
+        // Allocate fresh maps per attempt so a retry after error never retains partial rows
+        const threadsById = new Map();
+        const nativeToThread = new Map();
+        const threadToNatives = new Map();
+        const providerThreadToNative = new Map();
 
-      if (tables.has('orchestration_v2_projection_threads')) {
-        const cols = getTableColumns(db, 'orchestration_v2_projection_threads');
-        const env = cols.has('environment_id') ? 'environment_id' : 'NULL';
-        const project = cols.has('project_id') ? 'project_id' : 'NULL';
-        const rows = db.prepare(`
-          SELECT ${env} AS environment_id, ${project} AS project_id, thread_id, title, default_provider, provider_instance_id, updated_at, archived_at, deleted_at
-          FROM orchestration_v2_projection_threads
-          WHERE deleted_at IS NULL
-          ORDER BY updated_at DESC
-        `).all();
-        for (const r of rows) {
-          threadsById.set(r.thread_id, {
-            threadId: r.thread_id,
-            title: r.title || '未命名会话',
-            environmentId: r.environment_id, projectId: r.project_id,
-            defaultProvider: r.default_provider || '',
-            providerInstanceId: r.provider_instance_id || r.default_provider || '',
-            updatedAtMs: isoToMs(r.updated_at) || 0,
-            archived: Boolean(r.archived_at)
-          });
-        }
-      }
-
-      if (tables.has('orchestration_v2_projection_provider_threads')) {
-        const cols = getTableColumns(db, 'orchestration_v2_projection_provider_threads');
-        const hasPayload = cols.has('payload_json');
-        const sql = hasPayload
-          ? `SELECT provider_thread_id, thread_id, provider, driver, provider_instance_id, provider_session_id, status, updated_at, payload_json
-             FROM orchestration_v2_projection_provider_threads ORDER BY updated_at DESC`
-          : `SELECT provider_thread_id, thread_id, provider, driver, provider_instance_id, provider_session_id, status, updated_at
-             FROM orchestration_v2_projection_provider_threads ORDER BY updated_at DESC`;
-
-        for (const r of db.prepare(sql).all()) {
-          const nativeId = extractNativeIdFromProviderThread(r.provider_thread_id, r.payload_json);
-          if (!nativeId) continue;
-          const accountId = r.provider_instance_id || r.provider || r.driver || 'unknown';
-          const driver = r.driver || r.provider || 'unknown';
-          const threadMeta = threadsById.get(r.thread_id);
-          const entry = {
-            providerThreadId: r.provider_thread_id,
-            nativeSessionId: nativeId,
-            threadId: r.thread_id || null,
-            title: threadMeta?.title || '',
-            accountId,
-            driver,
-            status: r.status || ''
-          };
-          providerThreadToNative.set(r.provider_thread_id, entry);
-          if (!nativeToThread.has(nativeId)) {
-            nativeToThread.set(nativeId, entry);
-          }
-          if (r.thread_id) {
-            let list = threadToNatives.get(r.thread_id);
-            if (!list) {
-              list = [];
-              threadToNatives.set(r.thread_id, list);
-            }
-            if (!list.some(x => x.nativeSessionId === nativeId && x.providerThreadId === r.provider_thread_id)) {
-              list.push(entry);
-            }
-          }
-        }
-      }
-
-      if (tables.has('provider_session_runtime')) {
-        const rows = db.prepare(`
-          SELECT thread_id, provider_name, provider_instance_id, runtime_payload_json
-          FROM provider_session_runtime
-          WHERE runtime_payload_json IS NOT NULL
-        `).all();
-        for (const r of rows) {
-          const payload = parseJsonSafe(r.runtime_payload_json, null);
-          const imported = Array.isArray(payload?.importedTranscripts) ? payload.importedTranscripts : [];
-          for (const item of imported) {
-            const nativeId = String(item?.providerSessionId || '').trim();
-            if (!nativeId) continue;
-            const threadMeta = threadsById.get(r.thread_id);
-            const accountId = item.providerInstanceId || r.provider_instance_id || r.provider_name || 'codex';
-            const driver = item.provider || r.provider_name || 'codex';
-            const entry = {
-              providerThreadId: '',
-              nativeSessionId: nativeId,
+        if (tables.has('orchestration_v2_projection_threads')) {
+          const cols = getTableColumns(db, 'orchestration_v2_projection_threads');
+          const env = cols.has('environment_id') ? 'environment_id' : 'NULL';
+          const project = cols.has('project_id') ? 'project_id' : 'NULL';
+          const rows = db.prepare(`
+            SELECT ${env} AS environment_id, ${project} AS project_id, thread_id, title, default_provider, provider_instance_id, updated_at, archived_at, deleted_at
+            FROM orchestration_v2_projection_threads
+            WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC
+          `).all();
+          for (const r of rows) {
+            threadsById.set(r.thread_id, {
               threadId: r.thread_id,
-              title: threadMeta?.title || '',
-              accountId,
-              driver,
-              filePath: item.filePath || ''
-            };
-            if (!nativeToThread.has(nativeId)) nativeToThread.set(nativeId, entry);
-            let list = threadToNatives.get(r.thread_id);
-            if (!list) { list = []; threadToNatives.set(r.thread_id, list); }
-            if (!list.some(x => x.nativeSessionId === nativeId)) list.push(entry);
-          }
-        }
-      }
-
-      const recentThreads = [];
-      let latestThreadId = null;
-      for (const t of threadsById.values()) {
-        if (!t.threadId.startsWith('thread:subagent:') && !t.archived) {
-          if (!latestThreadId) latestThreadId = t.threadId;
-          if (recentThreads.length < 30) {
-            recentThreads.push({
-              threadId: t.threadId,
-              title: t.title,
-              accountId: t.providerInstanceId,
-              updatedAtMs: t.updatedAtMs
+              title: r.title || '未命名会话',
+              environmentId: r.environment_id, projectId: r.project_id,
+              defaultProvider: r.default_provider || '',
+              providerInstanceId: r.provider_instance_id || r.default_provider || '',
+              updatedAtMs: isoToMs(r.updated_at) || 0,
+              archived: Boolean(r.archived_at)
             });
           }
         }
-      }
-      if (!latestThreadId) latestThreadId = threadsById.keys().next().value || null;
 
-      cachedIndex = { threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId, recentThreads };
+        if (tables.has('orchestration_v2_projection_provider_threads')) {
+          const cols = getTableColumns(db, 'orchestration_v2_projection_provider_threads');
+          const hasPayload = cols.has('payload_json');
+          const sql = hasPayload
+            ? `SELECT provider_thread_id, thread_id, provider, driver, provider_instance_id, provider_session_id, status, updated_at, payload_json
+               FROM orchestration_v2_projection_provider_threads ORDER BY updated_at DESC`
+            : `SELECT provider_thread_id, thread_id, provider, driver, provider_instance_id, provider_session_id, status, updated_at
+               FROM orchestration_v2_projection_provider_threads ORDER BY updated_at DESC`;
+
+          for (const r of db.prepare(sql).all()) {
+            const nativeId = extractNativeIdFromProviderThread(r.provider_thread_id, r.payload_json);
+            if (!nativeId) continue;
+            const accountId = r.provider_instance_id || r.provider || r.driver || 'unknown';
+            const driver = r.driver || r.provider || 'unknown';
+            const threadMeta = threadsById.get(r.thread_id);
+            const entry = {
+              providerThreadId: r.provider_thread_id,
+              nativeSessionId: nativeId,
+              threadId: r.thread_id || null,
+              title: threadMeta?.title || '',
+              accountId,
+              driver,
+              status: r.status || ''
+            };
+            providerThreadToNative.set(r.provider_thread_id, entry);
+            if (!nativeToThread.has(nativeId)) {
+              nativeToThread.set(nativeId, entry);
+            }
+            if (r.thread_id) {
+              let list = threadToNatives.get(r.thread_id);
+              if (!list) {
+                list = [];
+                threadToNatives.set(r.thread_id, list);
+              }
+              if (!list.some(x => x.nativeSessionId === nativeId && x.providerThreadId === r.provider_thread_id)) {
+                list.push(entry);
+              }
+            }
+          }
+        }
+
+        if (tables.has('provider_session_runtime')) {
+          const rows = db.prepare(`
+            SELECT thread_id, provider_name, provider_instance_id, runtime_payload_json
+            FROM provider_session_runtime
+            WHERE runtime_payload_json IS NOT NULL
+          `).all();
+          for (const r of rows) {
+            const payload = parseJsonSafe(r.runtime_payload_json, null);
+            const imported = Array.isArray(payload?.importedTranscripts) ? payload.importedTranscripts : [];
+            for (const item of imported) {
+              const nativeId = String(item?.providerSessionId || '').trim();
+              if (!nativeId) continue;
+              const threadMeta = threadsById.get(r.thread_id);
+              const accountId = item.providerInstanceId || r.provider_instance_id || r.provider_name || 'codex';
+              const driver = item.provider || r.provider_name || 'codex';
+              const entry = {
+                providerThreadId: '',
+                nativeSessionId: nativeId,
+                threadId: r.thread_id,
+                title: threadMeta?.title || '',
+                accountId,
+                driver,
+                filePath: item.filePath || ''
+              };
+              if (!nativeToThread.has(nativeId)) nativeToThread.set(nativeId, entry);
+              let list = threadToNatives.get(r.thread_id);
+              if (!list) { list = []; threadToNatives.set(r.thread_id, list); }
+              if (!list.some(x => x.nativeSessionId === nativeId)) list.push(entry);
+            }
+          }
+        }
+
+        const recentThreads = [];
+        let latestThreadId = null;
+        for (const t of threadsById.values()) {
+          if (!t.threadId.startsWith('thread:subagent:') && !t.archived) {
+            if (!latestThreadId) latestThreadId = t.threadId;
+            if (recentThreads.length < 30) {
+              recentThreads.push({
+                threadId: t.threadId,
+                title: t.title,
+                accountId: t.providerInstanceId,
+                updatedAtMs: t.updatedAtMs
+              });
+            }
+          }
+        }
+        if (!latestThreadId) latestThreadId = threadsById.keys().next().value || null;
+
+        return { threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId, recentThreads };
+      });
+
+      if (!result) {
+        return emptyIndex();
+      }
+      cachedIndex = result;
       cachedIndexStamp = stamp;
       return cachedIndex;
     } catch {
-      return cachedIndex || { threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId: null, recentThreads: [] };
-    } finally {
-      try { db?.close(); } catch {}
+      return cachedIndex || emptyIndex();
     }
   }
 
@@ -318,221 +440,232 @@ export function createT3StateAdapter(paths) {
 
     if (!threadId) return null;
 
-    let db;
     try {
-      db = openReadOnly();
-      if (!db) return null;
-      const tables = getExistingTables(db);
-      const threadMeta = index.threadsById.get(threadId) || {
-        threadId,
-        title: '当前会话',
-        providerInstanceId: '',
-        defaultProvider: ''
-      };
-      const allNatives = index.threadToNatives.get(threadId) || [];
+      return withReadOnlyConn(conn => {
+        const threadMeta = index.threadsById.get(threadId) || {
+          threadId,
+          title: '当前会话',
+          providerInstanceId: '',
+          defaultProvider: ''
+        };
+        const allNatives = index.threadToNatives.get(threadId) || [];
 
-      // Prefer active run across the ENTIRE thread, count ALL queued runs, and fall back to latest run (fixes P2 #13)
-      let selectedRun = null;
-      let queuedRuns = 0;
-      if (tables.has('orchestration_v2_projection_runs')) {
-        const queuedRow = db.prepare(`
+        // Prefer active run across the ENTIRE thread, count ALL queued runs, and fall back to latest run (fixes P2 #13)
+        let selectedRun = null;
+        let queuedRuns = 0;
+        const queuedRunsStmt = prepareCached(conn, 'queuedRuns', 'orchestration_v2_projection_runs', `
           SELECT COUNT(*) AS c FROM orchestration_v2_projection_runs
           WHERE thread_id = ? AND status = 'queued'
-        `).get(threadId);
-        queuedRuns = Number(queuedRow?.c || 0);
-
-        selectedRun = db.prepare(`
-          SELECT run_id, ordinal, provider, provider_instance_id, provider_thread_id, status, requested_at, completed_at, payload_json
-          FROM orchestration_v2_projection_runs
-          WHERE thread_id = ? AND status IN ('running', 'starting', 'waiting')
-          ORDER BY ordinal DESC
-          LIMIT 1
-        `).get(threadId) || db.prepare(`
-          SELECT run_id, ordinal, provider, provider_instance_id, provider_thread_id, status, requested_at, completed_at, payload_json
-          FROM orchestration_v2_projection_runs
-          WHERE thread_id = ?
-          ORDER BY ordinal DESC
-          LIMIT 1
-        `).get(threadId) || null;
-      }
-
-      const runPayload = parseJsonSafe(selectedRun?.payload_json, {}) || {};
-      const modelSelection = runPayload.modelSelection || {};
-      const accountId = selectedRun?.provider_instance_id || modelSelection.instanceId || selectedRun?.provider || threadMeta.providerInstanceId || '';
-      const selectedModel = modelSelection.model || '';
-      const runStatus = selectedRun?.status || 'idle';
-      const runStartedAtMs = isoToMs(selectedRun?.requested_at);
-      const runCompletedAtMs = isoToMs(selectedRun?.completed_at);
-
-      // Order natives so the provider thread attached to selectedRun comes FIRST (fixes P1 #3)
-      const orderedNatives = [];
-      const runProviderThreadId = selectedRun?.provider_thread_id || runPayload.providerThreadId || '';
-      if (runProviderThreadId && index.providerThreadToNative.has(runProviderThreadId)) {
-        orderedNatives.push(index.providerThreadToNative.get(runProviderThreadId));
-      }
-      for (const n of allNatives) {
-        if (!orderedNatives.some(x => x.nativeSessionId === n.nativeSessionId && x.driver === n.driver)) {
-          orderedNatives.push(n);
+        `);
+        if (queuedRunsStmt) {
+          const activeRunStmt = prepareCached(conn, 'activeRun', 'orchestration_v2_projection_runs', `
+            SELECT run_id, ordinal, provider, provider_instance_id, provider_thread_id, status, requested_at, completed_at, payload_json
+            FROM orchestration_v2_projection_runs
+            WHERE thread_id = ? AND status IN ('running', 'starting', 'waiting')
+            ORDER BY ordinal DESC
+            LIMIT 1
+          `);
+          const latestRunStmt = prepareCached(conn, 'latestRun', 'orchestration_v2_projection_runs', `
+            SELECT run_id, ordinal, provider, provider_instance_id, provider_thread_id, status, requested_at, completed_at, payload_json
+            FROM orchestration_v2_projection_runs
+            WHERE thread_id = ?
+            ORDER BY ordinal DESC
+            LIMIT 1
+          `);
+          const queuedRow = queuedRunsStmt.get(threadId);
+          queuedRuns = Number(queuedRow?.c || 0);
+          selectedRun = activeRunStmt.get(threadId) || latestRunStmt.get(threadId) || null;
         }
-      }
 
-      // Pending approvals / user input requests
-      let pendingApproval = null;
-      if (tables.has('orchestration_v2_projection_runtime_requests')) {
-        const req = db.prepare(`
+        const runPayload = parseJsonSafe(selectedRun?.payload_json, {}) || {};
+        const modelSelection = runPayload.modelSelection || {};
+        const accountId = selectedRun?.provider_instance_id || modelSelection.instanceId || selectedRun?.provider || threadMeta.providerInstanceId || '';
+        const selectedModel = modelSelection.model || '';
+        const runStatus = selectedRun?.status || 'idle';
+        const runStartedAtMs = isoToMs(selectedRun?.requested_at);
+        const runCompletedAtMs = isoToMs(selectedRun?.completed_at);
+
+        // Order natives so the provider thread attached to selectedRun comes FIRST (fixes P1 #3)
+        const orderedNatives = [];
+        const runProviderThreadId = selectedRun?.provider_thread_id || runPayload.providerThreadId || '';
+        if (runProviderThreadId && index.providerThreadToNative.has(runProviderThreadId)) {
+          orderedNatives.push(index.providerThreadToNative.get(runProviderThreadId));
+        }
+        for (const n of allNatives) {
+          if (!orderedNatives.some(x => x.nativeSessionId === n.nativeSessionId && x.driver === n.driver)) {
+            orderedNatives.push(n);
+          }
+        }
+
+        // Pending approvals / user input requests
+        let pendingApproval = null;
+        const pendingApprovalStmt = prepareCached(conn, 'pendingApproval', 'orchestration_v2_projection_runtime_requests', `
           SELECT runtime_request_id, kind, status, created_at
           FROM orchestration_v2_projection_runtime_requests
           WHERE thread_id = ? AND status = 'pending'
           ORDER BY created_at DESC
           LIMIT 1
-        `).get(threadId);
-        if (req) {
-          pendingApproval = {
-            id: req.runtime_request_id,
-            kind: req.kind,
-            createdAtMs: isoToMs(req.created_at)
-          };
+        `);
+        if (pendingApprovalStmt) {
+          const req = pendingApprovalStmt.get(threadId);
+          if (req) {
+            pendingApproval = {
+              id: req.runtime_request_id,
+              kind: req.kind,
+              createdAtMs: isoToMs(req.created_at)
+            };
+          }
         }
-      }
 
-      // Full per-step turn items for selected run
-      const steps = [];
-      if (selectedRun && tables.has('orchestration_v2_projection_turn_items')) {
-        const rows = db.prepare(`
+        // Full per-step turn items for selected run
+        const steps = [];
+        const turnItemsStmt = selectedRun ? prepareCached(conn, 'turnItems', 'orchestration_v2_projection_turn_items', `
           SELECT turn_item_id, ordinal, type, status, updated_at, payload_json
           FROM orchestration_v2_projection_turn_items
           WHERE thread_id = ? AND run_id = ?
           ORDER BY ordinal ASC
-        `).all(threadId, selectedRun.run_id);
+        `) : null;
+        if (selectedRun && turnItemsStmt) {
+          const rows = turnItemsStmt.all(threadId, selectedRun.run_id);
 
-        for (const row of rows) {
-          const step = friendlyStepMeta(row);
-          if (step.type === 'user_message') continue;
-          let durationMs = null;
-          if (step.startedAtMs != null) {
-            if (step.completedAtMs != null && step.completedAtMs >= step.startedAtMs) {
-              durationMs = step.completedAtMs - step.startedAtMs;
-            } else if (step.status === 'running') {
-              durationMs = Math.max(0, now - step.startedAtMs);
-            } else if (step.updatedAtMs != null && step.updatedAtMs > step.startedAtMs) {
-              durationMs = step.updatedAtMs - step.startedAtMs;
+          for (const row of rows) {
+            const step = friendlyStepMeta(row);
+            if (step.type === 'user_message') continue;
+            let durationMs = null;
+            if (step.startedAtMs != null) {
+              if (step.completedAtMs != null && step.completedAtMs >= step.startedAtMs) {
+                durationMs = step.completedAtMs - step.startedAtMs;
+              } else if (step.status === 'running') {
+                durationMs = Math.max(0, now - step.startedAtMs);
+              } else if (step.updatedAtMs != null && step.updatedAtMs > step.startedAtMs) {
+                durationMs = step.updatedAtMs - step.startedAtMs;
+              }
             }
+            step.durationMs = durationMs;
+            steps.push(step);
           }
-          step.durationMs = durationMs;
-          steps.push(step);
         }
-      }
 
-      // Check ACTIVELY streaming assistant message only (streaming = 1) (fixes P2 #12)
-      let streamingInfo = { active: false, messageId: '', chars: 0, updatedAtMs: null };
-      if (selectedRun && runStatus === 'running' && tables.has('orchestration_v2_projection_messages')) {
-        const msg = db.prepare(`
+        // Check ACTIVELY streaming assistant message only (streaming = 1) (fixes P2 #12)
+        let streamingInfo = { active: false, messageId: '', chars: 0, updatedAtMs: null };
+        const streamingMsgStmt = (selectedRun && runStatus === 'running') ? prepareCached(conn, 'streamingMsg', 'orchestration_v2_projection_messages', `
           SELECT message_id, streaming, created_at, updated_at, payload_json
           FROM orchestration_v2_projection_messages
           WHERE thread_id = ? AND run_id = ? AND role = 'assistant' AND streaming = 1
           ORDER BY updated_at DESC
           LIMIT 1
-        `).get(threadId, selectedRun.run_id);
-        if (msg) {
-          const mp = parseJsonSafe(msg.payload_json, {}) || {};
-          const text = String(mp.text || mp.content || '');
-          if (text.length > 0) {
-            streamingInfo = {
-              active: true,
-              messageId: msg.message_id,
-              chars: text.length,
-              updatedAtMs: isoToMs(msg.updated_at) || now
-            };
+        `) : null;
+        if (streamingMsgStmt) {
+          const msg = streamingMsgStmt.get(threadId, selectedRun.run_id);
+          if (msg) {
+            const mp = parseJsonSafe(msg.payload_json, {}) || {};
+            const text = String(mp.text || mp.content || '');
+            if (text.length > 0) {
+              streamingInfo = {
+                active: true,
+                messageId: msg.message_id,
+                chars: text.length,
+                updatedAtMs: isoToMs(msg.updated_at) || now
+              };
+            }
           }
         }
-      }
 
-      // Determine current phase
-      const runningStep = [...steps].reverse().find(s => s.status === 'running');
-      let phase = 'idle';
-      let phaseLabel = '空闲';
-      if (pendingApproval) {
-        phase = 'waiting_approval';
-        phaseLabel = pendingApproval.kind === 'user_input' ? '等待输入' : '等待确认';
-      } else if (runStatus === 'running' || runStatus === 'starting') {
-        if (runningStep) {
-          phase = runningStep.phase;
-          phaseLabel = runningStep.phaseLabel;
-        } else if (streamingInfo.active) {
-          phase = 'responding';
-          phaseLabel = '生成中';
-        } else {
-          phase = 'thinking';
-          phaseLabel = '思考中';
+        // Determine current phase
+        const runningStep = [...steps].reverse().find(s => s.status === 'running');
+        let phase = 'idle';
+        let phaseLabel = '空闲';
+        if (pendingApproval) {
+          phase = 'waiting_approval';
+          phaseLabel = pendingApproval.kind === 'user_input' ? '等待输入' : '等待确认';
+        } else if (runStatus === 'running' || runStatus === 'starting') {
+          if (runningStep) {
+            phase = runningStep.phase;
+            phaseLabel = runningStep.phaseLabel;
+          } else if (streamingInfo.active) {
+            phase = 'responding';
+            phaseLabel = '生成中';
+          } else {
+            phase = 'thinking';
+            phaseLabel = '思考中';
+          }
+        } else if (runStatus === 'queued') {
+          phase = 'queued';
+          phaseLabel = '排队中';
+        } else if (runStatus === 'failed') {
+          phase = 'error';
+          phaseLabel = '已结束';
+        } else if (runStatus === 'cancelled' || runStatus === 'interrupted') {
+          phase = 'stopped';
+          phaseLabel = '已中断';
+        } else if (runStatus === 'completed') {
+          phase = 'completed';
+          phaseLabel = '已完成';
         }
-      } else if (runStatus === 'queued') {
-        phase = 'queued';
-        phaseLabel = '排队中';
-      } else if (runStatus === 'failed') {
-        phase = 'error';
-        phaseLabel = '已结束';
-      } else if (runStatus === 'cancelled' || runStatus === 'interrupted') {
-        phase = 'stopped';
-        phaseLabel = '已中断';
-      } else if (runStatus === 'completed') {
-        phase = 'completed';
-        phaseLabel = '已完成';
-      }
 
-      const runDurationMs = runStartedAtMs != null
-        ? Math.max(0, (runCompletedAtMs ?? (runStatus === 'running' ? now : runStartedAtMs)) - runStartedAtMs)
-        : null;
+        const runDurationMs = runStartedAtMs != null
+          ? Math.max(0, (runCompletedAtMs ?? (runStatus === 'running' ? now : runStartedAtMs)) - runStartedAtMs)
+          : null;
 
-      return {
-        unresolved: false,
-        threadId,
-        title: threadMeta.title,
-        accountId,
-        selectedModel,
-        natives: orderedNatives,
-        queuedRuns,
-        recentThreads: index.recentThreads,
-        run: selectedRun ? {
-          runId: selectedRun.run_id,
-          ordinal: selectedRun.ordinal,
-          status: runStatus,
-          startedAtMs: runStartedAtMs,
-          completedAtMs: runCompletedAtMs,
-          durationMs: runDurationMs
-        } : null,
-        phase,
-        phaseLabel,
-        pendingApproval,
-        steps,
-        totalSteps: steps.length,
-        streaming: streamingInfo
-      };
+        return {
+          unresolved: false,
+          threadId,
+          title: threadMeta.title,
+          accountId,
+          selectedModel,
+          natives: orderedNatives,
+          queuedRuns,
+          recentThreads: index.recentThreads,
+          run: selectedRun ? {
+            runId: selectedRun.run_id,
+            ordinal: selectedRun.ordinal,
+            status: runStatus,
+            startedAtMs: runStartedAtMs,
+            completedAtMs: runCompletedAtMs,
+            durationMs: runDurationMs
+          } : null,
+          phase,
+          phaseLabel,
+          pendingApproval,
+          steps,
+          totalSteps: steps.length,
+          streaming: streamingInfo
+        };
+      });
     } catch {
       return null;
-    } finally {
-      try { db?.close(); } catch {}
     }
   }
 
   return {
     readFailedRuns(sinceMs) {
-      const db = openReadOnly();
-      try {
-        if (!db || !getExistingTables(db).has('orchestration_v2_projection_runs')) return [];
-        const rows = db.prepare(`SELECT run_id, thread_id, provider_instance_id, completed_at, payload_json
-          FROM orchestration_v2_projection_runs WHERE status='failed' AND (completed_at >= ? OR completed_at IS NULL)`).all(new Date(sinceMs).toISOString());
+      return withReadOnlyConn(conn => {
+        const failedRunsStmt = prepareCached(conn, 'failedRuns', 'orchestration_v2_projection_runs', `
+          SELECT run_id, thread_id, provider_instance_id, completed_at, payload_json
+          FROM orchestration_v2_projection_runs
+          WHERE status = 'failed' AND (completed_at >= ? OR completed_at IS NULL)
+        `);
+        if (!failedRunsStmt) return [];
+        const rows = failedRunsStmt.all(new Date(sinceMs).toISOString());
         const undated = new Set(rows.filter(r => !r.completed_at).map(r => r.run_id));
         const fresh = rows.filter(r => r.completed_at || (previousUndatedFailures && !previousUndatedFailures.has(r.run_id)));
         previousUndatedFailures = undated;
         if (!fresh.length) return [];
         const index = readThreadIndex();
-        return fresh.map(r => ({ id: 'run:' + r.run_id, timestampMs: isoToMs(r.completed_at) || Date.now(),
-          modelId: parseJsonSafe(r.payload_json, {})?.modelSelection?.model, errorCode: 'failed',
-          t3ThreadId: r.thread_id, t3ThreadTitle: index.threadsById.get(r.thread_id)?.title, accountId: r.provider_instance_id }));
-      } finally { db?.close(); }
+        return fresh.map(r => ({
+          id: 'run:' + r.run_id,
+          timestampMs: isoToMs(r.completed_at) || Date.now(),
+          modelId: parseJsonSafe(r.payload_json, {})?.modelSelection?.model,
+          errorCode: 'failed',
+          t3ThreadId: r.thread_id,
+          t3ThreadTitle: index.threadsById.get(r.thread_id)?.title,
+          accountId: r.provider_instance_id
+        }));
+      }) || [];
     },
     readThreadIndex,
     readThreadExecution,
-    readProviderInstances: () => readProviderInstances(paths.settingsPath)
+    readProviderInstances: () => readProviderInstances(paths.settingsPath),
+    close: closeSharedDb
   };
 }

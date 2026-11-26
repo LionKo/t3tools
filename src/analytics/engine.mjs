@@ -30,7 +30,7 @@ function parseResolvedItems(raw) {
   return { ids, sessions };
 }
 
-export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter, runtimeUpdatesAdapter = null, folderSync = null }) {
+export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter, runtimeUpdatesAdapter = null, folderSync = null, deferFolderSync = false }) {
   const started = Date.now();
   const monitor = createErrorAlerts(started);
   let ackTsMs = Number(store.getMeta?.('error_ack_ts_ms')) || 0;
@@ -224,15 +224,29 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     return runtimeUpdatesAdapter.checkNow(now);
   }
   function tickAlerts(now = Date.now()) {
-    syncAll();
+    syncAll({ nonBlocking: true });
     const cfg = settings.get();
-    const { allRequests } = getCachedHistory(cfg.anomalyConfig);
-    const localRequests = allRequests.filter(r => !r.isRemote);
     const resolvedState = getResolvedState();
     const since = Math.max(started, now - 1800000);
+    const hasIndexedAlertQueries = typeof store.listLocalAlertCandidates === 'function' &&
+      typeof store.listLocalTodayIncidentsWithRecovery === 'function';
+
+    let fallbackLocalRequests = null;
+    const getFallbackLocalRequests = () => {
+      if (fallbackLocalRequests === null) {
+        const { allRequests } = getCachedHistory(cfg.anomalyConfig);
+        fallbackLocalRequests = allRequests.filter(r => !r.isRemote);
+      }
+      return fallbackLocalRequests;
+    };
+
     const events = [];
-    for (const row of localRequests) {
-      if (row.timestampMs < since) break;
+    const alertSource = hasIndexedAlertQueries ? store.listLocalAlertCandidates(since) : getFallbackLocalRequests();
+    for (const row of alertSource) {
+      if (row.timestampMs < since) {
+        if (hasIndexedAlertQueries) continue;
+        break;
+      }
       if (row.status === 'error' || (row.retries > 0 && ['region','rate-limit'].includes(row.errorCode))) {
         if (!isErrorResolved(row, ackTsMs, resolvedState)) events.push(row);
       }
@@ -250,7 +264,15 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const revision = store.getRevision();
     const todayKey = formatLocalDay(now);
     if (revision !== countRevision || countDay !== todayKey || nextAlertSeq !== prevAlertSeq) {
-      const { summary } = buildErrorInsights(localRequests, { match: () => true }, { errorOnlyToday: true, includeRetried: true }, [], ackTsMs, now, resolvedState);
+      let todayRows;
+      if (hasIndexedAlertQueries) {
+        const startOfToday = new Date(now);
+        startOfToday.setHours(0, 0, 0, 0);
+        todayRows = store.listLocalTodayIncidentsWithRecovery(+startOfToday);
+      } else {
+        todayRows = getFallbackLocalRequests();
+      }
+      const { summary } = buildErrorInsights(todayRows, { match: () => true }, { errorOnlyToday: true, includeRetried: true }, [], ackTsMs, now, resolvedState);
       const unresolvedFailedRuns = monitor.snapshot().recentAlerts
         .filter(a => a.errorCode === 'failed' && formatLocalDay(a.createdAtMs) === todayKey)
         .filter(a => !isErrorResolved({ id: getFailedRunResolveId(a), timestampMs: a.createdAtMs, t3ThreadId: a.t3ThreadId }, ackTsMs, resolvedState))
@@ -330,21 +352,31 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
   // Sliding-window streaming TPS sampler keyed by messageId (fixes P2 #12)
   const streamingSamples = new Map(); // messageId -> { chars, atMs, emaTps }
 
-  function syncAll({ force = false } = {}) {
+  function syncAll({ force = false, includeFolderSync = !deferFolderSync, nonBlocking = false } = {}) {
     const now = Date.now();
+    if (!force && store.isWriteBusy?.()) return;
     if (!force && now - lastSyncAtMs < SYNC_MIN_INTERVAL_MS) return;
     lastSyncAtMs = now;
-    try { antigravityAdapter.syncAll(); } catch {}
-    try { codexAdapter.syncAll(); } catch {}
-    // Reconcile stored requests whenever T3 Code resolves nativeSessionId -> t3ThreadId (fixes P1 #3)
-    try {
-      const idx = t3State.readThreadIndex();
-      store.syncThreadLinks(idx.nativeToThread);
-    } catch {}
-    // Run opt-in multi-machine folder sync (throttled internally unless forced)
-    try {
-      folderSync?.sync({ force, now });
-    } catch {}
+    const runAdapters = () => {
+      try { antigravityAdapter.syncAll(); } catch {}
+      try { codexAdapter.syncAll(); } catch {}
+      // Reconcile stored requests whenever T3 Code resolves nativeSessionId -> t3ThreadId (fixes P1 #3)
+      try {
+        const idx = t3State.readThreadIndex();
+        store.syncThreadLinks(idx.nativeToThread);
+      } catch {}
+    };
+    if (nonBlocking && typeof store.runNonBlockingWrite === 'function') {
+      store.runNonBlockingWrite(runAdapters);
+    } else {
+      runAdapters();
+    }
+    // Run opt-in multi-machine folder sync synchronously only when not offloaded to async daemon scheduler
+    if (includeFolderSync) {
+      try {
+        folderSync?.sync({ force, now });
+      } catch {}
+    }
   }
 
   function getCachedHistory(anomalyConfig) {

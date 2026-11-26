@@ -2509,9 +2509,17 @@ namespace T3ToolsTray
             try
             {
                 Directory.CreateDirectory(_pluginDataDir);
+                string crashReportDir = Path.Combine(_pluginDataDir, "crash-reports").TrimEnd('\\');
+                Directory.CreateDirectory(crashReportDir);
                 var psi = new ProcessStartInfo();
                 psi.FileName = nodeExe;
-                psi.Arguments = string.Format("\"{0}\" start --tray-host --patch-debug-arg", cliPath);
+                // --no-maglev is a precautionary mitigation attempt against repeated 0xC0000409 exits on Node v24;
+                // --report-on-fatalerror captures Node-initiated fatal reports (direct OS __fastfail requires external dumps).
+                psi.Arguments = string.Format(
+                    "--no-maglev --report-on-fatalerror \"--report-directory={0}\" \"{1}\" start --tray-host --patch-debug-arg",
+                    crashReportDir,
+                    cliPath
+                );
                 psi.WorkingDirectory = Path.GetDirectoryName(Path.GetDirectoryName(cliPath));
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
@@ -2701,7 +2709,7 @@ namespace T3ToolsTray
             if (pid <= 0 || string.IsNullOrEmpty(started)) return false;
             try
             {
-                var status = HttpGetJson(url + "/api/health", 1200);
+                var status = HttpGetJson(url + "/api/health", 2500);
                 if (status != null && GetBool(status, "ok", false))
                 {
                     var payload = GetDict(status, "data");
@@ -2783,7 +2791,11 @@ namespace T3ToolsTray
                 else
                 {
                     _healthySince = DateTime.MinValue;
-                    if (++_healthMisses >= 3) QueueRecovery(false);
+                    if (++_healthMisses >= 5)
+                    {
+                        TrayLog.Event("health probe failed 5 consecutive times, scheduling recovery", true);
+                        QueueRecovery(false);
+                    }
                 }
             }
             if (healthy)

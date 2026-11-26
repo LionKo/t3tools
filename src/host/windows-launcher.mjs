@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, promises as fsp, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync, spawn } from 'node:child_process';
+import { spawnSync, spawn, execFile } from 'node:child_process';
 import { atomicWriteJson } from '../core/settings.mjs';
 
 export const DEBUG_FLAG = '--remote-debugging-port=0';
@@ -76,6 +76,82 @@ function runPowerShell(script, extraEnv = {}) {
     return { ok: false, stdout: (res.stdout || '').trim(), stderr: (res.stderr || res.error?.message || '').trim() };
   }
   return { ok: true, stdout: (res.stdout || '').trim(), stderr: '' };
+}
+
+function runPowerShellAsync(script, extraEnv = {}, { signal } = {}) {
+  return new Promise(resolveResult => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 12000,
+        signal,
+        env: { ...process.env, ...extraEnv }
+      },
+      (err, stdout, stderr) => {
+        if (err) {
+          resolveResult({ ok: false, stdout: String(stdout || '').trim(), stderr: String(stderr || err.message || '').trim() });
+          return;
+        }
+        resolveResult({ ok: true, stdout: String(stdout || '').trim(), stderr: '' });
+      }
+    );
+  });
+}
+
+async function resolveShortcutSearchDirsAsync(paths, { runner = runPowerShellAsync, sandbox = false, signal } = {}) {
+  const dirs = new Set([
+    join(paths.home, 'Desktop'),
+    join(paths.appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs'),
+    join(paths.appData, 'Microsoft', 'Internet Explorer', 'Quick Launch', 'User Pinned', 'TaskBar')
+  ]);
+
+  if (!sandbox && process.platform === 'win32') {
+    const ps = `[Console]::OutputEncoding=[Text.Encoding]::UTF8; @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('StartMenu')) | Where-Object { $_ } | ConvertTo-Json -Compress`;
+    const res = await runner(ps, {}, { signal });
+    if (res.ok && res.stdout) {
+      try {
+        const parsed = JSON.parse(res.stdout);
+        for (const d of Array.isArray(parsed) ? parsed : [parsed]) {
+          if (typeof d === 'string' && d.trim()) dirs.add(d.trim());
+        }
+      } catch {}
+    }
+  }
+  return [...dirs];
+}
+
+async function findT3ShortcutCandidatesAsync(paths, opts = {}) {
+  const dirs = await resolveShortcutSearchDirsAsync(paths, opts);
+  const results = new Set();
+  const signal = opts?.signal;
+
+  async function walk(dir, depth = 0) {
+    if (!dir || depth > 2 || signal?.aborted) return;
+    let entries = [];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (signal?.aborted) return;
+      const full = join(dir, e.name);
+      if (e.isDirectory() && (/t3/i.test(e.name) || depth === 0)) {
+        await walk(full, depth + 1);
+      } else if (e.isFile() && /\.lnk$/i.test(e.name) && /t3\s*code|t3code/i.test(e.name)) {
+        results.add(full);
+      }
+    }
+  }
+
+  for (const d of dirs) {
+    if (signal?.aborted) break;
+    await walk(d, 0);
+  }
+  return [...results];
 }
 
 export function resolveShortcutSearchDirs(paths, { runner = runPowerShell, sandbox = false } = {}) {
@@ -649,6 +725,280 @@ Write-Output $count
   }
 
   const verified = inspectShortcuts(paths, { runner, sandbox });
+  const verifiedMap = new Map(verified.shortcuts.map(s => [s.path, s]));
+  let verifiedPatched = 0;
+
+  for (const item of toUpdate) {
+    const after = verifiedMap.get(item.path);
+    if (after?.hasDebugFlag) verifiedPatched++;
+  }
+
+  return {
+    ok: verifiedPatched === toUpdate.length,
+    patched: verifiedPatched,
+    alreadyPatched,
+    error: verifiedPatched === toUpdate.length ? '' : '部分快捷方式未通过写入校验',
+    shortcuts: verified.shortcuts
+  };
+}
+
+export async function inspectShortcutsAsync(paths, { runner = runPowerShellAsync, sandbox = false, signal } = {}) {
+  const candidates = await findT3ShortcutCandidatesAsync(paths, { runner, sandbox, signal });
+  if (!candidates.length) return { ok: true, shortcuts: [], error: '' };
+  const vbsPath = paths.launcherVbsPath || join(paths.pluginDataDir || '', 'launch-t3.vbs');
+
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$paths = $env:T3TOOLS_SHORTCUTS | ConvertFrom-Json
+$ws = New-Object -ComObject WScript.Shell
+$out = @()
+foreach ($p in $paths) {
+  if (Test-Path -LiteralPath $p) {
+    $sc = $ws.CreateShortcut($p)
+    $out += [PSCustomObject]@{
+      path = $p
+      target = $sc.TargetPath
+      arguments = $sc.Arguments
+      workingDirectory = $sc.WorkingDirectory
+      iconLocation = $sc.IconLocation
+    }
+  }
+}
+$out | ConvertTo-Json -Compress -Depth 4
+`;
+  const res = await runner(ps, { T3TOOLS_SHORTCUTS: JSON.stringify(candidates) }, { signal });
+  if (!res.ok) {
+    return { ok: false, shortcuts: [], error: res.stderr || '读取快捷方式失败' };
+  }
+  if (!res.stdout) return { ok: true, shortcuts: [], error: '' };
+
+  try {
+    const parsed = JSON.parse(res.stdout);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    const shortcuts = arr
+      .filter(item => item && item.path && (isVerifiedT3Target(item.target) || isAnyWrapperShortcut(item.target, item.arguments)))
+      .map(item => {
+        const isWrapper = isWrapperShortcut(item.target, item.arguments, vbsPath);
+        const isLegacyWrapper = !isWrapper && isAnyWrapperShortcut(item.target, item.arguments);
+        const fixedPort = parseDebugPortFromArgs(item.arguments || '');
+        return {
+          path: item.path,
+          target: item.target || '',
+          arguments: item.arguments || '',
+          workingDirectory: item.workingDirectory || '',
+          iconLocation: item.iconLocation || '',
+          isWrapper,
+          isLegacyWrapper,
+          hasDebugFlag: fixedPort !== null,
+          fixedPort: fixedPort && fixedPort > 0 ? fixedPort : null
+        };
+      });
+    return { ok: true, shortcuts, error: '' };
+  } catch {
+    return { ok: false, shortcuts: [], error: '解析快捷方式信息失败' };
+  }
+}
+
+export async function patchT3LaunchersAsync(paths, {
+  runner = runPowerShellAsync,
+  sandbox = false,
+  nodeExe = process.execPath,
+  cliPath = DEFAULT_CLI_PATH,
+  signal,
+  shouldProceed = null
+} = {}) {
+  const inspected = await inspectShortcutsAsync(paths, { runner, sandbox, signal });
+  if (!inspected.ok) {
+    return { ok: false, patched: 0, alreadyPatched: 0, error: inspected.error, shortcuts: [] };
+  }
+  const shortcuts = inspected.shortcuts;
+  if (!shortcuts.length) {
+    return {
+      ok: false,
+      patched: 0,
+      alreadyPatched: 0,
+      error: '未在桌面、开始菜单或任务栏找到指向 T3 Code 可执行文件的快捷方式',
+      shortcuts: []
+    };
+  }
+  if (signal?.aborted || (typeof shouldProceed === 'function' && shouldProceed() === false)) {
+    return { ok: true, patched: 0, alreadyPatched: shortcuts.filter(s => s.isWrapper).length, error: '', shortcuts };
+  }
+
+  const vbsPath = writeWrapperVbs(paths, { nodeExe, cliPath });
+  const wscriptPath = getWscriptPath();
+  const backup = loadBackup(paths.launcherBackupPath);
+  const fallbackExe = findT3Executable(paths);
+  const toUpdate = [];
+
+  for (const sc of shortcuts) {
+    if (sc.isWrapper) continue;
+    const prevEntry = backup.managed[sc.path];
+    const originalTarget = sc.isLegacyWrapper
+      ? (prevEntry?.originalTarget || fallbackExe || '')
+      : sc.target;
+    if (!originalTarget) continue;
+    const cleanedArgs = sc.isLegacyWrapper
+      ? extractExtraArgsFromWrapper(sc.arguments || '')
+      : (prevEntry?.mode === 'arg'
+          ? removeDebugArg(sc.arguments || '', prevEntry.addedFlag || DEBUG_FLAG)
+          : (sc.arguments || '').trim());
+    const wrapperArgs = cleanedArgs
+      ? `//B //NoLogo "${vbsPath}" ${cleanedArgs}`
+      : `//B //NoLogo "${vbsPath}"`;
+    const iconLocation = (sc.iconLocation && !/^,\s*0$/.test(sc.iconLocation.trim()))
+      ? sc.iconLocation
+      : `${originalTarget},0`;
+
+    toUpdate.push({
+      path: sc.path,
+      target: wscriptPath,
+      arguments: wrapperArgs,
+      iconLocation,
+      workingDirectory: sc.workingDirectory || dirname(originalTarget),
+      originalTarget,
+      originalArguments: cleanedArgs,
+      originalIconLocation: prevEntry?.originalIconLocation ?? (sc.isLegacyWrapper ? `${originalTarget},0` : (sc.iconLocation || '')),
+      originalWorkingDirectory: prevEntry?.originalWorkingDirectory ?? sc.workingDirectory ?? dirname(originalTarget)
+    });
+  }
+
+  if (toUpdate.length === 0) {
+    return {
+      ok: true,
+      patched: 0,
+      alreadyPatched: shortcuts.filter(s => s.isWrapper).length,
+      vbsPath,
+      error: '',
+      shortcuts
+    };
+  }
+
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$items = $env:T3TOOLS_UPDATES | ConvertFrom-Json
+$ws = New-Object -ComObject WScript.Shell
+$count = 0
+foreach ($item in $items) {
+  if (Test-Path -LiteralPath $item.path) {
+    $sc = $ws.CreateShortcut($item.path)
+    $sc.TargetPath = $item.target
+    $sc.Arguments = $item.arguments
+    $sc.IconLocation = $item.iconLocation
+    if ($item.workingDirectory) { $sc.WorkingDirectory = $item.workingDirectory }
+    $sc.Save()
+    $count++
+  }
+}
+Write-Output $count
+`;
+  for (const item of toUpdate) {
+    backup.managed[item.path] = {
+      mode: 'wrapper',
+      previousArg: backup.managed[item.path]?.mode === 'arg' ? backup.managed[item.path].addedFlag : backup.managed[item.path]?.previousArg,
+      vbsPath,
+      originalTarget: item.originalTarget,
+      originalIconLocation: item.originalIconLocation,
+      originalWorkingDirectory: item.originalWorkingDirectory,
+      patchedAtMs: Date.now()
+    };
+  }
+  atomicWriteJson(paths.launcherBackupPath, backup);
+  const res = await runner(ps, { T3TOOLS_UPDATES: JSON.stringify(toUpdate) }, { signal });
+  if (!res.ok) {
+    return { ok: false, patched: 0, alreadyPatched: 0, vbsPath, error: res.stderr || '写入快捷方式失败', shortcuts };
+  }
+
+  const verified = await inspectShortcutsAsync(paths, { runner, sandbox, signal });
+  const verifiedMap = new Map(verified.shortcuts.map(s => [s.path, s]));
+  let verifiedPatched = 0;
+  for (const item of toUpdate) {
+    const after = verifiedMap.get(item.path);
+    if (after?.isWrapper) verifiedPatched++;
+  }
+  return {
+    ok: verifiedPatched === toUpdate.length,
+    patched: verifiedPatched,
+    alreadyPatched: shortcuts.filter(s => s.isWrapper).length,
+    vbsPath,
+    error: verifiedPatched === toUpdate.length ? '' : '部分快捷方式未通过写入校验',
+    shortcuts: verified.shortcuts
+  };
+}
+
+export async function patchT3ShortcutsDebugArgAsync(paths, { runner = runPowerShellAsync, sandbox = false, signal, shouldProceed = null } = {}) {
+  const inspected = await inspectShortcutsAsync(paths, { runner, sandbox, signal });
+  if (!inspected.ok) {
+    return { ok: false, patched: 0, alreadyPatched: 0, error: inspected.error, shortcuts: [] };
+  }
+  const shortcuts = inspected.shortcuts;
+  if (!shortcuts.length) {
+    return {
+      ok: false,
+      patched: 0,
+      alreadyPatched: 0,
+      error: '未在桌面、开始菜单或任务栏找到指向 T3 Code 可执行文件的快捷方式',
+      shortcuts: []
+    };
+  }
+  // Re-check preference/shutdown state AFTER async inspection before mutating shortcuts
+  if (signal?.aborted || (typeof shouldProceed === 'function' && shouldProceed() === false)) {
+    return { ok: true, patched: 0, alreadyPatched: shortcuts.filter(s => s.isWrapper || s.isLegacyWrapper || s.hasDebugFlag).length, error: '', shortcuts };
+  }
+
+  const backup = loadBackup(paths.launcherBackupPath);
+  const toUpdate = [];
+  let alreadyPatched = 0;
+
+  for (const sc of shortcuts) {
+    if (sc.isWrapper || sc.isLegacyWrapper || sc.hasDebugFlag) {
+      alreadyPatched++;
+      continue;
+    }
+    const nextArgs = injectDebugArg(sc.arguments || '');
+    toUpdate.push({
+      path: sc.path,
+      target: sc.target,
+      arguments: nextArgs,
+      iconLocation: sc.iconLocation || '',
+      workingDirectory: sc.workingDirectory || dirname(sc.target)
+    });
+  }
+
+  if (toUpdate.length === 0) {
+    return { ok: true, patched: 0, alreadyPatched, error: '', shortcuts };
+  }
+
+  const ps = `
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$items = $env:T3TOOLS_UPDATES | ConvertFrom-Json
+$ws = New-Object -ComObject WScript.Shell
+$count = 0
+foreach ($item in $items) {
+  if (Test-Path -LiteralPath $item.path) {
+    $sc = $ws.CreateShortcut($item.path)
+    $sc.Arguments = $item.arguments
+    if ($item.workingDirectory) { $sc.WorkingDirectory = $item.workingDirectory }
+    $sc.Save()
+    $count++
+  }
+}
+Write-Output $count
+`;
+  for (const item of toUpdate) {
+    backup.managed[item.path] = {
+      mode: 'arg',
+      addedFlag: DEBUG_FLAG,
+      patchedAtMs: Date.now()
+    };
+  }
+  atomicWriteJson(paths.launcherBackupPath, backup);
+  const res = await runner(ps, { T3TOOLS_UPDATES: JSON.stringify(toUpdate) }, { signal });
+  if (!res.ok) {
+    return { ok: false, patched: 0, alreadyPatched, error: res.stderr || '写入快捷方式失败', shortcuts };
+  }
+
+  const verified = await inspectShortcutsAsync(paths, { runner, sandbox, signal });
   const verifiedMap = new Map(verified.shortcuts.map(s => [s.path, s]));
   let verifiedPatched = 0;
 

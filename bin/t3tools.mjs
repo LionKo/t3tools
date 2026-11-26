@@ -286,9 +286,10 @@ async function cmdDoctor() {
 }
 
 async function cmdSnapshot() {
-  const ctx = createRuntimeContext();
+  const ctx = createRuntimeContext({}, { deferFolderSync: true });
   try {
-    ctx.engine.syncAll({ force: true });
+    ctx.engine.syncAll({ force: true, includeFolderSync: false });
+    try { await ctx.folderSync.syncAsync({ force: true }); } catch {}
     const live = ctx.engine.getLiveThreadSnapshot('');
     const dash = ctx.engine.getDashboardData({ preset: 'weeklyQuota', pageSize: 10 });
     console.log(JSON.stringify({
@@ -323,6 +324,7 @@ async function cmdSnapshot() {
       diagnostics: dash.diagnostics
     }, null, 2));
   } finally {
+    ctx.folderSync.stop?.();
     ctx.close();
   }
 }
