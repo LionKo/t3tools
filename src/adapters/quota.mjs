@@ -60,6 +60,27 @@ function classifyHealth(minRemainingPercent) {
   return 'healthy';
 }
 
+function isProviderCacheSnapshot(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  if (typeof parsed.instanceId === 'string' && parsed.instanceId.trim()) return true;
+  if (typeof parsed.driver === 'string' && parsed.driver.trim()) return true;
+  if (parsed.usageLimits && typeof parsed.usageLimits === 'object' && !Array.isArray(parsed.usageLimits)) return true;
+  return false;
+}
+
+function resolveUnavailableInfo(driver, parsed, windowsCount) {
+  if (windowsCount > 0) return null;
+  if (parsed?.usageLimits?.unavailable) return parsed.usageLimits.unavailable;
+  if (driver === 'antigravity' && parsed && !parsed.usageLimits) {
+    return {
+      reason: 'not_reported',
+      shortMessage: 'T3 未上报额度',
+      message: 'T3 Code 当前版本未上报 Antigravity 额度（本地 Token/费用统计正常）'
+    };
+  }
+  return null;
+}
+
 function groupWindowsByPool(windows = []) {
   const byPool = new Map();
   for (const w of windows) {
@@ -107,7 +128,7 @@ export function createQuotaAdapter({ paths, store, t3State, codexAdapter }) {
         } catch {
           continue;
         }
-        if (!parsed || typeof parsed !== 'object') continue;
+        if (!isProviderCacheSnapshot(parsed)) continue;
         const instanceId = String(parsed.instanceId || file.slice(0, -5));
         cacheByInstance.set(instanceId, parsed);
       }
@@ -260,7 +281,7 @@ export function createQuotaAdapter({ paths, store, t3State, codexAdapter }) {
         avgRemainingPercent,
         health: classifyHealth(minRemainingPercent),
         nextResetMs,
-        unavailable: windows.length === 0 ? (parsed?.usageLimits?.unavailable || null) : null,
+        unavailable: resolveUnavailableInfo(driver, parsed, windows.length),
         pools: groupWindowsByPool(windows),
         windows
       });

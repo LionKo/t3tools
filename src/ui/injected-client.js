@@ -1388,7 +1388,13 @@
     }
     if (partialRequestsOnly && dashState.tab==='requests' && refreshLedgerResults(overlayMount.contentEl,lastDash,dashState)){
       const badge=overlayMount.contentEl.querySelector('[data-pt-tab-anom-count]');
-      if(badge)badge.textContent=lastDash.anomalySummary.total;
+      if(badge){
+        const anomTotal=Number(lastDash?.anomalySummary?.total || 0);
+        badge.textContent=anomTotal>0?String(anomTotal):'';
+        badge.setAttribute('data-tone',anomTotal>0?'danger':'muted');
+        badge.style.display=anomTotal>0?'':'none';
+        badge.hidden=anomTotal<=0;
+      }
       wireLedger();
       return;
     }

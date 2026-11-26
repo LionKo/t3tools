@@ -138,6 +138,15 @@ test('both inline standalone scripts and shared ledger renderers handle data, de
   const list=render(data,{});
   for(const cls of ['pt-led-head-card','pt-led-vias','pt-led-hscroll','pt-led-export','ttft lc-opt2'])assert.ok(list.includes(cls),cls);
   for(const removed of ['pt-led-strip','pt-led-trend','pt-led-speed'])assert.equal(list.includes(removed),false,'requests should not duplicate '+removed);
+  assert.equal(list.includes('data-pt-anomaly-count'),false,'zero anomalies should not show 0 count in filter');
+  assert.ok(list.includes('>掉缓存</button>'));
+  const listWithAnom=render({...data,anomalySummary:{total:2}},{});
+  assert.ok(listWithAnom.includes('掉缓存 <b data-pt-anomaly-count>2</b>'));
+  assert.ok(html.includes('id="nav-badge-anomalies" data-tone="danger" hidden style="display:none"></span>'));
+  const dashZeroAnom=renderDashboardHtml({...data,anomalySummary:{total:0}},{tab:'requests'});
+  assert.ok(dashZeroAnom.includes('data-pt-tab-anom-count hidden style="display:none"></span>'));
+  const dashWithAnom=renderDashboardHtml({...data,anomalySummary:{total:3}},{tab:'requests'});
+  assert.ok(dashWithAnom.includes('data-tone="danger" data-pt-tab-anom-count>3</span>'));
   const detail=render(data,{detailId:'d'});assert.ok(detail.includes('pt-led-dl'));assert.ok(detail.includes('&quot;quote&quot;'));assert.ok(detail.includes('data-pt-led-back'));
   // Plan A split: Overview owns interactive KPI strip, trend + rank drill-down, account chip toggle, and heatmap error gating
   const ov = renderOverviewCoreHtml(data, { account: 'main', heatmapMetric: 'errors' });

@@ -250,7 +250,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         <button type="button" class="nav-item" data-view="requests">
           <svg class="nav-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h12M4 10h12M4 14.5h8"/></svg>
           <span>请求明细</span>
-          <span class="nav-badge" id="nav-badge-anomalies">0</span>
+          <span class="nav-badge" id="nav-badge-anomalies" data-tone="danger" hidden style="display:none"></span>
         </button>
       </nav>
 
@@ -1129,8 +1129,10 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         }
         const anomTotal = dashData.anomalySummary?.total || 0;
         if (badgeAnomEl) {
-          badgeAnomEl.textContent = String(anomTotal);
+          badgeAnomEl.textContent = anomTotal > 0 ? String(anomTotal) : '';
           badgeAnomEl.setAttribute('data-tone', anomTotal > 0 ? 'danger' : 'muted');
+          badgeAnomEl.style.display = anomTotal > 0 ? '' : 'none';
+          badgeAnomEl.hidden = anomTotal <= 0;
         }
       }
 

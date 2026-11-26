@@ -3264,6 +3264,11 @@ function renderCompactOverviewQuotasHtml(quotas, { preferredPool, now, unresolve
 
   const g = quotas[0];
   if (!g.windows.length) {
+    if (g.unavailable?.reason === 'not_reported') {
+      const shortMsg = g.unavailable.shortMessage || 'T3 未上报额度';
+      const tip = g.unavailable.message || shortMsg;
+      return `<div class="pt-ov-empty" title="${esc(tip)}">${esc(shortMsg)}</div>`;
+    }
     return `<div class="pt-ov-empty">暂无额度</div>`;
   }
 
@@ -3604,7 +3609,9 @@ function renderOverviewQuotaStripHtml(data, uiState = {}) {
     const isActive = activeAccount === g.accountId;
     const tip = isActive
       ? `已按 ${g.displayName} 筛选概览 · 点击恢复全部账号`
-      : `点击按账号 ${g.displayName} 筛选用量概览（最低剩余 ${minRem != null ? minRem + '%' : '-'}）`;
+      : minRem != null
+        ? `点击按账号 ${g.displayName} 筛选用量概览（最低剩余 ${minRem}%）`
+        : `点击按账号 ${g.displayName} 筛选用量概览（${g.unavailable?.message || '暂无额度数据'}）`;
     return `
       <button type="button" class="pt-quota-chip${isActive ? ' active' : ''}" data-pt-ov-account="${esc(g.accountId)}" aria-pressed="${isActive ? 'true' : 'false'}" title="${esc(tip)}">
         <span class="pt-dot" style="background:${esc(meta.color)};"></span>
@@ -3680,7 +3687,9 @@ function renderAccountQuotaCardHtml(g, { now, hideEmail, usage }) {
       ? '<span class="pt-badge pt-badge-warn">偏紧</span>'
       : g.health === 'healthy'
         ? '<span class="pt-badge pt-badge-ok">健康</span>'
-        : '<span class="pt-badge pt-badge-muted">无数据</span>';
+        : g.unavailable?.reason === 'not_reported'
+          ? '<span class="pt-badge pt-badge-muted">未上报</span>'
+          : '<span class="pt-badge pt-badge-muted">无数据</span>';
 
   const auth = g.auth || {};
   const emailShown = auth.email ? (hideEmail ? maskEmail(auth.email) : auth.email) : '';
@@ -3783,7 +3792,9 @@ function renderQuotaMatrixTableHtml(groups, { now, hideEmail, accountUsage }) {
         ? '<span class="pt-badge pt-badge-warn">偏紧</span>'
         : g.health === 'healthy'
           ? '<span class="pt-badge pt-badge-ok">健康</span>'
-          : '<span class="pt-badge pt-badge-muted">无数据</span>';
+          : g.unavailable?.reason === 'not_reported'
+            ? '<span class="pt-badge pt-badge-muted">未上报</span>'
+            : '<span class="pt-badge pt-badge-muted">无数据</span>';
 
     const renderCellWin = w => {
       if (!w) return '<span class="pt-muted">-</span>';
@@ -4310,10 +4321,11 @@ function ledControls(data,s) {
   const codes=new Set(Object.keys(data?.errorInsights?.summary?.byCode || {}));
   if(s.errorCode && s.errorCode!=='all') codes.add(s.errorCode);
   const active=s.onlyAnomalies?'anomaly':s.status || 'all';
+  const anomTotal=Number(data?.anomalySummary?.total || 0);
   return ((f.drivers?.length>1 || (s.driver && s.driver!=='all'))?ledSelect('driver','驱动',(f.drivers || []).map(d=>[d,d]),s.driver):'')+
     ledSelect('model','模型',[...models].map(([m,n])=>[m,m+' · '+fmtTokens(n)]),s.model)+
     (codes.size?ledSelect('errorCode','错误类型',[...codes].map(c=>[c,ERROR_CODE_LABELS[c] || c]),s.errorCode):'')+
-    '<span class="pt-led-segs">'+[['all','全部'],['error','失败'],['retried','重试'],['anomaly','掉缓存 <b data-pt-anomaly-count>'+Number(data?.anomalySummary?.total || 0)+'</b>']].map(([v,n])=>ledBtn('status',v,n,active===v)).join('')+'</span>'+
+    '<span class="pt-led-segs">'+[['all','全部'],['error','失败'],['retried','重试'],['anomaly',anomTotal>0?'掉缓存 <b data-pt-anomaly-count>'+anomTotal+'</b>':'掉缓存']].map(([v,n])=>ledBtn('status',v,n,active===v)).join('')+'</span>'+
     ['day','errorCode','status','requestId'].filter(k=>s[k] && s[k]!=='all' && (k!=='status' || ['success','error_or_retried'].includes(s[k]))).map(k=>ledBtn('clear',k,esc(({success:'成功',error_or_retried:'失败或重试'}[s[k]] || s[k]))+' ×')).join('');
 }
 function ledStrip(t) {
@@ -4938,7 +4950,7 @@ function renderDashboardHtml(data, uiState, {
             <button type="button" class="nav-item${tab === 'requests' ? ' active' : ''}" data-pt-tab="requests">
               <svg class="nav-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h12M4 10h12M4 14.5h8"/></svg>
               <span>请求明细</span>
-              <span class="nav-badge" data-tone="${anomTotal > 0 ? 'danger' : 'muted'}" data-pt-tab-anom-count>${anomTotal}</span>
+              <span class="nav-badge" data-tone="${anomTotal > 0 ? 'danger' : 'muted'}" data-pt-tab-anom-count${anomTotal > 0 ? '' : ' hidden style="display:none"'}>${anomTotal > 0 ? anomTotal : ''}</span>
             </button>
           </nav>
 

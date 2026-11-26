@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { startDaemon } from '../src/host/daemon.mjs';
+import { createQuotaAdapter } from '../src/adapters/quota.mjs';
 import { buildClientBundle } from '../src/ui/bundle.mjs';
 
 test('assembled client bundle has valid JS syntax and handles desktop Requests tab click without backdrop hijack', () => {
@@ -820,5 +821,80 @@ test('injected client isolates composer TPS per conversation across SPA switches
     sandbox.__t3Tools?.dispose?.();
     for (const id of timers) clearTimeout(id);
     for (const id of intervals) clearInterval(id);
+  }
+});
+
+test('quota adapter ignores non-provider probe caches and surfaces clear Antigravity not-reported hint', () => {
+  const root = mkdtempSync(join(tmpdir(), 't3tools-quota-probe-'));
+  try {
+    const t3Caches = join(root, 'caches');
+    mkdirSync(t3Caches, { recursive: true });
+
+    // Non-provider local probe file (like T3 Code's codex-local-probe.json) must be ignored
+    writeFileSync(join(t3Caches, 'codex-local-probe.json'), JSON.stringify({
+      executablePath: 'C:\\Users\\Test\\codex.cmd',
+      fingerprint: 'fp:1',
+      version: '0.172.0'
+    }));
+    // Antigravity instance without usageLimits (e.g. T3 Code 0.1.13+ omitting Antigravity quota polling)
+    writeFileSync(join(t3Caches, 'Ultra.json'), JSON.stringify({
+      instanceId: 'Ultra',
+      driver: 'antigravity',
+      displayName: 'Antigravity',
+      enabled: true,
+      status: 'ready',
+      checkedAt: new Date().toISOString()
+    }));
+
+    const quotaAdapter = createQuotaAdapter({
+      paths: { t3Caches },
+      store: { saveQuotaSnapshots() {} },
+      t3State: {
+        readProviderInstances: () => new Map([
+          ['Ultra', { driver: 'antigravity', displayName: 'Antigravity', enabled: true }]
+        ])
+      }
+    });
+
+    const quotas = quotaAdapter.readAllQuotas(Date.now(), { persist: false });
+    assert.equal(quotas.summary.totalAccounts, 1);
+    assert.equal(quotas.groups.length, 1);
+    assert.equal(quotas.groups.some(g => g.accountId === 'codex-local-probe'), false);
+
+    const ultra = quotas.groups[0];
+    assert.equal(ultra.accountId, 'Ultra');
+    assert.equal(ultra.unavailable?.reason, 'not_reported');
+    assert.equal(ultra.unavailable?.shortMessage, 'T3 未上报额度');
+    assert.match(ultra.unavailable?.message || '', /未上报 Antigravity 额度/);
+
+    const sharedViewsSrc = readFileSync(new URL('../src/ui/shared-views.js', import.meta.url), 'utf8');
+    const renderOverview = new Function(`${sharedViewsSrc}\nreturn renderOverviewCardHtml;`)();
+    const renderDashboard = new Function(`${sharedViewsSrc}\nreturn renderDashboardHtml;`)();
+
+    const overviewHtml = renderOverview({
+      thread: { unresolved: false, accountId: 'Ultra', selectedModel: 'gemini-4-neon', phase: 'idle', phaseLabel: '空闲', steps: [] },
+      context: { accountId: 'Ultra', modelId: 'gemini-4-neon' },
+      quotas
+    }, false, false);
+    assert.ok(overviewHtml.includes('T3 未上报额度'));
+    assert.ok(overviewHtml.includes('未上报 Antigravity 额度'));
+
+    const dashPayload = {
+      range: { preset: 'weeklyQuota', status: 'fallback', start: Date.now() - 3600000, end: Date.now(), pools: [] },
+      summary: { kpis: { totalRequests: 1 }, models: [] },
+      heatmap: { days: [] },
+      anomalySummary: { total: 0, excludedCompactions: 0 },
+      facets: { accounts: ['Ultra'], models: [] },
+      accountUsage: { Ultra: { requests: 1, totalTokens: 1000, costUsd: 0.01, errors: 0 } },
+      quotas
+    };
+    const cardsHtml = renderDashboard(dashPayload, { tab: 'quotas', quotaView: 'cards' });
+    const tableHtml = renderDashboard(dashPayload, { tab: 'quotas', quotaView: 'table' });
+    assert.ok(cardsHtml.includes('未上报'));
+    assert.ok(cardsHtml.includes('T3 Code 当前版本未上报 Antigravity 额度'));
+    assert.ok(tableHtml.includes('未上报'));
+    assert.ok(tableHtml.includes('T3 Code 当前版本未上报 Antigravity 额度'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
