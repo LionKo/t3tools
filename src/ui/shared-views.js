@@ -1538,6 +1538,197 @@ const PT_SHARED_CSS = `
 .pt-sidebar-update-row:hover {
   border-color: var(--pt-accent, #6366f1);
 }
+.pt-sidebar-update-row.pt-sidebar-app-update {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 7px 8px;
+  border-radius: 9px;
+  border-color: color-mix(in srgb, var(--pt-accent, #6366f1) 52%, var(--pt-border, rgba(255,255,255,0.14)));
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--pt-accent, #6366f1) 18%, var(--pt-card, #14161b)),
+    color-mix(in srgb, var(--pt-accent, #6366f1) 9%, var(--pt-card, #14161b))
+  );
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--pt-accent, #6366f1) 14%, transparent);
+}
+.pt-sidebar-app-update-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.pt-sidebar-app-update-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--pt-fg, #f3f4f6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pt-sidebar-app-update-sub {
+  font-size: 10.5px;
+  color: var(--pt-muted, #9ca3af);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pt-sidebar-app-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+}
+.pt-sidebar-app-update-primary {
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 8px;
+  background: var(--pt-accent, #6366f1);
+  color: var(--pt-accent-fg, #ffffff);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  cursor: pointer;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pt-sidebar-app-update-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.pt-sidebar-app-update-primary:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+.pt-sidebar-app-update-secondary {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: color-mix(in srgb, var(--pt-fg, #fff) 6%, transparent);
+  color: var(--pt-fg, #f3f4f6);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1.35;
+  cursor: pointer;
+  flex: none;
+}
+.pt-sidebar-app-update-secondary:hover {
+  border-color: var(--pt-accent, #6366f1);
+}
+.pt-sidebar-app-update-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
+  overflow: hidden;
+  margin-top: 2px;
+}
+.pt-sidebar-app-update-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--pt-accent, #6366f1);
+  transition: width 180ms ease;
+}
+.side-ver-dot {
+  display: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--pt-accent, #6366f1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pt-accent, #6366f1) 24%, transparent);
+  margin-left: 2px;
+  flex: none;
+}
+.side-ver-dot.visible { display: inline-block; }
+.pt-update-banner {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 18px;
+  background: color-mix(in srgb, var(--pt-accent, #6366f1) 12%, var(--pt-card, #14161b));
+  border-bottom: 1px solid color-mix(in srgb, var(--pt-accent, #6366f1) 30%, var(--pt-border, rgba(255,255,255,.1)));
+  font-size: 12px;
+  line-height: 1.4;
+  flex: none;
+}
+.pt-update-banner.visible { display: flex; }
+.pt-update-banner-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.pt-update-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--pt-accent, #6366f1);
+  color: var(--pt-accent-fg, #fff);
+  flex: none;
+}
+.pt-update-summary {
+  color: var(--pt-fg, #f3f4f6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pt-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.pt-update-progress {
+  width: 110px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
+  overflow: hidden;
+  flex: none;
+}
+.pt-update-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--pt-accent, #6366f1);
+  transition: width 180ms ease;
+}
+.pt-update-notes {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--pt-surface, #1b1e25);
+  border: 1px solid var(--pt-border, rgba(255,255,255,.1));
+  color: var(--pt-muted, #9ca3af);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow: auto;
+}
+.pt-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  background: color-mix(in srgb, var(--pt-fg, #fff) 8%, transparent);
+  color: var(--pt-muted, #9ca3af);
+}
 .pt-sidebar-update-btn {
   appearance: none;
   border: 0;
@@ -3153,25 +3344,45 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
   let appUpdateRowHtml = '';
   if (showAppUpdateBanner) {
     const ver = String(appUpdate.latestVersion);
+    const curVer = String(appUpdate.currentVersion || '?');
     const pct = Math.max(0, Math.min(100, Number(appUpdate.progressPercent) || 0));
-    const appLabel = appUpdate.status === 'downloading'
+    const appTitle = appUpdate.status === 'downloading'
       ? `T3Tools 更新中 ${pct}%`
+      : appUpdate.status === 'verifying'
+        ? 'T3Tools 校验中...'
+        : appUpdate.status === 'ready'
+          ? 'T3Tools 正在重启更新...'
+          : `发现 T3Tools v${ver}`;
+    const appSub = appUpdate.status === 'error' && appUpdate.lastError
+      ? String(appUpdate.lastError)
+      : `v${curVer} → v${ver}${appUpdate.canAutoUpdate ? ' · 一键自动更新' : ' · 新版本已发布'}`;
+    const primaryLabel = appUpdate.status === 'downloading'
+      ? `下载中 ${pct}%`
       : (appUpdate.status === 'verifying' || appUpdate.status === 'ready')
-        ? 'T3Tools 正在重启更新...'
-        : `T3Tools v${ver} 可更新`;
+        ? '正在重启...'
+        : (appUpdate.canAutoUpdate ? '立即更新' : '前往下载');
     const appTip = appUpdate.canAutoUpdate
-      ? `T3Tools v${appUpdate.currentVersion || '?'} → v${ver} · 点击立即自动更新并重启`
-      : `T3Tools v${appUpdate.currentVersion || '?'} → v${ver} · 点击前往 GitHub Releases 下载`;
+      ? `T3Tools v${curVer} → v${ver} · 点击立即自动更新并重启`
+      : `T3Tools v${curVer} → v${ver} · 点击前往 GitHub Releases 下载`;
     const dismissBtn = appUpdateBusy
       ? ''
-      : `<button type="button" class="pt-sidebar-update-dismiss" data-pt-action="dismiss-app-update" data-pt-app-ver="${esc(ver)}" title="忽略当前版本提醒" aria-label="忽略当前版本提醒">×</button>`;
+      : `<button type="button" class="pt-sidebar-update-dismiss" data-pt-action="dismiss-app-update" data-pt-app-ver="${esc(ver)}" title="暂不提醒此版本" aria-label="暂不提醒此版本">×</button>`;
+    const progressHtml = appUpdateBusy
+      ? `<div class="pt-sidebar-app-update-bar"><div class="pt-sidebar-app-update-bar-fill" style="width:${appUpdate.status === 'verifying' ? 98 : appUpdate.status === 'ready' ? 100 : pct}%;"></div></div>`
+      : '';
     appUpdateRowHtml = `
-      <div class="pt-sidebar-update-row" data-pt-app-update="${esc(ver)}">
-        <button type="button" class="pt-sidebar-update-btn" data-pt-action="install-app-update" title="${esc(appTip)}">
+      <div class="pt-sidebar-update-row pt-sidebar-app-update" data-pt-app-update="${esc(ver)}" role="status" aria-live="polite">
+        <div class="pt-sidebar-app-update-head">
           <span class="pt-sidebar-update-dot" aria-hidden="true"></span>
-          <span class="pt-sidebar-update-text">${appUpdateBusy ? '↻' : '↑'} ${esc(appLabel)}</span>
-        </button>
-        ${dismissBtn}
+          <span class="pt-sidebar-app-update-title" title="${esc(appTip)}">${appUpdateBusy ? '↻' : '↑'} ${esc(appTitle)}</span>
+          ${dismissBtn}
+        </div>
+        <div class="pt-sidebar-app-update-sub" title="${esc(appSub)}">${esc(appSub)}</div>
+        ${progressHtml}
+        <div class="pt-sidebar-app-update-actions">
+          <button type="button" class="pt-sidebar-app-update-primary" data-pt-action="install-app-update" title="${esc(appTip)}"${appUpdateBusy ? ' disabled' : ''}>${esc(primaryLabel)}</button>
+          <button type="button" class="pt-sidebar-app-update-secondary" data-pt-action="open-app-update-settings" title="查看更新详情与检查频率设置">详情</button>
+        </div>
       </div>
     `;
   }
@@ -4672,7 +4883,151 @@ const PT_VIEW_TITLES = {
 };
 const PT_VIEWS_WITH_FILTERS = new Set(['overview', 'models', 'requests']);
 
-function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) {
+function fmtUpdateBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n <= 0) return '';
+  if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderEmbeddedAppUpdateCardHtml(statusData = null, fallbackSettings = null, version = '0.1.0') {
+  const cfg = fallbackSettings || statusData?.settings || {};
+  const updCfg = cfg.appUpdates || {};
+  const upd = statusData?.appUpdate || null;
+  const curVer = upd?.currentVersion || statusData?.version || version || '0.1.0';
+  const hasNew = Boolean(upd?.hasUpdate && upd?.latestVersion);
+  const busy = Boolean(upd && ['downloading', 'verifying', 'ready'].includes(upd.status));
+  const checking = upd?.status === 'checking';
+  const modeLabel = upd?.installMode === 'installed' ? '安装版' : upd?.installMode === 'portable' ? '便携版' : upd ? '开发模式' : '检测中';
+  const modeText = `${modeLabel}${upd?.hasBundledNode ? ' · 内置 Node' : ''}`;
+  const sizeHint = fmtUpdateBytes(upd?.downloadSize);
+  const pct = Math.max(0, Math.min(100, Number(upd?.progressPercent) || 0));
+  const autoCheck = updCfg.autoCheck !== undefined ? updCfg.autoCheck !== false : (upd ? upd.autoCheck !== false : true);
+  const intervalMins = [30, 60, 360, 1440].includes(Number(updCfg.checkIntervalMinutes))
+    ? Number(updCfg.checkIntervalMinutes)
+    : ([30, 60, 360, 1440].includes(Number(upd?.checkIntervalMinutes)) ? Number(upd.checkIntervalMinutes) : 60);
+
+  let subText = '自动从 GitHub Releases 检查更新，点击即可完成校验与重启升级';
+  if (checking) {
+    subText = '正在检查 GitHub Releases 最新版本...';
+  } else if (upd?.status === 'downloading') {
+    subText = `正在下载 v${upd.latestVersion}：${pct}%${sizeHint ? ` / ${sizeHint}` : ''}`;
+  } else if (upd?.status === 'verifying') {
+    subText = '下载完成，正在校验 SHA-256 哈希...';
+  } else if (upd?.status === 'ready') {
+    subText = '更新包已就绪，托盘程序正在接管替换并重启...';
+  } else if (upd?.status === 'error' && upd?.lastError) {
+    subText = `更新状态异常：${upd.lastError}`;
+  } else if (hasNew) {
+    subText = `发现新版本 v${upd.latestVersion}${sizeHint ? `（${upd.packageKind === 'full' ? '完整包 ' : '轻量更新 '}${sizeHint}）` : ''}${upd.canAutoUpdate ? ' · 点击「立即更新」自动升级并重启' : ` · ${upd.cannotUpdateReason || '请前往 GitHub 下载'}`}`;
+  } else if (upd?.checkedAtMs) {
+    const t = new Date(upd.checkedAtMs);
+    const hh = String(t.getHours()).padStart(2, '0');
+    const mm = String(t.getMinutes()).padStart(2, '0');
+    subText = `已是最新版本（上次检查 ${hh}:${mm}）`;
+  } else if (upd) {
+    subText = upd.canAutoUpdate
+      ? '已启用自动更新，点击「检查更新」可立即检测最新版本'
+      : (upd.cannotUpdateReason || '点击「检查更新」检测 GitHub Releases 最新版本');
+  }
+
+  const progWidth = upd?.status === 'verifying' ? 98 : upd?.status === 'ready' ? 100 : pct;
+  const installLabel = busy
+    ? (upd.status === 'downloading' ? `下载中 ${pct}%` : '正在更新...')
+    : (upd?.canAutoUpdate ? `立即更新到 v${upd.latestVersion}` : '前往下载');
+
+  return `
+      <div class="settings-group-title">应用更新</div>
+      <div class="pt-card" data-pt-app-update-card="1">
+        <div class="setting-row" style="align-items:flex-start;">
+          <div style="min-width:0;flex:1;">
+            <div class="setting-label">
+              <span>T3Tools v${esc(curVer)}</span>
+              <span class="pt-mode-chip">${esc(modeText)}</span>
+            </div>
+            <div class="setting-desc">${esc(subText)}</div>
+            ${busy ? `<div class="pt-update-progress" style="width:220px;margin-top:8px;"><div class="pt-update-progress-fill" style="width:${progWidth}%;"></div></div>` : ''}
+            ${hasNew && upd?.releaseNotes ? `<div class="pt-update-notes">${esc(upd.releaseNotes)}</div>` : ''}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;flex:none;">
+            ${hasNew ? `<button type="button" class="pt-btn pt-btn-accent" data-pt-action="install-app-update"${busy ? ' disabled' : ''}>${esc(installLabel)}</button>` : ''}
+            <button type="button" class="pt-btn" data-pt-action="check-app-update"${busy || checking ? ' disabled' : ''}>${checking ? '检查中...' : '检查更新'}</button>
+            ${hasNew ? '<button type="button" class="pt-btn" data-pt-action="open-release-url">Release 页面</button>' : ''}
+          </div>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">启动及后台自动检查更新</div>
+            <div class="setting-desc">按设定频率检查 GitHub Releases；打开看板或设置页超过 5 分钟也会自动静默复查</div>
+          </div>
+          <label class="pt-switch">
+            <input type="checkbox" data-app-update-setting="autoCheck" ${autoCheck ? 'checked' : ''} />
+            <span class="pt-switch-track"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">后台检查频率</div>
+            <div class="setting-desc">参考 Magpie，修改后立即生效（无需重启 T3Tools）</div>
+          </div>
+          <select class="pt-select" aria-label="后台检查频率" data-app-update-setting="checkIntervalMinutes" style="max-width:220px;"${autoCheck ? '' : ' disabled'}>
+            <option value="30"${intervalMins === 30 ? ' selected' : ''}>每 30 分钟</option>
+            <option value="60"${intervalMins === 60 ? ' selected' : ''}>每 1 小时（默认）</option>
+            <option value="360"${intervalMins === 360 ? ' selected' : ''}>每 6 小时</option>
+            <option value="1440"${intervalMins === 1440 ? ' selected' : ''}>每天（24 小时）</option>
+          </select>
+        </div>
+      </div>`;
+}
+
+function renderOverlayAppUpdateBannerHtml(upd, dismissedVer = '') {
+  if (!upd) return '';
+  const hasNew = Boolean(upd.hasUpdate && upd.latestVersion);
+  const busy = ['downloading', 'verifying', 'ready'].includes(upd.status);
+  const showBanner = Boolean(busy || (hasNew && !upd.isSkipped && dismissedVer !== upd.latestVersion));
+  if (!showBanner) return '';
+  const sizeHint = fmtUpdateBytes(upd.downloadSize);
+  const pct = Math.max(0, Math.min(100, Number(upd.progressPercent) || 0));
+  let pill = `v${upd.latestVersion}`;
+  let text = '';
+  let progPct = -1;
+  let installLabel = upd.canAutoUpdate ? '立即更新' : '前往下载';
+  if (upd.status === 'downloading') {
+    pill = `下载中 ${pct}%`;
+    text = `正在下载 T3Tools v${upd.latestVersion}${sizeHint ? `（${sizeHint}）` : ''}...`;
+    progPct = pct;
+    installLabel = '下载中...';
+  } else if (upd.status === 'verifying') {
+    pill = '校验中';
+    text = '正在校验 SHA-256 完整性...';
+    progPct = 98;
+    installLabel = '校验中...';
+  } else if (upd.status === 'ready') {
+    pill = '即将重启';
+    text = `T3Tools v${upd.latestVersion} 已校验就绪，正在自动替换并重启...`;
+    progPct = 100;
+    installLabel = '正在重启...';
+  } else {
+    const firstNote = String(upd.releaseNotes || '').split(/\r?\n/).map(s => s.trim()).find(Boolean) || '';
+    text = `发现新版本 v${upd.latestVersion}${sizeHint ? `（${sizeHint}）` : ''}${firstNote ? ` · ${firstNote}` : ''}`;
+  }
+  return `
+          <div class="pt-update-banner visible" data-pt-overlay-update-banner="1" role="status" aria-live="polite">
+            <div class="pt-update-banner-main">
+              <span class="pt-update-pill">${esc(pill)}</span>
+              <span class="pt-update-summary">${esc(text)}</span>
+              ${progPct >= 0 ? `<div class="pt-update-progress"><div class="pt-update-progress-fill" style="width:${progPct}%;"></div></div>` : ''}
+            </div>
+            <div class="pt-update-actions">
+              <button type="button" class="pt-btn pt-btn-accent" data-pt-action="install-app-update"${busy ? ' disabled' : ''}>${esc(installLabel)}</button>
+              <button type="button" class="pt-btn" data-pt-action="open-release-url">更新说明</button>
+              ${busy ? '' : '<button type="button" class="pt-btn" data-pt-action="skip-app-update">跳过</button>'}
+              ${busy ? '' : `<button type="button" class="icon-btn" data-pt-action="dismiss-app-update" data-pt-app-ver="${esc(upd.latestVersion)}" title="本次暂不提醒" aria-label="本次暂不提醒">×</button>`}
+            </div>
+          </div>`;
+}
+
+function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, version = '0.1.0') {
   const cfg = fallbackSettings || statusData?.settings || {};
   const alertCfg = cfg.alertConfig || {};
   const cdp = statusData?.cdp || {};
@@ -4796,6 +5151,8 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null) 
         </div>
       </div>
 
+      ${renderEmbeddedAppUpdateCardHtml(statusData, fallbackSettings, version)}
+
       <div class="settings-group-title">运行环境版本与更新</div>
       <div class="pt-card">
         ${(() => {
@@ -4869,6 +5226,7 @@ function renderDashboardHtml(data, uiState, {
   sideCollapsed = false,
   statusData = null,
   fallbackSettings = null,
+  dismissedAppUpdateVer = '',
   loading = false,
   error = '',
   toastText = ''
@@ -4904,7 +5262,7 @@ function renderDashboardHtml(data, uiState, {
 
   let activeBodyHtml = '';
   if (tab === 'settings') {
-    activeBodyHtml = renderEmbeddedSettingsHtml(statusData, fallbackSettings);
+    activeBodyHtml = renderEmbeddedSettingsHtml(statusData, fallbackSettings, version);
   } else if (!data && loading) {
     activeBodyHtml = '<div class="pt-card" style="text-align:center;padding:36px;">正在加载数据...</div>';
   } else if (!data && error) {
@@ -4919,6 +5277,10 @@ function renderDashboardHtml(data, uiState, {
     activeBodyHtml = renderOverviewCoreHtml(data, uiState);
   }
 
+  const appUpdate = statusData?.appUpdate || null;
+  const showSideUpdateDot = Boolean(appUpdate?.hasUpdate && appUpdate?.latestVersion && !appUpdate?.isSkipped);
+  const overlayUpdateBannerHtml = renderOverlayAppUpdateBannerHtml(appUpdate, dismissedAppUpdateVer);
+
   return `
     <div class="pt-dashboard${standalone ? ' standalone' : ''}">
       <div class="app-shell" data-side-collapsed="${sideCollapsed ? 'true' : 'false'}">
@@ -4928,6 +5290,7 @@ function renderDashboardHtml(data, uiState, {
               <span class="side-logo">T3</span>
               <span>T3Tools</span>
               <span class="side-ver">v${esc(version)}</span>
+              <span class="side-ver-dot${showSideUpdateDot ? ' visible' : ''}" title="发现新版本，点击前往设置更新"></span>
             </span>
           </div>
 
@@ -4988,6 +5351,7 @@ function renderDashboardHtml(data, uiState, {
                 : '<button type="button" class="pt-btn" data-pt-action="close-dashboard">关闭</button>'}
             </div>
           </header>
+          ${overlayUpdateBannerHtml}
 
           <div class="app-viewport">
             ${viewHeadHtml}

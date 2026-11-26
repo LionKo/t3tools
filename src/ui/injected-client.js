@@ -42,13 +42,14 @@
   async function callRpc(action, params = {}) {
     let controller;
     let timeout;
+    const rpcTimeoutMs = ['checkAppUpdate', 'installAppUpdate', 'checkRuntimeUpdates'].includes(action) ? 20000 : 8000;
     try {
       if (transport !== 'cdp') {
         controller = new AbortController();
         httpRequests.add(controller);
-        timeout = setTimeout(() => controller.abort(), 8000);
+        timeout = setTimeout(() => controller.abort(), rpcTimeoutMs);
       }
-      const data = await requestRpc(action, params, controller?.signal);
+      const data = await requestRpc(action, params, controller?.signal, rpcTimeoutMs);
       transportFailures = 0;
       transportState = 'connected';
       return data;
@@ -66,7 +67,7 @@
     }
   }
 
-  async function requestRpc(action, params, signal) {
+  async function requestRpc(action, params, signal, rpcTimeoutMs = 8000) {
     async function http(url, options) {
       const response = await fetch(url, { ...options, signal });
       if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status), { receivedReply: response.status < 500 });
@@ -79,7 +80,7 @@
         const timer = setTimeout(() => {
           pendingRpc.delete(id);
           reject(new Error(`RPC ${action} 超时`));
-        }, 8000);
+        }, rpcTimeoutMs);
         pendingRpc.set(id, { resolve, reject, timer });
         globalThis.__t3ToolsBridge(JSON.stringify({ id, action, params }));
       });
@@ -145,7 +146,7 @@
       if (!result.ok) throw Object.assign(new Error(result.error || '刷新失败'), { receivedReply: true });
       return result.data;
     }
-    const r = await http(`${apiBase}/api/status`);
+    const r = await http(`${apiBase}/api/status${params?.fresh ? '?fresh=1' : ''}`);
     const reply = await r.json();
     if (!reply.ok) throw Object.assign(new Error(reply.error || '请求失败'), { receivedReply: true });
     return reply.data;
@@ -1352,13 +1353,50 @@
     }
   }
 
-  async function fetchOverlayStatus() {
+  let appUpdatePollTimer = null;
+  let manualAppUpdateCheckInFlight = false;
+
+  function syncAppUpdatePoll(upd) {
+    const busy = Boolean(upd && ['checking', 'downloading', 'verifying', 'ready'].includes(upd.status));
+    if (busy && !appUpdatePollTimer && !disposed) {
+      appUpdatePollTimer = setTimeout(async () => {
+        appUpdatePollTimer = null;
+        if (disposed) return;
+        await fetchOverlayStatus({ fresh: false });
+      }, 700);
+    } else if (!busy && appUpdatePollTimer) {
+      clearTimeout(appUpdatePollTimer);
+      appUpdatePollTimer = null;
+    }
+  }
+
+  function applyAppUpdateState(nextUpd) {
+    if (!nextUpd || typeof nextUpd !== 'object') return;
+    lastAppUpdate = nextUpd;
+    if (lastLive) lastLive.appUpdate = nextUpd;
+    if (lastStatus) lastStatus = { ...lastStatus, appUpdate: nextUpd };
+    else lastStatus = { appUpdate: nextUpd };
+    syncAppUpdatePoll(nextUpd);
+    renderSidebarWidget();
+    if (dashboardOpen) renderDashboardOverlay();
+  }
+
+  async function fetchOverlayStatus({ fresh = false } = {}) {
     const initialSettings = lastSettings;
     const revision = settingsRevision;
     try {
-      const st = await callRpc('getStatus');
+      const st = await callRpc('getStatus', fresh ? { fresh: true } : {});
       if (disposed) return;
+      if (manualAppUpdateCheckInFlight && lastAppUpdate) {
+        st.appUpdate = lastAppUpdate;
+      }
       lastStatus = st;
+      if (st?.appUpdate) {
+        lastAppUpdate = st.appUpdate;
+        if (lastLive) lastLive.appUpdate = st.appUpdate;
+        syncAppUpdatePoll(st.appUpdate);
+        renderSidebarWidget();
+      }
       if (st?.settings && revision === settingsRevision && lastSettings === initialSettings) lastSettings = st.settings;
       if (dashboardOpen) renderDashboardOverlay();
     } catch {}
@@ -1402,12 +1440,16 @@
     const prevViewport = overlayMount.contentEl.querySelector('.app-viewport');
     const prevScrollTop = (!resetScroll && prevViewport) ? prevViewport.scrollTop : 0;
 
+    const effectiveStatus = lastStatus
+      ? { ...lastStatus, appUpdate: lastStatus.appUpdate ?? lastAppUpdate }
+      : (lastAppUpdate ? { appUpdate: lastAppUpdate } : null);
     const bodyContent = renderDashboardHtml(lastDash, dashState, {
       standalone: false,
       version: VERSION,
       sideCollapsed: dashSideCollapsed,
-      statusData: lastStatus,
+      statusData: effectiveStatus,
       fallbackSettings: lastSettings || lastLive?.settings,
+      dismissedAppUpdateVer,
       loading: dashLoading,
       error: dashError,
       toastText: overlayToastText
@@ -1435,7 +1477,7 @@
         openView: (view, { fetch: shouldFetch = false } = {}) => {
           closePtPopMenu();
           dashState.tab = view;
-          if (view === 'settings') fetchOverlayStatus();
+          if (view === 'settings') fetchOverlayStatus({ fresh: true });
           if (shouldFetch) refreshDashboard();
           else renderDashboardOverlay({ resetScroll: true });
         }
@@ -1489,13 +1531,19 @@
     } else if (action === 'open-dashboard') {
       dashboardOpen = true;
       renderDashboardOverlay({ resetScroll: true });
-      fetchOverlayStatus();
+      fetchOverlayStatus({ fresh: true });
       refreshDashboard({ force: true });
+    } else if (action === 'open-app-update-settings') {
+      dashState.tab = 'settings';
+      dashboardOpen = true;
+      renderDashboardOverlay({ resetScroll: true });
+      fetchOverlayStatus({ fresh: true });
+      if (!lastDash) refreshDashboard({ force: false });
     } else if (action === 'open-quotas') {
       dashState.tab = 'quotas';
       dashboardOpen = true;
       renderDashboardOverlay({ resetScroll: true });
-      fetchOverlayStatus();
+      fetchOverlayStatus({ fresh: true });
       refreshDashboard({ force: true });
     } else if (action === 'open-provider-settings') {
       navigateToProviderSettings();
@@ -1512,6 +1560,7 @@
         dismissedAppUpdateVer = ver;
         try { localStorage.setItem('t3tools.dismissedAppUpdateVer', ver); } catch {}
         renderSidebarWidget();
+        if (dashboardOpen) renderDashboardOverlay();
       }
     } else if (action === 'install-app-update') {
       const upd = lastLive?.appUpdate ?? lastAppUpdate;
@@ -1520,15 +1569,15 @@
       } else {
         callRpc('installAppUpdate', {}).then(res => {
           if (res?.status) {
-            lastAppUpdate = res.status;
-            if (lastLive) lastLive.appUpdate = res.status;
-            renderSidebarWidget();
+            applyAppUpdateState(res.status);
           }
           if (res?.ok === false && res.error) {
             showOverlayToast(res.error);
           }
         }).catch(err => {
-          showOverlayToast(err?.message || '启动自动更新失败');
+          const msg = err?.message || '启动自动更新失败';
+          if (lastAppUpdate) applyAppUpdateState({ ...lastAppUpdate, status: 'error', lastError: msg });
+          showOverlayToast(msg);
         });
       }
     }
@@ -1656,6 +1705,76 @@
         }
         return;
       }
+      if (action === 'check-app-update') {
+        if (manualAppUpdateCheckInFlight) return;
+        manualAppUpdateCheckInFlight = true;
+        const prevUpd = lastStatus?.appUpdate || lastAppUpdate || { currentVersion: VERSION };
+        applyAppUpdateState({ ...prevUpd, status: 'checking', lastError: '' });
+        showOverlayToast('正在检查新版本...');
+        try {
+          const upd = await callRpc('checkAppUpdate', {});
+          if (upd) {
+            dismissedAppUpdateVer = '';
+            try { localStorage.removeItem('t3tools.dismissedAppUpdateVer'); } catch {}
+            applyAppUpdateState(upd);
+            if (upd.lastError) showOverlayToast(upd.lastError);
+            else if (upd.hasUpdate) showOverlayToast('发现新版本 v' + upd.latestVersion);
+            else showOverlayToast('当前已是最新版本');
+          } else {
+            showOverlayToast('检查更新失败');
+          }
+        } catch (err) {
+          const msg = err?.message || '检查更新失败';
+          applyAppUpdateState({ ...prevUpd, status: 'error', lastError: msg });
+          showOverlayToast(msg);
+        } finally {
+          manualAppUpdateCheckInFlight = false;
+        }
+        return;
+      }
+      if (action === 'install-app-update') {
+        const upd = lastStatus?.appUpdate ?? lastLive?.appUpdate ?? lastAppUpdate;
+        if (upd && !upd.canAutoUpdate) {
+          const url = upd.releaseUrl || 'https://github.com/LionKo/t3tools/releases';
+          window.open(url, '_blank', 'noopener,noreferrer');
+          return;
+        }
+        showOverlayToast('正在下载并校验更新...');
+        try {
+          const res = await callRpc('installAppUpdate', {});
+          if (res?.status) applyAppUpdateState(res.status);
+          if (res?.ok === false && res.error) showOverlayToast(res.error);
+        } catch (err) {
+          showOverlayToast(err?.message || '启动自动更新失败');
+        }
+        return;
+      }
+      if (action === 'skip-app-update') {
+        const ver = (lastStatus?.appUpdate || lastAppUpdate)?.latestVersion || '';
+        try {
+          const upd = await callRpc('skipAppUpdate', { version: ver });
+          if (upd) applyAppUpdateState(upd);
+          showOverlayToast(ver ? '已跳过版本 v' + ver : '已跳过当前更新');
+        } catch (err) {
+          showOverlayToast(err?.message || '跳过版本失败');
+        }
+        return;
+      }
+      if (action === 'dismiss-app-update') {
+        const ver = actionEl.getAttribute('data-pt-app-ver') || (lastStatus?.appUpdate || lastAppUpdate)?.latestVersion || '';
+        if (ver) {
+          dismissedAppUpdateVer = ver;
+          try { localStorage.setItem('t3tools.dismissedAppUpdateVer', ver); } catch {}
+          renderSidebarWidget();
+          renderDashboardOverlay();
+        }
+        return;
+      }
+      if (action === 'open-release-url') {
+        const url = (lastStatus?.appUpdate || lastAppUpdate)?.releaseUrl || 'https://github.com/LionKo/t3tools/releases';
+        window.open(url, '_blank', 'noopener,noreferrer');
+        return;
+      }
       if (action === 'check-runtime-updates') {
         try {
           const updates = await callRpc('checkRuntimeUpdates', {});
@@ -1740,7 +1859,7 @@
     if (tabEl) {
       closePtPopMenu();
       dashState.tab = tabEl.getAttribute('data-pt-tab');
-      if (dashState.tab === 'settings') fetchOverlayStatus();
+      if (dashState.tab === 'settings') fetchOverlayStatus({ fresh: true });
       renderDashboardOverlay({ resetScroll: true });
       return;
     }
@@ -1760,6 +1879,25 @@
 
   async function onDashboardChange(e) {
     const target = e.target;
+    if (target?.dataset?.appUpdateSetting) {
+      const key = target.dataset.appUpdateSetting;
+      const value = key === 'checkIntervalMinutes' ? Number(target.value) : Boolean(target.checked);
+      try {
+        const updated = await callRpc('updateSettings', { appUpdates: { [key]: value } });
+        if (updated) {
+          settingsRevision++;
+          lastSettings = updated;
+          if (lastLive) lastLive.settings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+          renderDashboardOverlay();
+          fetchOverlayStatus({ fresh: false });
+        }
+        showOverlayToast('设置已保存');
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
     if (target?.dataset?.alertSetting) {
       const key = target.dataset.alertSetting;
       const value = target.type === 'number'
@@ -1898,7 +2036,22 @@
       if (live?.todayUsage) lastTodayUsage = live.todayUsage;
       if (live?.sidebarUsage) lastSidebarUsage = live.sidebarUsage;
       if (live?.runtimeUpdates) lastRuntimeUpdates = live.runtimeUpdates;
-      if (live?.appUpdate) lastAppUpdate = live.appUpdate;
+      if (live?.appUpdate && !manualAppUpdateCheckInFlight) {
+        const prevUpd = lastAppUpdate;
+        const nextUpd = live.appUpdate;
+        const updChanged = !prevUpd ||
+          prevUpd.status !== nextUpd.status ||
+          prevUpd.hasUpdate !== nextUpd.hasUpdate ||
+          prevUpd.latestVersion !== nextUpd.latestVersion ||
+          prevUpd.progressPercent !== nextUpd.progressPercent ||
+          prevUpd.checkedAtMs !== nextUpd.checkedAtMs ||
+          prevUpd.isSkipped !== nextUpd.isSkipped ||
+          prevUpd.lastError !== nextUpd.lastError;
+        lastAppUpdate = nextUpd;
+        if (lastStatus) lastStatus = { ...lastStatus, appUpdate: nextUpd };
+        syncAppUpdatePoll(nextUpd);
+        if (dashboardOpen && updChanged) renderDashboardOverlay();
+      }
       lastLive = live;
       lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
@@ -1999,7 +2152,7 @@
     openDashboard() {
       dashboardOpen = true;
       renderDashboardOverlay({ resetScroll: true });
-      fetchOverlayStatus();
+      fetchOverlayStatus({ fresh: true });
       refreshDashboard({ force: true });
     },
     diagnoseAnchors() {
@@ -2024,6 +2177,8 @@
       lastLiveThreadId = '';
       closePtPopMenu();
       clearTimeout(pollTimer);
+      clearTimeout(appUpdatePollTimer);
+      appUpdatePollTimer = null;
       clearTimeout(searchTimer);
       clearTimeout(overlayToastTimer);
       clearTimeout(layoutRecheckTimer);

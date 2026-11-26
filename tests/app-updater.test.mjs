@@ -460,3 +460,178 @@ test('compiled T3Tools.exe --apply-update performs atomic delta swap, preserves 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test('Magpie-style updater supports configurable checkIntervalMinutes, 5-min freshness recheck (?fresh=1), embedded settings card, and bottom-left sidebar update prompt', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 't3tools-upd-magpie-'));
+  try {
+    const relRoot = join(tmp, 'T3Tools');
+    const appRoot = makeFakeReleaseDir(relRoot, { installMode: 'installed' });
+    const dataDir = join(tmp, '.t3tools');
+    const settings = createSettingsStore(join(dataDir, 'settings.json'));
+
+    // 1. Settings default to 60m and validate Magpie intervals [30, 60, 360, 1440]
+    assert.equal(settings.get().appUpdates.checkIntervalMinutes, 60);
+    assert.equal(settings.update({ appUpdates: { checkIntervalMinutes: 30 } }).appUpdates.checkIntervalMinutes, 30);
+    assert.equal(settings.update({ appUpdates: { checkIntervalMinutes: 1440 } }).appUpdates.checkIntervalMinutes, 1440);
+    assert.throws(() => settings.update({ appUpdates: { checkIntervalMinutes: 15 } }), /checkIntervalMinutes/);
+    assert.throws(() => settings.update({ appUpdates: { checkIntervalMinutes: 120 } }), /checkIntervalMinutes/);
+
+    // 2. Unit-test refreshIfStale respecting freshAfterMs & autoCheck
+    let fetchCount = 0;
+    let remoteVer = '0.1.3';
+    const zipBytes = Buffer.from('PK\x03\x04fresh-zip');
+    const fakeFetch = async url => {
+      fetchCount++;
+      return {
+        ok: true,
+        status: 200,
+        url,
+        json: async () => ({
+          version: remoteVer,
+          publishedAt: '2026-11-26T05:00:00Z',
+          minNodeVersion: '22.13.0',
+          notes: `- release v${remoteVer}`,
+          appPackage: {
+            url: `https://github.com/LionKo/t3tools/releases/download/v${remoteVer}/T3Tools-v${remoteVer}-app.zip`,
+            sha256: sha256Hex(zipBytes),
+            size: zipBytes.length
+          }
+        })
+      };
+    };
+
+    const updater = createAppUpdater({
+      currentVersion: '0.1.3',
+      settings,
+      paths: { pluginDataDir: dataDir },
+      appRoot,
+      fetchImpl: fakeFetch,
+      enableBackgroundCheck: false,
+      freshAfterMs: 40,
+      nodeVersion: '22.16.0'
+    });
+    assert.equal(updater.getStatus().checkIntervalMinutes, 1440);
+
+    // First check finds up-to-date 0.1.3
+    const first = await updater.checkForUpdates({ force: true });
+    assert.equal(first.hasUpdate, false);
+    assert.equal(fetchCount, 1);
+
+    // Immediately calling refreshIfStale does NOT refetch (within freshAfterMs)
+    assert.equal(updater.refreshIfStale(), false);
+    assert.equal(fetchCount, 1);
+
+    // After freshAfterMs elapses and remote publishes 0.1.4, refreshIfStale triggers background recheck
+    remoteVer = '0.1.4';
+    await new Promise(r => setTimeout(r, 55));
+    assert.equal(updater.refreshIfStale(), true);
+    const waitDeadline = Date.now() + 2000;
+    while (updater.getStatus().status === 'checking' && Date.now() < waitDeadline) {
+      await new Promise(r => setTimeout(r, 15));
+    }
+    assert.equal(fetchCount, 2);
+    assert.equal(updater.getStatus().hasUpdate, true);
+    assert.equal(updater.getStatus().latestVersion, '0.1.4');
+
+    // When autoCheck is disabled, refreshIfStale stays silent
+    settings.update({ appUpdates: { autoCheck: false } });
+    await new Promise(r => setTimeout(r, 55));
+    assert.equal(updater.refreshIfStale(), false);
+    assert.equal(fetchCount, 2);
+    settings.update({ appUpdates: { autoCheck: true, checkIntervalMinutes: 30 } });
+
+    // 3. Daemon /api/status?fresh=1 triggers freshness recheck while plain /api/status does not
+    let daemonFetches = 0;
+    const daemon = await startDaemon({
+      pathOverrides: {
+        home: tmp,
+        appData: join(tmp, 'AppData', 'Roaming'),
+        localAppData: join(tmp, 'AppData', 'Local'),
+        t3Root: join(tmp, '.t3'),
+        pluginDataDir: join(tmp, '.t3tools-daemon')
+      },
+      portOverride: 0,
+      enableCdp: false,
+      fetchImpl: async url => {
+        daemonFetches++;
+        return {
+          ok: true,
+          status: 200,
+          url,
+          json: async () => ({
+            version: '9.9.9',
+            publishedAt: '2026-11-26T05:00:00Z',
+            minNodeVersion: '22.13.0',
+            notes: '- fresh check release',
+            appPackage: {
+              url: 'https://github.com/LionKo/t3tools/releases/download/v9.9.9/T3Tools-v9.9.9-app.zip',
+              sha256: sha256Hex(zipBytes),
+              size: zipBytes.length
+            }
+          })
+        };
+      },
+      enableRemoteUpdateCheck: false,
+      enableAppUpdateCheck: true,
+      appUpdateOptions: { appRoot, initialDelayMs: 60000, freshAfterMs: 0, nodeVersion: '22.16.0' }
+    });
+    try {
+      const plain = await fetch(`${daemon.url}/api/status`).then(r => r.json());
+      assert.equal(daemonFetches, 0);
+      assert.equal(plain.data.appUpdate.hasUpdate, false);
+
+      const freshRes = await fetch(`${daemon.url}/api/status?fresh=1`).then(r => r.json());
+      assert.equal(freshRes.ok, true);
+      const deadline = Date.now() + 2000;
+      let settled = freshRes.data.appUpdate;
+      while ((settled.status === 'checking' || !settled.hasUpdate) && Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 20));
+        settled = (await fetch(`${daemon.url}/api/status`).then(r => r.json())).data.appUpdate;
+      }
+      assert.equal(daemonFetches, 1);
+      assert.equal(settled.hasUpdate, true);
+      assert.equal(settled.latestVersion, '9.9.9');
+
+      // 4. Verify embedded Settings UI, top update banner, fallback page, and bottom-left T3 Code card
+      const sharedSrc = readFileSync(new URL('../src/ui/shared-views.js', import.meta.url), 'utf8');
+      const sandbox = {};
+      vm.runInNewContext(`${sharedSrc}\nglobalThis.renderDashboardHtml = renderDashboardHtml;\nglobalThis.renderSidebarTriggerHtml = renderSidebarTriggerHtml;`, sandbox);
+
+      const dashHtml = sandbox.renderDashboardHtml(null, { tab: 'settings' }, {
+        version: '0.1.3',
+        statusData: {
+          version: '0.1.3',
+          appUpdate: { ...settled, currentVersion: '0.1.3' },
+          settings: { appUpdates: { autoCheck: true, checkIntervalMinutes: 30 } }
+        }
+      });
+      assert.match(dashHtml, /data-pt-app-update-card="1"/);
+      assert.match(dashHtml, /data-pt-action="check-app-update"/);
+      assert.match(dashHtml, /data-app-update-setting="checkIntervalMinutes"/);
+      assert.match(dashHtml, /value="30" selected/);
+      assert.match(dashHtml, /data-pt-overlay-update-banner="1"/);
+      assert.match(dashHtml, /立即更新到 v9\.9\.9/);
+
+      const sidebarHtml = sandbox.renderSidebarTriggerHtml(
+        { appUpdate: { ...settled, currentVersion: '0.1.3' }, settings: { sidebarUsageRange: 'today' } },
+        { status: 'attached' }
+      );
+      assert.match(sidebarHtml, /pt-sidebar-app-update/);
+      assert.match(sidebarHtml, /data-pt-app-update="9\.9\.9"/);
+      assert.match(sidebarHtml, /发现 T3Tools v9\.9\.9/);
+      assert.match(sidebarHtml, /v0\.1\.3 → v9\.9\.9/);
+      assert.match(sidebarHtml, /data-pt-action="install-app-update"/);
+      assert.match(sidebarHtml, /data-pt-action="open-app-update-settings"/);
+
+      const fbHtml = buildFallbackHtml({ version: '0.1.3', authToken: daemon.authToken });
+      assert.match(fbHtml, /data-app-update-setting="checkIntervalMinutes"/);
+      const scriptMatch = fbHtml.match(/<script>\s*([\s\S]*?)<\/script>\s*<\/body>/);
+      assert.ok(scriptMatch, 'fallback page inline script should exist');
+      new vm.Script(scriptMatch[1]);
+    } finally {
+      await daemon.stop('test done');
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

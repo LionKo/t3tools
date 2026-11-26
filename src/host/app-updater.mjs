@@ -18,8 +18,11 @@ export const APP_REPO_SLUG = 'LionKo/t3tools';
 export const APP_RELEASES_URL = `https://github.com/${APP_REPO_SLUG}/releases`;
 export const APP_UPDATE_MANIFEST_URL = `${APP_RELEASES_URL}/latest/download/latest.json`;
 
-const DEFAULT_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const DEFAULT_INITIAL_DELAY_MS = 15 * 1000; // 15 seconds after startup
+export const VALID_CHECK_INTERVAL_MINUTES = [30, 60, 360, 1440];
+const DEFAULT_CHECK_INTERVAL_MINUTES = 60; // 1 hour (Magpie-style configurable: 30m / 1h / 6h / 24h)
+const DEFAULT_INITIAL_DELAY_MS = 5 * 1000; // 5 seconds after startup (matches Magpie)
+const DEFAULT_FRESH_AFTER_MS = 5 * 60 * 1000; // 5 minutes freshness window on UI open (matches Magpie freshAfter)
+const DEFAULT_TICK_INTERVAL_MS = 60 * 1000; // 1 minute dynamic settings tick (matches Magpie)
 const DEFAULT_ERROR_BACKOFF_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_REQUEST_TIMEOUT_MS = 12000;
 const DEFAULT_DOWNLOAD_TIMEOUT_MS = 180000;
@@ -280,8 +283,10 @@ export function createAppUpdater({
   manifestUrl = APP_UPDATE_MANIFEST_URL,
   fetchImpl = globalThis.fetch,
   enableBackgroundCheck = true,
-  checkIntervalMs = DEFAULT_CHECK_INTERVAL_MS,
+  checkIntervalMs = null,
   initialDelayMs = DEFAULT_INITIAL_DELAY_MS,
+  freshAfterMs = DEFAULT_FRESH_AFTER_MS,
+  tickIntervalMs = DEFAULT_TICK_INTERVAL_MS,
   errorBackoffMs = DEFAULT_ERROR_BACKOFF_MS,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   downloadTimeoutMs = DEFAULT_DOWNLOAD_TIMEOUT_MS,
@@ -350,10 +355,22 @@ export function createAppUpdater({
   function readUpdateSettings() {
     const cfg = settings?.get?.() || {};
     const au = cfg.appUpdates && typeof cfg.appUpdates === 'object' ? cfg.appUpdates : {};
+    const rawMins = Number(au.checkIntervalMinutes);
+    const checkIntervalMinutes = Number.isInteger(rawMins) && VALID_CHECK_INTERVAL_MINUTES.includes(rawMins)
+      ? rawMins
+      : DEFAULT_CHECK_INTERVAL_MINUTES;
     return {
       autoCheck: au.autoCheck !== false,
+      checkIntervalMinutes,
       skippedVersion: String(au.skippedVersion || '').trim()
     };
+  }
+
+  function getEffectiveCheckIntervalMs(updateCfg = readUpdateSettings()) {
+    if (Number.isFinite(checkIntervalMs) && checkIntervalMs > 0) {
+      return checkIntervalMs;
+    }
+    return updateCfg.checkIntervalMinutes * 60 * 1000;
   }
 
   function getStatus() {
@@ -390,6 +407,7 @@ export function createAppUpdater({
       checkedAtMs: state.checkedAtMs,
       lastError: state.lastError,
       autoCheck: updateCfg.autoCheck,
+      checkIntervalMinutes: updateCfg.checkIntervalMinutes,
       skippedVersion: updateCfg.skippedVersion,
       justUpdated: justUpdated ? {
         fromVersion: String(justUpdated.fromVersion || ''),
@@ -409,7 +427,7 @@ export function createAppUpdater({
 
     const now = Date.now();
     if (!force && state.lastAttemptAtMs > 0) {
-      const waitMs = state.lastError ? errorBackoffMs : checkIntervalMs;
+      const waitMs = state.lastError ? errorBackoffMs : getEffectiveCheckIntervalMs();
       if (now - state.lastAttemptAtMs < waitMs) {
         return getStatus();
       }
@@ -725,6 +743,27 @@ export function createAppUpdater({
     return getStatus();
   }
 
+  /**
+   * Magpie-style freshness check: when the user opens the dashboard or settings
+   * and the cached update result is older than freshAfterMs (default 5 min),
+   * trigger a non-blocking background recheck so recent releases surface right away.
+   */
+  function refreshIfStale({ freshAfterMs: overrideFreshMs } = {}) {
+    if (stopped || inFlightCheck || typeof fetchImpl !== 'function') return false;
+    const updateCfg = readUpdateSettings();
+    if (!updateCfg.autoCheck) return false;
+    if (['checking', 'downloading', 'verifying', 'ready', 'applying'].includes(state.status)) {
+      return false;
+    }
+    const threshold = Number.isFinite(overrideFreshMs) && overrideFreshMs >= 0
+      ? overrideFreshMs
+      : freshAfterMs;
+    const stale = state.lastAttemptAtMs === 0 || (Date.now() - state.lastAttemptAtMs >= threshold);
+    if (!stale) return false;
+    checkForUpdates({ force: true }).catch(() => {});
+    return true;
+  }
+
   function start() {
     if (!enableBackgroundCheck || stopped) return;
     if (initialTimer || intervalTimer) return;
@@ -738,12 +777,19 @@ export function createAppUpdater({
     }, initialDelayMs);
     initialTimer.unref?.();
 
+    // Magpie-style 1-minute scheduler loop: dynamically honors settings changes immediately
+    const effectiveTickMs = Number.isFinite(checkIntervalMs) && checkIntervalMs > 0
+      ? Math.min(tickIntervalMs, checkIntervalMs)
+      : tickIntervalMs;
     intervalTimer = setInterval(() => {
       if (stopped) return;
-      if (readUpdateSettings().autoCheck) {
+      const updateCfg = readUpdateSettings();
+      if (!updateCfg.autoCheck) return;
+      const waitMs = state.lastError ? errorBackoffMs : getEffectiveCheckIntervalMs(updateCfg);
+      if (state.lastAttemptAtMs === 0 || (Date.now() - state.lastAttemptAtMs >= waitMs)) {
         checkForUpdates({ force: false }).catch(() => {});
       }
-    }, checkIntervalMs);
+    }, Math.max(10, effectiveTickMs));
     intervalTimer.unref?.();
   }
 
@@ -763,6 +809,7 @@ export function createAppUpdater({
   return {
     getStatus,
     checkForUpdates,
+    refreshIfStale,
     startInstall,
     skipVersion,
     waitForInstall: () => inFlightInstall || Promise.resolve(getStatus()),

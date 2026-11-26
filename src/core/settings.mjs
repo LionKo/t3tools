@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS = {
     burstThreshold: 2, burstWindowMs: 300000, cooldownMs: 120000 },
   appUpdates: {
     autoCheck: true,
+    checkIntervalMinutes: 60,
     skippedVersion: ''
   },
   anomalyConfig: {
@@ -38,6 +39,7 @@ export const DEFAULT_SETTINGS = {
 const VALID_PRESETS = new Set(['weeklyQuota', 'today', '24h', 'week', '7d', '30d', 'all']);
 const VALID_THEMES = new Set(['dark', 'light']);
 const VALID_OVERVIEW_MODES = new Set(['adaptive', 'avoid', 'fixed']);
+const VALID_UPDATE_CHECK_INTERVALS = new Set([30, 60, 360, 1440]);
 
 function clampInt(val, min, max, fallback) {
   const n = Number(val);
@@ -145,6 +147,13 @@ export function sanitizeSettingsPatch(patch) {
     if (Object.hasOwn(au, 'autoCheck')) {
       if (typeof au.autoCheck !== 'boolean') throw new Error('autoCheck 必须为布尔值');
       cleanUpdates.autoCheck = au.autoCheck;
+    }
+    if (Object.hasOwn(au, 'checkIntervalMinutes')) {
+      const mins = Number(au.checkIntervalMinutes);
+      if (!Number.isInteger(mins) || !VALID_UPDATE_CHECK_INTERVALS.has(mins)) {
+        throw new Error('checkIntervalMinutes 必须为 30、60、360 或 1440');
+      }
+      cleanUpdates.checkIntervalMinutes = mins;
     }
     if (Object.hasOwn(au, 'skippedVersion')) {
       if (typeof au.skippedVersion !== 'string') throw new Error('skippedVersion 必须为字符串');

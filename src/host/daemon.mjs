@@ -167,8 +167,11 @@ export async function startDaemon({
   }
   refreshFixedShortcutPorts();
 
-  function getDaemonStatus() {
+  function getDaemonStatus({ fresh = false } = {}) {
     const now = Date.now();
+    if (fresh && enableAppUpdateCheck) {
+      appUpdater.refreshIfStale();
+    }
     const settings = ctx.settings.get();
     return {
       version: PLUGIN_VERSION,
@@ -201,7 +204,7 @@ export async function startDaemon({
       case 'testAlert': return ctx.engine.testAlert();
       case 'focusThread': return cdpHost?.focusThread({ threadId: params.threadId, environmentId: ctx.t3State.readThreadIndex().threadsById.get(params.threadId)?.environmentId }) || { ok: false, focused: false, reason: 'T3 Code 未处于吸附状态' };
       case 'getStatus':
-        return getDaemonStatus();
+        return getDaemonStatus({ fresh: Boolean(params?.fresh) });
       case 'getLive': {
         // Desktop CDP client passes allowFallback: false so unresolved routes never display another thread (fixes P1 #2)
         const reqThreadId = String(params.threadId || '').trim();
@@ -218,8 +221,13 @@ export async function startDaemon({
         return ctx.engine.getDashboardData(params || {}, { forceSync: Boolean(params.force) });
       case 'getSettings':
         return ctx.settings.get();
-      case 'updateSettings':
-        return ctx.settings.update(params || {});
+      case 'updateSettings': {
+        const updated = ctx.settings.update(params || {});
+        if (enableAppUpdateCheck && params?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
+          appUpdater.checkForUpdates({ force: false }).catch(() => {});
+        }
+        return updated;
+      }
       case 'forceSync':
         ctx.engine.syncAll({ force: true });
         return { syncedAtMs: Date.now() };
@@ -260,6 +268,9 @@ export async function startDaemon({
       }
       if (process.platform === 'win32' && patch?.autoPatchLauncher === true && autoPatchDebugArg) {
         try { patchT3ShortcutsDebugArg(ctx.paths); } catch {}
+      }
+      if (enableAppUpdateCheck && patch?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
+        appUpdater.checkForUpdates({ force: false }).catch(() => {});
       }
     },
     onReattachCdp: async () => {

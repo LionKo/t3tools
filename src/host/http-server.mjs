@@ -160,7 +160,8 @@ export function createHttpServer({
       }
 
       if (req.method === 'GET' && pathname === '/api/status') {
-        sendJson(res, 200, { ok: true, data: getDaemonStatus() });
+        const fresh = reqUrl.searchParams.get('fresh') === '1';
+        sendJson(res, 200, { ok: true, data: getDaemonStatus({ fresh }) });
         return;
       }
 

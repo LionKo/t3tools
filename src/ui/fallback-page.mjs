@@ -515,12 +515,24 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
               <div class="setting-row">
                 <div>
                   <div class="setting-label">启动及后台自动检查更新</div>
-                  <div class="setting-desc">每隔 6 小时静默检查 GitHub Releases，发现新版本时通过托盘和顶栏通知</div>
+                  <div class="setting-desc">按设定频率检查 GitHub Releases；打开窗口或设置页超过 5 分钟也会自动静默复查</div>
                 </div>
                 <label class="pt-switch">
                   <input type="checkbox" data-app-update-setting="autoCheck" checked />
                   <span class="pt-switch-track"></span>
                 </label>
+              </div>
+              <div class="setting-row">
+                <div>
+                  <div class="setting-label">后台检查频率</div>
+                  <div class="setting-desc">参考 Magpie，修改后立即生效（无需重启 T3Tools）</div>
+                </div>
+                <select class="pt-select" aria-label="后台检查频率" data-app-update-setting="checkIntervalMinutes" style="max-width:220px;">
+                  <option value="30">每 30 分钟</option>
+                  <option value="60" selected>每 1 小时（默认）</option>
+                  <option value="360">每 6 小时</option>
+                  <option value="1440">每天（24 小时）</option>
+                </select>
               </div>
             </div>
 
@@ -698,6 +710,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       let dismissedBannerVersion = '';
       let fastUpdatePollTimer = null;
       let shownJustUpdated = '';
+      let manualUpdateCheckInFlight = false;
 
       const viewOverviewEl = document.getElementById('view-overview');
       const viewQuotasEl = document.getElementById('view-quotas');
@@ -722,7 +735,14 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           },
           body: JSON.stringify(body)
         });
-        return r.json();
+        let json = null;
+        try {
+          json = await r.json();
+        } catch {}
+        if (!r.ok) {
+          return { ok: false, status: r.status, error: json?.error || ('HTTP ' + r.status) };
+        }
+        return json || { ok: false, error: '服务返回空响应' };
       }
 
       function setRefreshBusy(busy) {
@@ -822,7 +842,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         renderActiveView();
         if (nextView === 'settings') {
           syncSettingsThemeSegs({ animate: false });
-          fetchStatus();
+          fetchStatus({ fresh: true });
           postHostMessage({ action: 'getHostState' });
         }
       }
@@ -984,8 +1004,15 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
       function renderAppUpdateUi(upd, updCfg) {
         const autoCheckEl = document.querySelector('[data-app-update-setting="autoCheck"]');
+        const intervalEl = document.querySelector('[data-app-update-setting="checkIntervalMinutes"]');
+        const autoCheckEnabled = updCfg ? updCfg.autoCheck !== false : (upd ? upd.autoCheck !== false : true);
         if (autoCheckEl && !pendingSettings.has('appUpdates.autoCheck')) {
-          autoCheckEl.checked = updCfg ? updCfg.autoCheck !== false : (upd ? upd.autoCheck !== false : true);
+          autoCheckEl.checked = autoCheckEnabled;
+        }
+        if (intervalEl && !pendingSettings.has('appUpdates.checkIntervalMinutes')) {
+          const rawMins = Number(updCfg?.checkIntervalMinutes ?? upd?.checkIntervalMinutes ?? 60);
+          intervalEl.value = String([30, 60, 360, 1440].includes(rawMins) ? rawMins : 60);
+          intervalEl.disabled = !autoCheckEnabled;
         }
         syncFastUpdatePoll(upd);
         if (!upd) return;
@@ -1199,15 +1226,18 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         return write;
       }
 
-      async function fetchStatus() {
+      async function fetchStatus({ fresh = false } = {}) {
         const seq = ++statusSeq;
         const settingsAtStart = settingsSeq;
         try {
-          const r = await fetch(apiBase + '/api/status');
+          const r = await fetch(apiBase + '/api/status' + (fresh ? '?fresh=1' : ''));
           const j = await r.json();
           if (j.ok && seq === statusSeq) {
             if (statusData?.settings && (settingsAtStart !== settingsSeq || pendingSettings.size)) {
               j.data.settings = statusData.settings;
+            }
+            if (manualUpdateCheckInFlight && statusData?.appUpdate) {
+              j.data.appUpdate = statusData.appUpdate;
             }
             const changed = statusData && (
               statusData.alerts?.unreadCount !== j.data.alerts?.unreadCount ||
@@ -1346,17 +1376,34 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         }
         if (act === 'test-alert') { const res = await postApi('/api/alerts/test',{}); showToast(res.ok ? '已发送测试告警' : res.error); return; }
         if (act === 'check-app-update') {
+          if (manualUpdateCheckInFlight) return;
+          manualUpdateCheckInFlight = true;
+          const prevUpd = statusData?.appUpdate || { currentVersion: boot.version };
+          statusData = { ...(statusData || {}), appUpdate: { ...prevUpd, status: 'checking', lastError: '' } };
+          renderShellStatus();
           showToast('正在检查新版本...');
-          const res = await postApi('/api/app-update/check', {}).catch(() => null);
-          if (res?.ok && res.data) {
-            statusData = { ...(statusData || {}), appUpdate: res.data };
-            dismissedBannerVersion = '';
+          try {
+            const res = await postApi('/api/app-update/check', {});
+            if (res?.ok && res.data) {
+              statusData = { ...(statusData || {}), appUpdate: res.data };
+              dismissedBannerVersion = '';
+              renderShellStatus();
+              if (res.data.lastError) showToast(res.data.lastError);
+              else if (res.data.hasUpdate) showToast('发现新版本 v' + res.data.latestVersion);
+              else showToast('当前已是最新版本');
+            } else {
+              const errMsg = res?.error || '检查更新失败';
+              statusData = { ...(statusData || {}), appUpdate: { ...prevUpd, status: 'error', lastError: errMsg } };
+              renderShellStatus();
+              showToast(errMsg);
+            }
+          } catch (err) {
+            const errMsg = err?.message || '检查更新失败';
+            statusData = { ...(statusData || {}), appUpdate: { ...prevUpd, status: 'error', lastError: errMsg } };
             renderShellStatus();
-            if (res.data.lastError) showToast(res.data.lastError);
-            else if (res.data.hasUpdate) showToast('发现新版本 v' + res.data.latestVersion);
-            else showToast('当前已是最新版本');
-          } else {
-            showToast(res?.error || '检查更新失败');
+            showToast(errMsg);
+          } finally {
+            manualUpdateCheckInFlight = false;
           }
           return;
         }
@@ -1532,8 +1579,11 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         }
         if (e.target.dataset.appUpdateSetting) {
           const key = e.target.dataset.appUpdateSetting;
-          const value = Boolean(e.target.checked);
-          if (await saveSetting('appUpdates.' + key, { appUpdates: { [key]: value } })) showToast('设置已保存');
+          const value = key === 'checkIntervalMinutes' ? Number(e.target.value) : Boolean(e.target.checked);
+          if (await saveSetting('appUpdates.' + key, { appUpdates: { [key]: value } })) {
+            showToast('设置已保存');
+            fetchStatus();
+          }
           return;
         }
         const settingEl = e.target.closest?.('[data-pt-setting]');
@@ -1596,7 +1646,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
       // Boot
       switchView(activeView, { resetScroll: false });
-      fetchStatus();
+      fetchStatus({ fresh: true });
       fetchDash({ force: true });
       setInterval(() => {
         if (!document.hidden) {
