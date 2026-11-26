@@ -143,6 +143,7 @@ export function buildErrorInsights(rows, range, query = {}, models = [], ackTsMs
       byCode,
       byCodeRecovered,
       affectedThreads: sessions.size,
+      unresolvedThreads: affectedSessions.filter(s => !s.resolved).length,
       activeBrokenThreads: affectedSessions.filter(s => s.state === 'failing' && !s.resolved).length
     },
     dailyTrend: [...days.values()].reverse(),

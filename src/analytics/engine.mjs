@@ -30,7 +30,7 @@ function parseResolvedItems(raw) {
   return { ids, sessions };
 }
 
-export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter, runtimeUpdatesAdapter = null }) {
+export function createAnalyticsEngine({ store, settings, t3State, antigravityAdapter, codexAdapter, quotaAdapter, runtimeUpdatesAdapter = null, folderSync = null }) {
   const started = Date.now();
   const monitor = createErrorAlerts(started);
   let ackTsMs = Number(store.getMeta?.('error_ack_ts_ms')) || 0;
@@ -59,21 +59,36 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     }));
   }
 
-  function getMaxIncidentTs(sessionKeys = null) {
+  function getFailedRunResolveId(alert) {
+    return `failedRun:${alert.id || `${alert.t3ThreadId || ''}:${alert.createdAtMs || 0}`}`;
+  }
+
+  function collectSessionIncidents(sessionKeys = null) {
     const cfg = settings.get();
     const { allRequests } = getCachedHistory(cfg.anomalyConfig);
     let maxTs = 0;
     const keySet = sessionKeys ? new Set(sessionKeys.filter(Boolean).map(String)) : null;
+    const relatedKeys = new Set(keySet || []);
+    const incidentIds = [];
     for (const r of allRequests) {
       if (r.status !== 'error' && !(r.retries > 0)) continue;
       if (keySet && !keySet.has(String(r.t3ThreadId || '')) && !keySet.has(String(r.nativeSessionId || ''))) continue;
       if (Number.isFinite(r.timestampMs) && r.timestampMs > maxTs) maxTs = r.timestampMs;
+      if (r.id) incidentIds.push(String(r.id));
+      if (r.t3ThreadId) relatedKeys.add(String(r.t3ThreadId));
+      if (r.nativeSessionId) relatedKeys.add(String(r.nativeSessionId));
     }
     for (const a of monitor.snapshot().recentAlerts) {
       if (keySet && !keySet.has(String(a.t3ThreadId || ''))) continue;
       if (Number.isFinite(a.createdAtMs) && a.createdAtMs > maxTs) maxTs = a.createdAtMs;
+      if (a.errorCode === 'failed') incidentIds.push(getFailedRunResolveId(a));
+      if (a.t3ThreadId) relatedKeys.add(String(a.t3ThreadId));
     }
-    return maxTs;
+    return { maxTs, relatedKeys, incidentIds };
+  }
+
+  function getMaxIncidentTs(sessionKeys = null) {
+    return collectSessionIncidents(sessionKeys).maxTs;
   }
   let countRevision = -1;
   let countDay = '';
@@ -87,9 +102,9 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
   let cachedSidebarAtMs = 0;
   let cachedSidebarUsage = { preset: 'today', day: '', costUsd: 0, totalTokens: 0, requests: 0 };
 
-  function computeRangeUsage(startMs, maxMs, poolMatch = null) {
+  function computeRangeUsage(startMs, maxMs, poolMatch = null, { localOnly = false } = {}) {
     if (!poolMatch && typeof store.getRangeUsageSummary === 'function') {
-      return store.getRangeUsageSummary(startMs, maxMs);
+      return store.getRangeUsageSummary(startMs, maxMs, { localOnly });
     }
     const rows = cachedRev === store.getRevision() ? cachedAllRequests : store.listAllRequests();
     let requests = 0;
@@ -97,6 +112,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     let totalTokens = 0;
     let priced = 0;
     for (const r of rows) {
+      if (localOnly && r.isRemote) continue;
       const ts = Number.isFinite(r?.billingTsMs) ? r.billingTsMs : r?.timestampMs;
       if (poolMatch ? !poolMatch(r) : !Number.isFinite(ts) || ts < startMs || ts > maxMs) continue;
       requests++;
@@ -110,10 +126,12 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     return { requests, costUsd: Number(costUsd.toFixed(6)), totalTokens };
   }
 
-  function getTodayUsageSummary(now = Date.now()) {
+  function getTodayUsageSummary(now = Date.now(), { localOnly = null } = {}) {
+    const scopeLocal = localOnly != null ? Boolean(localOnly) : settings.get()?.multiMachineSync?.sidebarScope === 'local';
     const dayKey = formatLocalDay(now);
+    const cacheTag = `${dayKey}|${scopeLocal ? 'local' : 'all'}`;
     const rev = store.getRevision();
-    if (cachedTodayRev === rev && cachedTodayKey === dayKey && now >= todayFrom && now < todayUntil) {
+    if (cachedTodayRev === rev && cachedTodayKey === cacheTag && now >= todayFrom && now < todayUntil) {
       return cachedTodayUsage;
     }
     const startOfToday = new Date(now);
@@ -122,25 +140,28 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const endOfToday = new Date(startOfToday);
     endOfToday.setDate(endOfToday.getDate() + 1);
     const maxMs = Math.min(now, +endOfToday - 1);
-    const summary = computeRangeUsage(startMs, maxMs);
+    const summary = computeRangeUsage(startMs, maxMs, null, { localOnly: scopeLocal });
     cachedTodayUsage = {
       day: dayKey,
+      scope: scopeLocal ? 'local' : 'all',
       costUsd: summary.costUsd,
       totalTokens: summary.totalTokens,
       requests: summary.requests
     };
     todayFrom = now;
     todayUntil = Math.min(now + 10000, store.nextBillingAfter?.(now) ?? now + 1);
-    cachedTodayKey = dayKey;
+    cachedTodayKey = cacheTag;
     cachedTodayRev = rev;
     return cachedTodayUsage;
   }
 
-  function getSidebarUsageSummary(now = Date.now(), { quotas = null, preset = null } = {}) {
-    const rangePreset = preset || settings.get().sidebarUsageRange || 'today';
+  function getSidebarUsageSummary(now = Date.now(), { quotas = null, preset = null, localOnly = null } = {}) {
+    const cfg = settings.get();
+    const rangePreset = preset || cfg.sidebarUsageRange || 'today';
+    const scopeLocal = localOnly != null ? Boolean(localOnly) : cfg.multiMachineSync?.sidebarScope === 'local';
     const dayKey = formatLocalDay(now);
     if (rangePreset === 'today') {
-      const today = getTodayUsageSummary(now);
+      const today = getTodayUsageSummary(now, { localOnly: scopeLocal });
       return { preset: 'today', ...today };
     }
     const rev = store.getRevision();
@@ -153,7 +174,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const range = resolveDateRange(rangePreset, { now, quotaWindows });
     const startMs = Number.isFinite(range.start) ? range.start : 0;
     const maxMs = Number.isFinite(range.end) ? Math.max(startMs, Math.min(now, range.end)) : now;
-    const cacheKey = `${rangePreset}|${dayKey}|${JSON.stringify(range.pools.map(p => [p.key, p.state, p.state === 'active' ? p.startMs : null, p.resetsAtMs]))}`;
+    const cacheKey = `${rangePreset}|${scopeLocal ? 'local' : 'all'}|${dayKey}|${JSON.stringify(range.pools.map(p => [p.key, p.state, p.state === 'active' ? p.startMs : null, p.resetsAtMs]))}`;
     if (
       cachedSidebarRev === rev &&
       cachedSidebarKey === cacheKey &&
@@ -162,7 +183,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       return { ...cachedSidebarUsage, startMs, endMs: maxMs };
     }
     // Weekly pools can each have a different start, including a trailing-week fallback.
-    const summary = computeRangeUsage(startMs, maxMs, weekly ? range.match : null);
+    const summary = computeRangeUsage(startMs, maxMs, weekly ? range.match : null, { localOnly: scopeLocal });
     sidebarUntil = Math.min(now + 10000, store.nextBillingAfter?.(now) ?? now + 1);
     if (weekly || range.status === 'rolling') {
       const width = weekly ? 7 * 86400000 : now - startMs;
@@ -171,6 +192,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     }
     cachedSidebarUsage = {
       preset: rangePreset,
+      scope: scopeLocal ? 'local' : 'all',
       day: dayKey,
       startMs,
       endMs: maxMs,
@@ -205,28 +227,43 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     syncAll();
     const cfg = settings.get();
     const { allRequests } = getCachedHistory(cfg.anomalyConfig);
+    const localRequests = allRequests.filter(r => !r.isRemote);
+    const resolvedState = getResolvedState();
+    const since = Math.max(started, now - 1800000);
+    const events = [];
+    for (const row of localRequests) {
+      if (row.timestampMs < since) break;
+      if (row.status === 'error' || (row.retries > 0 && ['region','rate-limit'].includes(row.errorCode))) {
+        if (!isErrorResolved(row, ackTsMs, resolvedState)) events.push(row);
+      }
+    }
+    let runs = [];
+    try {
+      runs = (t3State.readFailedRuns?.(since) || []).filter(r =>
+        !isErrorResolved({ id: `failedRun:${r.id}`, timestampMs: r.timestampMs, t3ThreadId: r.t3ThreadId }, ackTsMs, resolvedState)
+      );
+    } catch { /* T3 may be replacing its projection database. */ }
+    const prevAlertSeq = monitor.snapshot().latestSeq;
+    monitor.evaluate(events.concat(runs), cfg.alertConfig, now);
+    const nextAlertSeq = monitor.snapshot().latestSeq;
+
     const revision = store.getRevision();
     const todayKey = formatLocalDay(now);
-    if (revision !== countRevision || countDay !== todayKey) {
-      const { summary } = buildErrorInsights(allRequests, { match: () => true }, { errorOnlyToday: true, includeRetried: true }, [], ackTsMs, now, getResolvedState());
+    if (revision !== countRevision || countDay !== todayKey || nextAlertSeq !== prevAlertSeq) {
+      const { summary } = buildErrorInsights(localRequests, { match: () => true }, { errorOnlyToday: true, includeRetried: true }, [], ackTsMs, now, resolvedState);
+      const unresolvedFailedRuns = monitor.snapshot().recentAlerts
+        .filter(a => a.errorCode === 'failed' && formatLocalDay(a.createdAtMs) === todayKey)
+        .filter(a => !isErrorResolved({ id: getFailedRunResolveId(a), timestampMs: a.createdAtMs, t3ThreadId: a.t3ThreadId }, ackTsMs, resolvedState))
+        .length;
       counts = {
-        unreadCount: summary.unreadCount,
+        unreadCount: summary.unreadCount + unresolvedFailedRuns,
         unreadRecoveredCount: summary.unreadRecoveredCount,
-        unreadIncidents: summary.unreadIncidents,
+        unreadIncidents: summary.unreadIncidents + unresolvedFailedRuns,
         activeBrokenThreads: summary.activeBrokenThreads
       };
       countRevision = revision;
       countDay = todayKey;
     }
-    const since = Math.max(started, now - 1800000);
-    const events = [];
-    for (const row of allRequests) {
-      if (row.timestampMs < since) break;
-      if (row.status === 'error' || (row.retries > 0 && ['region','rate-limit'].includes(row.errorCode))) events.push(row);
-    }
-    let runs = [];
-    try { runs = t3State.readFailedRuns?.(since) || []; } catch { /* T3 may be replacing its projection database. */ }
-    monitor.evaluate(events.concat(runs), cfg.alertConfig, now);
   }
   function acknowledgeErrors(ts = Date.now()) {
     const baseTs = Number.isFinite(Number(ts)) ? Number(ts) : Date.now();
@@ -254,9 +291,13 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
         throw Object.assign(new Error('缺少要标记已解决的会话标识'), { statusCode: 400 });
       }
       const upTo = Number(params?.upToTsMs);
-      const cutoff = Math.max(now, Number.isFinite(upTo) ? upTo : 0, getMaxIncidentTs(keys));
-      for (const key of new Set(keys)) {
+      const { maxTs, relatedKeys, incidentIds } = collectSessionIncidents(keys);
+      const cutoff = Math.max(now, Number.isFinite(upTo) ? upTo : 0, maxTs);
+      for (const key of relatedKeys) {
         resolvedSessions.set(key, Math.max(resolvedSessions.get(key) || 0, cutoff));
+      }
+      for (const id of incidentIds) {
+        resolvedIds.add(id);
       }
       persistResolvedItems();
     } else if (rawScope === 'item') {
@@ -300,23 +341,45 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       const idx = t3State.readThreadIndex();
       store.syncThreadLinks(idx.nativeToThread);
     } catch {}
+    // Run opt-in multi-machine folder sync (throttled internally unless forced)
+    try {
+      folderSync?.sync({ force, now });
+    } catch {}
   }
 
   function getCachedHistory(anomalyConfig) {
     const rev = store.getRevision();
-    const aKey = JSON.stringify(anomalyConfig || {});
+    const localLabel = folderSync?.getLocalMachineLabel?.() || '本机';
+    const aKey = JSON.stringify({ anomalyConfig: anomalyConfig || {}, localLabel });
     if (cachedRev === rev && cachedAnomalyKey === aKey && cachedAnomalyResult) {
       return { allRequests: cachedAllRequests, anomalyResult: cachedAnomalyResult, facets: cachedFacets };
     }
-    cachedAllRequests = store.listAllRequests();
+    cachedAllRequests = store.listAllRequests().map(r => (
+      r.isRemote
+        ? { ...r, machineId: r.machineId || 'remote', machineLabel: r.machineLabel || r.machineId || '远端电脑' }
+        : { ...r, machineId: 'local', machineLabel: r.machineLabel || localLabel }
+    ));
     cachedAnomalyResult = detectCacheAnomalies(cachedAllRequests, anomalyConfig);
 
     const accountsSet = new Set();
     const modelsSet = new Set();
     const sessionsMap = new Map();
+    const machinesMap = new Map();
     for (const r of cachedAllRequests) {
       if (r.accountId) accountsSet.add(r.accountId);
       if (r.modelId) modelsSet.add(r.modelId);
+      const mId = r.isRemote ? (r.machineId || 'remote') : 'local';
+      let mEntry = machinesMap.get(mId);
+      if (!mEntry) {
+        mEntry = {
+          id: mId,
+          label: r.machineLabel || (r.isRemote ? mId : localLabel),
+          isLocal: !r.isRemote,
+          requests: 0
+        };
+        machinesMap.set(mId, mEntry);
+      }
+      mEntry.requests++;
       const sKey = r.t3ThreadId || r.nativeSessionId;
       if (sKey && !sessionsMap.has(sKey)) {
         sessionsMap.set(sKey, {
@@ -326,10 +389,14 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
         });
       }
     }
+    const machines = [...machinesMap.values()].sort((a, b) =>
+      Number(b.isLocal) - Number(a.isLocal) || b.requests - a.requests || a.label.localeCompare(b.label)
+    );
     cachedFacets = {
       drivers: [...new Set(cachedAllRequests.map(r => r.providerDriver).filter(Boolean))].sort(),
       accounts: [...accountsSet].sort(),
       models: [...modelsSet].sort(),
+      machines,
       sessions: [...sessionsMap.values()].slice(0, 100)
     };
     cachedRev = rev;
@@ -527,12 +594,20 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
 
     const preset = query.preset || cfg.defaultRangePreset || 'weeklyQuota';
     const accountFilter = query.account || 'all';
+    const machineFilter = query.machine || 'all';
     const requestedPage = Math.max(1, Math.trunc(Number(query.page)) || 1);
     const pageSize = Math.min(200, Math.max(10, Math.trunc(Number(query.pageSize)) || 50));
 
+    const matchMachine = r => machineFilter === 'all'
+      ? true
+      : machineFilter === 'local'
+        ? !r.isRemote
+        : (r.machineId || 'local') === machineFilter;
+
+    const machineScoped = machineFilter !== 'all' ? allRequests.filter(matchMachine) : allRequests;
     const accountScoped = accountFilter !== 'all'
-      ? allRequests.filter(r => r.accountId === accountFilter)
-      : allRequests;
+      ? machineScoped.filter(r => r.accountId === accountFilter)
+      : machineScoped;
 
     const range = resolveDateRange(preset, {
       now,
@@ -561,11 +636,11 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       query.requestId
     );
     const overviewLedger = hasRequestScopedFilter
-      ? buildRequestLedger(allRequests, range, { account: accountFilter }, anomalyResult, false, siblingRange).ledger
+      ? buildRequestLedger(allRequests, range, { account: accountFilter, machine: machineFilter }, anomalyResult, false, siblingRange).ledger
       : ledger;
 
     const poolSig = (range.pools || []).map(p => `${p.key}:${p.state}:${p.startMs}:${p.resetsAtMs}`).join('|');
-    const sumKey = `${store.getRevision()}::${accountFilter}::${range.preset}::${range.start}::${Math.floor(range.end / 10000)}::${poolSig}`;
+    const sumKey = `${store.getRevision()}::${accountFilter}::${machineFilter}::${range.preset}::${range.start}::${Math.floor(range.end / 10000)}::${poolSig}`;
     let summary = summaryCache.get(sumKey);
     if (!summary) {
       summary = summarizeAnalytics(accountScoped, range, anomalyResult.anomalies);
@@ -574,7 +649,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     }
 
     const dayKey = formatLocalDay(now);
-    const hmKey = `${store.getRevision()}::${accountFilter}::${dayKey}`;
+    const hmKey = `${store.getRevision()}::${accountFilter}::${machineFilter}::${dayKey}`;
     let heatmap = heatmapCache.get(hmKey);
     if (!heatmap) {
       heatmap = build53WeekHeatmap(accountScoped, now);
@@ -589,7 +664,7 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
 
     // Per-account usage totals within the currently selected range (for Account Quota cards)
     const accountUsage = Object.create(null);
-    for (const r of allRequests) {
+    for (const r of machineScoped) {
       if (!range.match(r)) continue;
       const aid = r.accountId || 'unknown';
       let bucket = accountUsage[aid];
@@ -606,11 +681,13 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     const resolvedState = getResolvedState();
     const errorInsights = buildErrorInsights(accountScoped, range, query, summary.models, ackTsMs, now, resolvedState);
     const effectiveDay = errorInsights.summary.scopeDay;
-    const failedRuns = monitor.snapshot().recentAlerts
-      .filter(a => a.errorCode === 'failed')
-      .map(a => ({ ...a, resolveId: `failedRun:${a.id || `${a.t3ThreadId || ''}:${a.createdAtMs || 0}`}` }));
+    const failedRuns = (machineFilter === 'all' || machineFilter === 'local')
+      ? monitor.snapshot().recentAlerts
+          .filter(a => a.errorCode === 'failed')
+          .map(a => ({ ...a, resolveId: getFailedRunResolveId(a) }))
+      : [];
     // A failed run may never have produced a provider request, including before daemon startup.
-    if (query.errorSession && !failedRuns.some(a => a.t3ThreadId === query.errorSession)) {
+    if ((machineFilter === 'all' || machineFilter === 'local') && query.errorSession && !failedRuns.some(a => a.t3ThreadId === query.errorSession)) {
       const thread = t3State.readThreadExecution?.(query.errorSession, now, { allowFallback: false });
       if (thread?.run?.status === 'failed') {
         const createdAtMs = thread.run.completedAtMs || thread.run.startedAtMs;
@@ -632,6 +709,10 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
         ...a,
         resolved: isErrorResolved({ id: a.resolveId, timestampMs: a.createdAtMs, t3ThreadId: a.t3ThreadId }, ackTsMs, resolvedState)
       }));
+    const unresolvedFailedRuns = errorInsights.failedRuns.filter(a => !a.resolved).length;
+    errorInsights.summary.unresolvedFailedRuns = unresolvedFailedRuns;
+    errorInsights.summary.unreadCount += unresolvedFailedRuns;
+    errorInsights.summary.unreadIncidents += unresolvedFailedRuns;
     return {
       updatedAtMs: now,
       range: {
@@ -665,7 +746,8 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       diagnostics: {
         antigravity: antigravityAdapter.getDiagnostics?.() || {},
         codex: codexAdapter.getDiagnostics?.() || {}
-      }
+      },
+      multiMachineSync: folderSync?.getStatus?.(now) || null
     };
   }
 

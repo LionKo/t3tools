@@ -214,6 +214,8 @@ export function createHttpServer({
         '/api/app-update/install',
         '/api/app-update/skip',
         '/api/sync',
+        '/api/sync/multi-machine',
+        '/api/sync/multi-machine/clear-remote',
         '/api/cdp/reattach',
         '/api/cdp/toggle',
         '/api/launcher/patch-debug',
@@ -240,7 +242,9 @@ export function createHttpServer({
           '/api/runtime-updates/check': 'checkRuntimeUpdates',
           '/api/app-update/check': 'checkAppUpdate',
           '/api/app-update/install': 'installAppUpdate',
-          '/api/app-update/skip': 'skipAppUpdate'
+          '/api/app-update/skip': 'skipAppUpdate',
+          '/api/sync/multi-machine': 'triggerMultiMachineSync',
+          '/api/sync/multi-machine/clear-remote': 'clearRemoteSyncData'
         }[pathname];
         if (action) {
           const body = await readJsonBody(req);

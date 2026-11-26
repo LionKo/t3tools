@@ -1,6 +1,6 @@
 # T3Tools (Windows)
 
-面向 **Windows 桌面版 T3 Code** 的零改包原生增强插件，重点支持 **Antigravity（含多账号实例，如 `work` / `antigravity`）+ Codex**（并兼容 T3 Code 内置扫描的其他驱动）。
+面向 **Windows 桌面版 T3 Code** 的零改包原生增强插件，重点支持 **Antigravity（含多账号实例，如 `work` / `antigravity`）+ Codex**（并兼容 T3 Code 内置扫描的其他渠道）。
 
 ## 核心功能（Phase 1 ~ Phase 3）
 
@@ -14,6 +14,8 @@
    - 实时监听 T3 Code `html.dark` 及宿主 CSS 变量（`--background` / `--card` / `--foreground` / `--border` / `--accent` / `--chart-1..6`），毫秒级跟随客户端切换浅色与深色主题；并排对比各模型的 Token 占比、费用占比、缓存命中率和平均/峰值速度。
 5. **请求明细多维筛选 & 异常掉缓存精准标出**
    - 支持按账号/实例、模型、会话、状态及「仅看异常掉缓存」筛选单次请求；精准标出短间隔（默认 `<= 180s`）内的 `缓存归零` / `命中骤降` / `连续未命中`，并自动排除**冷启动**与**上下文压缩**（Antigravity `step_type=23` / Codex 压缩事件 + 输入骤降比例双保险）误报。
+6. **可选多机数据同步汇总（默认关闭，单机零打扰）**
+   - 在设置页开启「多机数据同步」并指定任意共享同步文件夹（支持 **OneDrive / Dropbox / iCloud Drive / Syncthing / NAS 共享盘**），即可自动汇总全部电脑的 Token 消耗、费用、热力图与模型趋势，支持按电脑筛选与对比；采用「每机独写各自子目录（按月 gzip 分片 + SHA-256 校验）、互只读导入」设计，不移动本机 `telemetry.sqlite`，完全不修改 Codex、Antigravity 或 T3 Code 的任何默认配置与文件位置。
 
 ## 为什么能抗 T3 Code 更新？
 

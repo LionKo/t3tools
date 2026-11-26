@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
-export const TELEMETRY_SCHEMA_VERSION = 3;
+export const TELEMETRY_SCHEMA_VERSION = 4;
 
 /**
  * Own persistent SQLite cache & history store (~/.t3tools/telemetry.sqlite).
@@ -38,10 +38,22 @@ function initializeStore(db) {
   const curSchemaRow = db.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get();
   const curSchemaVersion = curSchemaRow ? Number(curSchemaRow.value) : 0;
   if (curSchemaVersion > TELEMETRY_SCHEMA_VERSION) throw new Error('Unsupported newer telemetry schema');
-  if (curSchemaVersion !== TELEMETRY_SCHEMA_VERSION) {
+  if (curSchemaVersion === 3) {
+    // Lossless in-place migration v3 -> v4: preserve indexed local requests & source_files
+    // so upgrading never forces a 30s+ full rescan on startup.
+    const existingCols = new Set(db.prepare('PRAGMA table_info(requests)').all().map(c => c.name));
+    if (existingCols.size > 0) {
+      if (!existingCols.has('machine_id')) db.exec("ALTER TABLE requests ADD COLUMN machine_id TEXT NOT NULL DEFAULT 'local'");
+      if (!existingCols.has('machine_label')) db.exec("ALTER TABLE requests ADD COLUMN machine_label TEXT NOT NULL DEFAULT ''");
+      if (!existingCols.has('is_remote')) db.exec('ALTER TABLE requests ADD COLUMN is_remote INTEGER NOT NULL DEFAULT 0');
+    }
+    db.prepare("INSERT INTO store_meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(String(TELEMETRY_SCHEMA_VERSION));
+  } else if (curSchemaVersion !== TELEMETRY_SCHEMA_VERSION) {
     db.exec(`
       DROP TABLE IF EXISTS requests;
       DROP TABLE IF EXISTS source_files;
+      DROP TABLE IF EXISTS sync_peers;
     `);
     db.prepare("INSERT INTO store_meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
       .run(String(TELEMETRY_SCHEMA_VERSION));
@@ -58,6 +70,9 @@ function initializeStore(db) {
       id TEXT PRIMARY KEY,
       dedupe_key TEXT,
       source_key TEXT NOT NULL,
+      machine_id TEXT NOT NULL DEFAULT 'local',
+      machine_label TEXT NOT NULL DEFAULT '',
+      is_remote INTEGER NOT NULL DEFAULT 0,
       provider_driver TEXT NOT NULL,
       account_id TEXT NOT NULL,
       t3_thread_id TEXT,
@@ -97,10 +112,24 @@ function initializeStore(db) {
     CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_billing_ts ON requests(billing_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_requests_source ON requests(source_key);
+    CREATE INDEX IF NOT EXISTS idx_requests_machine_ts ON requests(machine_id, timestamp_ms DESC);
+    CREATE INDEX IF NOT EXISTS idx_requests_remote_billing ON requests(is_remote, billing_ts_ms);
     CREATE INDEX IF NOT EXISTS idx_requests_thread_ts ON requests(t3_thread_id, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_session_ts ON requests(native_session_id, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_account_ts ON requests(account_id, timestamp_ms DESC);
     CREATE INDEX IF NOT EXISTS idx_requests_dedupe ON requests(dedupe_key);
+
+    CREATE TABLE IF NOT EXISTS sync_peers (
+      machine_id TEXT PRIMARY KEY,
+      machine_label TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT '',
+      app_version TEXT NOT NULL DEFAULT '',
+      request_count INTEGER NOT NULL DEFAULT 0,
+      last_exported_at_ms INTEGER,
+      last_imported_at_ms INTEGER,
+      status TEXT NOT NULL DEFAULT 'ok',
+      last_error TEXT NOT NULL DEFAULT ''
+    );
 
     CREATE TABLE IF NOT EXISTS quota_snapshots (
       window_key TEXT PRIMARY KEY,
@@ -117,6 +146,7 @@ function initializeStore(db) {
   `);
 
   let revision = 1;
+  let localRevision = 1;
 
   const getFileStmt = db.prepare('SELECT stamp FROM source_files WHERE source_key = ?');
   const upsertFileStmt = db.prepare(`
@@ -130,14 +160,16 @@ function initializeStore(db) {
 
   const upsertRequestStmt = db.prepare(`
     INSERT INTO requests (
-      id, dedupe_key, source_key, provider_driver, account_id, t3_thread_id, t3_thread_title,
+      id, dedupe_key, source_key, machine_id, machine_label, is_remote,
+      provider_driver, account_id, t3_thread_id, t3_thread_title,
       native_session_id, model_id, model_raw, effort, role, timestamp_ms, billing_ts_ms,
       input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, thinking_tokens,
       context_used_tokens, context_max_tokens, ttft_ms, streaming_ms, duration_ms,
       tps, tps_kind, tps_estimated, cost_usd, saved_usd, status, outcome_known,
       retries, error_code, error_text, compaction_before
     ) VALUES (
-      ?, ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?, ?, ?,
+      ?, ?, ?, ?,
       ?, ?, ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
       ?, ?, ?, ?, ?,
@@ -149,8 +181,12 @@ function initializeStore(db) {
       -- Keep originating rollout as owner so deleting a fork never erases parent rows (fixes P1 #6)
       source_key = CASE
         WHEN excluded.source_key LIKE '%' || excluded.native_session_id || '%' THEN excluded.source_key
+        WHEN excluded.is_remote = 1 THEN excluded.source_key
         ELSE requests.source_key
       END,
+      machine_id = excluded.machine_id,
+      machine_label = CASE WHEN excluded.machine_label != '' THEN excluded.machine_label ELSE requests.machine_label END,
+      is_remote = excluded.is_remote,
       t3_thread_id = COALESCE(excluded.t3_thread_id, requests.t3_thread_id),
       t3_thread_title = CASE WHEN excluded.t3_thread_title != '' THEN excluded.t3_thread_title ELSE requests.t3_thread_title END,
       billing_ts_ms = excluded.billing_ts_ms,
@@ -180,12 +216,32 @@ function initializeStore(db) {
   const updateLinkStmt = db.prepare(`
     UPDATE requests
     SET t3_thread_id = ?, t3_thread_title = ?, account_id = CASE WHEN ? != '' THEN ? ELSE account_id END
-    WHERE native_session_id = ?
+    WHERE is_remote = 0
+      AND native_session_id = ?
       AND (
         t3_thread_id IS NULL OR t3_thread_id != ? OR t3_thread_title != ?
         OR (? != '' AND account_id != ?)
       )
   `);
+
+  const upsertPeerStmt = db.prepare(`
+    INSERT INTO sync_peers (
+      machine_id, machine_label, platform, app_version, request_count,
+      last_exported_at_ms, last_imported_at_ms, status, last_error
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(machine_id) DO UPDATE SET
+      machine_label = excluded.machine_label,
+      platform = excluded.platform,
+      app_version = excluded.app_version,
+      request_count = excluded.request_count,
+      last_exported_at_ms = excluded.last_exported_at_ms,
+      last_imported_at_ms = excluded.last_imported_at_ms,
+      status = excluded.status,
+      last_error = excluded.last_error
+  `);
+  const listPeersStmt = db.prepare('SELECT * FROM sync_peers ORDER BY last_exported_at_ms DESC, machine_label ASC');
+  const deletePeerStmt = db.prepare('DELETE FROM sync_peers WHERE machine_id = ?');
+  const clearPeersStmt = db.prepare('DELETE FROM sync_peers');
 
   const upsertQuotaStmt = db.prepare(`
     INSERT INTO quota_snapshots (
@@ -202,12 +258,13 @@ function initializeStore(db) {
   `);
 
   const allRequestsStmt = db.prepare('SELECT * FROM requests ORDER BY timestamp_ms DESC');
-  const latestByThreadStmt = db.prepare('SELECT * FROM requests WHERE t3_thread_id = ? ORDER BY timestamp_ms DESC LIMIT 1');
-  const latestBySessionStmt = db.prepare('SELECT * FROM requests WHERE native_session_id = ? ORDER BY timestamp_ms DESC LIMIT 1');
-  const recentByThreadStmt = db.prepare('SELECT * FROM requests WHERE t3_thread_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
-  const recentBySessionStmt = db.prepare('SELECT * FROM requests WHERE native_session_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
-  const listRolloutDedupeStmt = db.prepare("SELECT dedupe_key FROM requests WHERE source_key LIKE 'codex-rollout:%' AND dedupe_key IS NOT NULL");
-  const sourceUsageCountsStmt = db.prepare("SELECT source_key, COUNT(*) AS cnt FROM requests WHERE source_key LIKE ? AND status != 'error' GROUP BY source_key");
+  const localRequestsStmt = db.prepare('SELECT * FROM requests WHERE is_remote = 0 ORDER BY timestamp_ms ASC, id ASC');
+  const latestByThreadStmt = db.prepare('SELECT * FROM requests WHERE is_remote = 0 AND t3_thread_id = ? ORDER BY timestamp_ms DESC LIMIT 1');
+  const latestBySessionStmt = db.prepare('SELECT * FROM requests WHERE is_remote = 0 AND native_session_id = ? ORDER BY timestamp_ms DESC LIMIT 1');
+  const recentByThreadStmt = db.prepare('SELECT * FROM requests WHERE is_remote = 0 AND t3_thread_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
+  const recentBySessionStmt = db.prepare('SELECT * FROM requests WHERE is_remote = 0 AND native_session_id = ? ORDER BY timestamp_ms DESC LIMIT ?');
+  const listRolloutDedupeStmt = db.prepare("SELECT dedupe_key FROM requests WHERE is_remote = 0 AND source_key LIKE 'codex-rollout:%' AND dedupe_key IS NOT NULL");
+  const sourceUsageCountsStmt = db.prepare("SELECT source_key, COUNT(*) AS cnt FROM requests WHERE is_remote = 0 AND source_key LIKE ? AND status != 'error' GROUP BY source_key");
   const rangeUsageSummaryStmt = db.prepare(`
     SELECT
       COUNT(*) AS requests,
@@ -215,6 +272,14 @@ function initializeStore(db) {
       COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
     FROM requests
     WHERE billing_ts_ms >= ? AND billing_ts_ms <= ?
+  `);
+  const rangeLocalUsageSummaryStmt = db.prepare(`
+    SELECT
+      COUNT(*) AS requests,
+      COALESCE(SUM(COALESCE(cost_usd, 0)), 0) AS cost_usd,
+      COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0) + COALESCE(output_tokens, 0)), 0) AS total_tokens
+    FROM requests
+    WHERE is_remote = 0 AND billing_ts_ms >= ? AND billing_ts_ms <= ?
   `);
   const allQuotasStmt = db.prepare('SELECT * FROM quota_snapshots ORDER BY account_id, kind, window_id');
 
@@ -226,25 +291,37 @@ function initializeStore(db) {
     if (version !== lastVersion) {
       lastVersion = version;
       revision++;
+      localRevision++;
     }
     return revision;
+  }
+
+  function getLocalRevision() {
+    getRevision();
+    return localRevision;
   }
 
   function getSourceStamp(sourceKey) {
     return getFileStmt.get(sourceKey)?.stamp ?? null;
   }
 
-  function replaceSourceRequests(sourceKey, stamp, rows) {
+  function replaceSourceRequests(sourceKey, stamp, rows, { machineId = 'local', machineLabel = '', isRemote = false } = {}) {
     db.exec('BEGIN IMMEDIATE');
     try {
       deleteBySourceStmt.run(sourceKey);
       for (const r of rows) {
         const ts = Math.trunc(r.timestampMs || 0);
         const billingTs = Math.trunc(r.billingTsMs ?? ts);
+        const rowMachineId = String(r.machineId || machineId || 'local');
+        const rowMachineLabel = String(r.machineLabel ?? machineLabel ?? '');
+        const rowIsRemote = (r.isRemote != null ? Boolean(r.isRemote) : Boolean(isRemote)) ? 1 : 0;
         upsertRequestStmt.run(
           r.id,
           r.dedupeKey || null,
           sourceKey,
+          rowMachineId,
+          rowMachineLabel,
+          rowIsRemote,
           r.providerDriver,
           r.accountId,
           r.t3ThreadId ?? null,
@@ -282,6 +359,7 @@ function initializeStore(db) {
       upsertFileStmt.run(sourceKey, stamp, Date.now());
       db.exec('COMMIT');
       revision++;
+      if (!isRemote) localRevision++;
     } catch (err) {
       db.exec('ROLLBACK');
       throw err;
@@ -305,7 +383,10 @@ function initializeStore(db) {
         if (res.changes > 0) changed += res.changes;
       }
       db.exec('COMMIT');
-      if (changed > 0) revision++;
+      if (changed > 0) {
+        revision++;
+        localRevision++;
+      }
       return changed;
     } catch (err) {
       db.exec('ROLLBACK');
@@ -315,7 +396,8 @@ function initializeStore(db) {
 
   function pruneMissingSources(prefix, activeKeys) {
     const all = listSourcesStmt.all().map(r => r.source_key);
-    const stale = all.filter(k => k.startsWith(prefix) && !activeKeys.has(k));
+    const allowRemote = String(prefix || '').startsWith('remote:');
+    const stale = all.filter(k => k.startsWith(prefix) && (allowRemote || !k.startsWith('remote:')) && !activeKeys.has(k));
     if (!stale.length) return;
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -325,10 +407,95 @@ function initializeStore(db) {
       }
       db.exec('COMMIT');
       revision++;
+      if (!allowRemote) localRevision++;
     } catch (err) {
       db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  function deleteSourcesByPrefix(prefix) {
+    if (!prefix) return 0;
+    const all = listSourcesStmt.all().map(r => r.source_key);
+    const targets = all.filter(k => k.startsWith(prefix));
+    if (!targets.length) return 0;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const k of targets) {
+        deleteBySourceStmt.run(k);
+        deleteSourceStmt.run(k);
+      }
+      db.exec('COMMIT');
+      revision++;
+      if (!String(prefix).startsWith('remote:')) localRevision++;
+      return targets.length;
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  function upsertSyncPeer(peer) {
+    if (!peer?.machineId) return;
+    upsertPeerStmt.run(
+      String(peer.machineId),
+      String(peer.machineLabel || peer.machineId),
+      String(peer.platform || ''),
+      String(peer.appVersion || ''),
+      Math.trunc(Number(peer.requestCount) || 0),
+      Number.isFinite(peer.lastExportedAtMs) ? Math.trunc(peer.lastExportedAtMs) : null,
+      Number.isFinite(peer.lastImportedAtMs) ? Math.trunc(peer.lastImportedAtMs) : Date.now(),
+      String(peer.status || 'ok'),
+      String(peer.lastError || '')
+    );
+  }
+
+  function listSyncPeers() {
+    return listPeersStmt.all().map(r => ({
+      machineId: r.machine_id,
+      machineLabel: r.machine_label || r.machine_id,
+      platform: r.platform || '',
+      appVersion: r.app_version || '',
+      requestCount: Number(r.request_count) || 0,
+      lastExportedAtMs: r.last_exported_at_ms ?? null,
+      lastImportedAtMs: r.last_imported_at_ms ?? null,
+      status: r.status || 'ok',
+      lastError: r.last_error || ''
+    }));
+  }
+
+  function pruneMissingSyncPeers(activeMachineIds) {
+    const existing = listPeersStmt.all().map(r => r.machine_id);
+    const stale = existing.filter(id => !activeMachineIds.has(id));
+    if (!stale.length) return [];
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const id of stale) {
+        deletePeerStmt.run(id);
+      }
+      db.exec('COMMIT');
+      return stale;
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  function clearRemoteData() {
+    const removedSources = deleteSourcesByPrefix('remote:');
+    let removedPeers = 0;
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const res = clearPeersStmt.run();
+      removedPeers = Number(res?.changes) || 0;
+      db.exec("DELETE FROM requests WHERE is_remote = 1");
+      db.exec('COMMIT');
+      revision++;
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+    return { removedSources, removedPeers };
   }
 
   function getIngestedCodexDedupeKeys() {
@@ -380,6 +547,9 @@ function initializeStore(db) {
       id: row.id,
       dedupeKey: row.dedupe_key || null,
       sourceKey: row.source_key,
+      machineId: row.machine_id || 'local',
+      machineLabel: row.machine_label || '',
+      isRemote: Boolean(row.is_remote),
       providerDriver: row.provider_driver,
       accountId: row.account_id,
       t3ThreadId: row.t3_thread_id || null,
@@ -418,6 +588,10 @@ function initializeStore(db) {
 
   function listAllRequests() {
     return allRequestsStmt.all().map(mapRow);
+  }
+
+  function listLocalRequests() {
+    return localRequestsStmt.all().map(mapRow);
   }
 
   function getLatestRequestForThread(threadId, nativeSessionIds = []) {
@@ -471,8 +645,9 @@ function initializeStore(db) {
     }));
   }
 
-  function getRangeUsageSummary(startMs, endMs) {
-    const row = rangeUsageSummaryStmt.get(Math.trunc(startMs || 0), Math.trunc(endMs || Date.now()));
+  function getRangeUsageSummary(startMs, endMs, { localOnly = false } = {}) {
+    const stmt = localOnly ? rangeLocalUsageSummaryStmt : rangeUsageSummaryStmt;
+    const row = stmt.get(Math.trunc(startMs || 0), Math.trunc(endMs || Date.now()));
     return {
       requests: Number(row?.requests) || 0,
       costUsd: Number((Number(row?.cost_usd) || 0).toFixed(6)),
@@ -488,21 +663,28 @@ function initializeStore(db) {
     getMeta: key => db.prepare('SELECT value FROM store_meta WHERE key=?').get(key)?.value,
     setMeta: (key, value) => db.prepare('INSERT OR REPLACE INTO store_meta(key,value) VALUES (?,?)').run(key, String(value)),
     getRevision,
+    getLocalRevision,
     nextBillingAfter: ms => nextBilling.get(ms).ts ?? Infinity,
     getSourceStamp,
     replaceSourceRequests,
     syncThreadLinks,
     pruneMissingSources,
+    deleteSourcesByPrefix,
+    upsertSyncPeer,
+    listSyncPeers,
+    pruneMissingSyncPeers,
+    clearRemoteData,
     getIngestedCodexDedupeKeys,
     getSourceUsageCounts,
     saveQuotaSnapshots,
     listAllRequests,
+    listLocalRequests,
     getLatestRequestForThread,
-    countThreadUnread: (id, ts) => db.prepare("SELECT COUNT(*) AS n FROM requests WHERE t3_thread_id=? AND status='error' AND timestamp_ms>?").get(id, ts).n,
+    countThreadUnread: (id, ts) => db.prepare("SELECT COUNT(*) AS n FROM requests WHERE is_remote=0 AND t3_thread_id=? AND status='error' AND timestamp_ms>?").get(id, ts).n,
     listThreadIncidents(id, natives, since) {
       const ids = [...new Set(natives.filter(Boolean))];
       const native = ids.length ? ' OR native_session_id IN (' + ids.map(() => '?').join(',') + ')' : '';
-      return db.prepare("SELECT * FROM requests WHERE (t3_thread_id=?" + native + ") AND timestamp_ms>=? AND (status='error' OR retries>0) ORDER BY timestamp_ms DESC LIMIT 50")
+      return db.prepare("SELECT * FROM requests WHERE is_remote=0 AND (t3_thread_id=?" + native + ") AND timestamp_ms>=? AND (status='error' OR retries>0) ORDER BY timestamp_ms DESC LIMIT 50")
         .all(id,...ids,since).map(mapRow);
     },
     listRecentRequestsForThread,

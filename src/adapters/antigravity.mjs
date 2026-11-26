@@ -13,8 +13,10 @@ import { antigravityInstanceHash } from '../core/paths.mjs';
 import { normalizeModelIdentity } from '../core/pricing.mjs';
 import { computeTurnCacheHit, summarizeThreadUsageMetrics } from '../analytics/usage-metrics.mjs';
 
+const ANTIGRAVITY_PARSE_VERSION = 'v2';
+
 function dbStamp(dbPath) {
-  return [dbPath, `${dbPath}-wal`].map(p => {
+  return ANTIGRAVITY_PARSE_VERSION + '|' + [dbPath, `${dbPath}-wal`].map(p => {
     try {
       const s = statSync(p);
       return `${s.mtimeMs}:${s.size}`;
@@ -22,6 +24,17 @@ function dbStamp(dbPath) {
       return '';
     }
   }).join('|');
+}
+
+function pickStepTimestampMs(stepTime, { preferEnd = false } = {}) {
+  if (!stepTime) return null;
+  const order = preferEnd
+    ? [stepTime.completedMs, stepTime.finishedMs, stepTime.startedMs, stepTime.viewableMs, stepTime.createdMs]
+    : [stepTime.createdMs, stepTime.startedMs, stepTime.viewableMs, stepTime.finishedMs, stepTime.completedMs];
+  for (const ts of order) {
+    if (Number.isFinite(ts) && ts > 0) return ts;
+  }
+  return null;
 }
 
 export function classifyErrorCode(raw = '') {
@@ -62,11 +75,17 @@ export function decodeAntigravityGeneration(bytes) {
   const hasProviderUsage = usage.has(2) || usage.has(5);
 
   let requestId = '';
+  let lastStepIndex = null;
   for (const rawEntry of chat.get(20) || []) {
     const entry = decodeFields(rawEntry);
-    if (stringField(entry, 1) === 'request_id') {
+    const key = stringField(entry, 1);
+    if (key === 'request_id') {
       requestId = stringField(entry, 2);
-      break;
+    } else if (key === 'last_step_index') {
+      const parsedIdx = Number(stringField(entry, 2));
+      if (Number.isInteger(parsedIdx) && parsedIdx >= 0) {
+        lastStepIndex = parsedIdx;
+      }
     }
   }
 
@@ -92,6 +111,7 @@ export function decodeAntigravityGeneration(bytes) {
     executionId: stringField(generation, 4),
     error: stringField(generation, 5),
     stepIndices: decodePackedVarints(generation.get(2) || []),
+    lastStepIndex,
     modelRaw: stringField(chat, 21) || stringField(chat, 19),
     modelEnum,
     executionModelEnum,
@@ -284,15 +304,51 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
         // Track last consumed compaction index so markers inside a previous generation's
         // step span are carried forward to the next generation (fixes P1 #10)
         let lastCheckedMinStep = -1;
-        let fallbackTs = 0;
-        try { fallbackTs = Math.trunc(statSync(fullPath).mtimeMs); } catch {}
+        let fileBirthtimeMs = 0;
+        let fileMtimeMs = 0;
+        try {
+          const st = statSync(fullPath);
+          if (Number.isFinite(st.birthtimeMs) && st.birthtimeMs > 0) fileBirthtimeMs = Math.trunc(st.birthtimeMs);
+          if (Number.isFinite(st.mtimeMs) && st.mtimeMs > 0) fileMtimeMs = Math.trunc(st.mtimeMs);
+        } catch {}
+
+        // Resolve immutable per-generation timestamps without letting moving file mtimeMs
+        // rewrite historical failed generations (which have empty stepIndices) on later writes.
+        const genAnchorTimes = parsed.generations.map(g => {
+          const times = g.stepIndices.map(i => parsed.stepTimes.get(i)).filter(Boolean);
+          const createdCandidates = times.map(t => pickStepTimestampMs(t, { preferEnd: false })).filter(Number.isFinite);
+          if (createdCandidates.length) return Math.min(...createdCandidates);
+          if (Number.isInteger(g.lastStepIndex)) {
+            const anchorTs = pickStepTimestampMs(parsed.stepTimes.get(g.lastStepIndex), { preferEnd: true });
+            if (Number.isFinite(anchorTs)) return anchorTs;
+          }
+          return null;
+        });
+        let firstStepTs = null;
+        for (const t of parsed.stepTimes.values()) {
+          const ts = pickStepTimestampMs(t, { preferEnd: false });
+          if (Number.isFinite(ts) && (firstStepTs == null || ts < firstStepTs)) firstStepTs = ts;
+        }
+        const resolvedGenTimes = genAnchorTimes.slice();
+        for (let idx = 0; idx < resolvedGenTimes.length; idx++) {
+          if (Number.isFinite(resolvedGenTimes[idx])) continue;
+          let neighborTs = null;
+          for (let j = idx - 1; j >= 0; j--) {
+            if (Number.isFinite(resolvedGenTimes[j])) { neighborTs = resolvedGenTimes[j]; break; }
+          }
+          if (!Number.isFinite(neighborTs)) {
+            for (let j = idx + 1; j < resolvedGenTimes.length; j++) {
+              if (Number.isFinite(resolvedGenTimes[j])) { neighborTs = resolvedGenTimes[j]; break; }
+            }
+          }
+          resolvedGenTimes[idx] = neighborTs ?? firstStepTs ?? (fileBirthtimeMs || fileMtimeMs);
+        }
 
         const rows = [];
-        for (const g of parsed.generations) {
+        for (let gi = 0; gi < parsed.generations.length; gi++) {
+          const g = parsed.generations[gi];
           if (!g.modelRaw && !g.error && !g.outputTokens) continue;
-          const times = g.stepIndices.map(i => parsed.stepTimes.get(i)).filter(Boolean);
-          const createdCandidates = times.map(t => t.createdMs).filter(Number.isFinite);
-          const timestampMs = createdCandidates.length ? Math.min(...createdCandidates) : fallbackTs;
+          const timestampMs = resolvedGenTimes[gi] || 0;
 
           const minStep = g.stepIndices.length ? Math.min(...g.stepIndices) : lastCheckedMinStep + 1;
           const compactionBefore = compactSteps.some(cs => cs > lastCheckedMinStep && cs <= minStep);
@@ -323,9 +379,13 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
 
           const primaryError = g.error || g.retryErrors.join(' | ') || '';
           const status = g.error ? 'error' : 'success';
+          // For failed Antigravity generations, chat[17] includes the final failed attempt itself.
+          const retries = g.error
+            ? Math.max(g.retries, Math.max(0, g.retryErrors.length - 1))
+            : Math.max(g.retries, g.retryErrors.length);
 
           rows.push({
-            id: g.requestId || `agy:${inst.accountId}:${nativeSessionId}:${g.index}:${timestampMs}`,
+            id: g.requestId || `agy:${inst.accountId}:${nativeSessionId}:${g.index}`,
             dedupeKey: g.requestId || null,
             providerDriver: 'antigravity',
             accountId: inst.accountId,
@@ -355,7 +415,7 @@ export function createAntigravityAdapter({ paths, store, pricing, t3State }) {
             savedUsd: cost.savedUsd,
             status,
             outcomeKnown: true,
-            retries: Math.max(g.retries, g.retryErrors.length),
+            retries,
             errorCode: classifyErrorCode(primaryError),
             errorText: primaryError.slice(0, 1000),
             compactionBefore

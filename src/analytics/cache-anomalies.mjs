@@ -35,7 +35,7 @@ export function detectCacheAnomalies(requests = [], config = {}) {
   let cleared = 0, dropped = 0, missed = 0;
 
   for (const r of ordered) {
-    const seriesKey = `${r.accountId}::${r.nativeSessionId}::${r.modelId}`;
+    const seriesKey = `${r.machineId || 'local'}::${r.accountId}::${r.nativeSessionId}::${r.modelId}`;
 
     // Always clear BOTH warm baseline AND warmedSeries on explicit compaction BEFORE status or size checks (fixes P1 #10)
     if (r.compactionBefore) {

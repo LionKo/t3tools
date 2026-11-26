@@ -7,7 +7,7 @@ export function sourceGroup(key = '') {
   return key === 't3-usage-scan-cache' ? 't3scan' : 'other';
 }
 
-const dims = ['model','modelAt','account','driver'];
+const dims = ['model','modelAt','account','driver','machine'];
 const dimensions = () => Object.fromEntries(dims.map(k => [k, new Map()]));
 const tokens = ['inputTokens','outputTokens','cacheReadTokens','cacheWriteTokens','thinkingTokens'];
 const counters = ['calls','knownOutcomeCount','successCount','errors','retried','recordedOnly','anomalies','excludedCompactions',
@@ -73,14 +73,16 @@ export function buildRequestLedger(rows, range, q, diagnosis, csvOnly = false, s
     const incident = row.status === 'error' || row.retries > 0;
     if ((q.requestId && row.id !== q.requestId) || (!matches('errorCode',incident ? row.errorCode || 'other' : '')) ||
       (q.status === 'retried' ? !row.retries : q.status === 'error_or_retried' ? !incident : !matches('status',row.status))) continue;
-    if (search && !['t3ThreadTitle','t3ThreadId','nativeSessionId','modelId','modelRaw','accountId','providerDriver','id','errorText'].some(k=>String(row[k] || '').toLowerCase().includes(search))) continue;
+    if (search && !['t3ThreadTitle','t3ThreadId','nativeSessionId','modelId','modelRaw','accountId','providerDriver','machineLabel','machineId','id','errorText'].some(k=>String(row[k] || '').toLowerCase().includes(search))) continue;
     const account = matches('account',row.accountId), model = matches('model',row.modelId), driver = matches('driver',row.providerDriver);
+    const machineFilter = q.machine || 'all';
+    const machine = machineFilter === 'all' ? true : machineFilter === 'local' ? !row.isRemote : (row.machineId || 'local') === machineFilter;
     const group = sourceGroup(row.sourceKey), source = matches('sourceGroup',group);
     const day = !q.day || q.day === formatLocalDay(row.timestampMs);
     const inRange = range.match(row), inSiblingRange = siblingRange.match(row);
     if (!inRange && !inSiblingRange) continue;
     const r = { ...row, sourceGroup: group, cacheAnomaly: diagnosis.anomalies.get(row.id) || null, excludedCompaction: diagnosis.excludedCompactions.has(row.id) };
-    const selected = inRange && account && model && driver;
+    const selected = inRange && account && model && driver && machine;
     if (selected && day && source) {
       if (r.cacheAnomaly) anomalies[r.cacheAnomaly.kind]++;
       if (r.excludedCompaction) anomalies.excludedCompactions++;
@@ -116,10 +118,10 @@ export function buildRequestLedger(rows, range, q, diagnosis, csvOnly = false, s
     for (const dim of dims) {
       const clearAccount = dim === 'account' || dim === 'modelAt';
       const clearModel = dim === 'model' || dim === 'modelAt';
-      if (!(clearAccount ? inSiblingRange : inRange) || (!account && !clearAccount) || (!model && !clearModel) || (!driver && dim !== 'driver')) continue;
-      const name = (dim === 'account' ? r.accountId : dim === 'driver' ? r.providerDriver : r.modelId) || '未知';
+      if (!(clearAccount ? inSiblingRange : inRange) || (!account && !clearAccount) || (!model && !clearModel) || (!driver && dim !== 'driver') || (!machine && dim !== 'machine')) continue;
+      const name = (dim === 'account' ? r.accountId : dim === 'driver' ? r.providerDriver : dim === 'machine' ? (r.machineLabel || (r.isRemote ? r.machineId : '本机')) : r.modelId) || '未知';
       const sub = dim === 'modelAt' ? r.accountId : '';
-      const id = dim === 'modelAt' ? JSON.stringify([name,sub]) : name;
+      const id = dim === 'modelAt' ? JSON.stringify([name,sub]) : dim === 'machine' ? (r.machineId || 'local') : name;
       for (const map of [chartBy[dim],day && by[dim],point?.by[dim]]) {
         if (!map) continue;
         if (!map.has(id)) map.set(id,{...empty(),id,name,sub,driver:r.providerDriver});
@@ -151,7 +153,7 @@ export function buildRequestLedger(rows, range, q, diagnosis, csvOnly = false, s
     by:lists(by),chartBy:chartShares,speeds:{speedMinTokens:50,items}}};
 }
 function exportCsv(rows) {
-  const keys = 'id dedupeKey timestampMs billingTsMs providerDriver accountId sourceGroup sourceKey modelId modelRaw effort role t3ThreadId t3ThreadTitle nativeSessionId status outcomeKnown retries errorCode errorText inputTokens outputTokens cacheReadTokens cacheWriteTokens thinkingTokens cacheHitPercent contextUsedTokens contextMaxTokens costUsd savedUsd durationMs ttftMs streamingMs tps tpsKind tpsEstimated compactionBefore excludedCompaction cacheAnomaly'.split(' ');
+  const keys = 'id dedupeKey timestampMs billingTsMs providerDriver accountId sourceGroup sourceKey modelId modelRaw effort role t3ThreadId t3ThreadTitle nativeSessionId status outcomeKnown retries errorCode errorText inputTokens outputTokens cacheReadTokens cacheWriteTokens thinkingTokens cacheHitPercent contextUsedTokens contextMaxTokens costUsd savedUsd durationMs ttftMs streamingMs tps tpsKind tpsEstimated compactionBefore excludedCompaction cacheAnomaly machineId machineLabel isRemote'.split(' ');
   const quote = value => {
     const text = typeof value === 'string' && /^(?:\s*[=+@-]|[\t\r\n])/.test(value) ? "'" + value : String(value ?? '');
     return '"' + text.replaceAll('"','""') + '"';

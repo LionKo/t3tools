@@ -372,3 +372,77 @@ test('injected overlay immediately clears red badge on ackErrors/resolveErrors w
   assert.ok(!createdOverlayContent.innerHTML.includes('data-tone="danger">3</span>'));
   context.__t3Tools.dispose();
 });
+
+test('resolved session incidents never resurrect or re-alert, failedRuns align with unread counts, and tracker headings match unresolved counts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 't3-resolve-stable-'));
+  const file = join(dir, 'store.sqlite');
+  const store = createTelemetryStore(file);
+  try {
+    const baseNow = Date.now();
+    const base = { accountId: 'acct', providerDriver: 'antigravity', modelId: 'gemini-4-neon', inputTokens: 100, outputTokens: 50 };
+    store.replaceSourceRequests('src-a', '1', [
+      { ...base, id: 'err-x1', timestampMs: baseNow - 4000, status: 'error', errorCode: 'other', errorText: 'canceled 1', nativeSessionId: 'nat-x', t3ThreadId: 'th-x', t3ThreadTitle: '会话 X' },
+      { ...base, id: 'err-x2', timestampMs: baseNow - 3000, status: 'error', errorCode: 'other', errorText: 'canceled 2', nativeSessionId: 'nat-x', t3ThreadId: 'th-x', t3ThreadTitle: '会话 X' },
+      { ...base, id: 'err-y1', timestampMs: baseNow - 2000, status: 'error', errorCode: 'eof', errorText: 'eof y', nativeSessionId: 'nat-y', t3ThreadId: 'th-y', t3ThreadTitle: '会话 Y' }
+    ]);
+    let failedRunEmitted = false;
+    const adapter = { syncAll() {} };
+    const engine = createAnalyticsEngine({
+      store,
+      settings: { get: () => DEFAULT_SETTINGS },
+      antigravityAdapter: adapter,
+      codexAdapter: adapter,
+      quotaAdapter: { readAllQuotas: () => ({ flatWindows: [] }) },
+      t3State: {
+        readFailedRuns: () => failedRunEmitted ? [] : ((failedRunEmitted = true), [{
+          id: 'run:fr1',
+          timestampMs: baseNow + 20,
+          modelId: 'gemini-4-neon',
+          errorCode: 'failed',
+          t3ThreadId: 'th-run',
+          t3ThreadTitle: '失败运行',
+          accountId: 'acct'
+        }])
+      }
+    });
+
+    // Tick alerts: 3 request errors + 1 failedRun => unreadIncidents = 4 in both status & dashboard
+    engine.tickAlerts(baseNow + 50);
+    assert.equal(engine.getAlerts().unreadIncidents, 4);
+    let dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 50 });
+    assert.equal(dash.errorInsights.summary.unreadIncidents, 4);
+    assert.equal(dash.errorInsights.summary.unresolvedFailedRuns, 1);
+
+    // Resolve session X
+    const resX = engine.resolveErrors({ scope: 'session', sessionKey: 'th-x', t3ThreadId: 'th-x', nativeSessionId: 'nat-x' }, baseNow + 100);
+    assert.equal(resX.unreadIncidents, 2); // err-y1 + failedRun
+    const seqAfterResolve = engine.getAlerts().latestSeq;
+
+    // Even if an external rewrite somehow bumps err-x1/err-x2 timestamps later, resolved IDs stay resolved and never re-alert
+    store.replaceSourceRequests('src-a', '2', [
+      { ...base, id: 'err-x1', timestampMs: baseNow + 500, status: 'error', errorCode: 'other', errorText: 'canceled 1', nativeSessionId: 'nat-x', t3ThreadId: 'th-x', t3ThreadTitle: '会话 X' },
+      { ...base, id: 'err-x2', timestampMs: baseNow + 500, status: 'error', errorCode: 'other', errorText: 'canceled 2', nativeSessionId: 'nat-x', t3ThreadId: 'th-x', t3ThreadTitle: '会话 X' },
+      { ...base, id: 'err-y1', timestampMs: baseNow - 2000, status: 'error', errorCode: 'eof', errorText: 'eof y', nativeSessionId: 'nat-y', t3ThreadId: 'th-y', t3ThreadTitle: '会话 Y' }
+    ]);
+    engine.tickAlerts(baseNow + 600);
+    assert.equal(engine.getAlerts().latestSeq, seqAfterResolve);
+    assert.equal(engine.getAlerts().unreadIncidents, 2);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 600 });
+    assert.equal(dash.errorInsights.affectedSessions.find(s => s.sessionKey === 'th-x').resolved, true);
+    assert.equal(dash.errorInsights.summary.unresolvedThreads, 1);
+
+    // Resolve the failedRun item -> both status & dashboard drop to 1
+    const runResolveId = dash.errorInsights.failedRuns[0].resolveId;
+    const resRun = engine.resolveErrors({ scope: 'item', id: runResolveId }, baseNow + 700);
+    assert.equal(resRun.unreadIncidents, 1);
+    dash = engine.getDashboardData({ preset: 'all' }, { now: baseNow + 700 });
+    assert.equal(dash.errorInsights.summary.unreadIncidents, 1);
+
+    // Verify rendered HTML shows "受影响对话 (1 待处理 / 共 2)"
+    const bundleSrc = buildClientBundle({ transport: 'http', authToken: 'tok' });
+    assert.match(bundleSrc, /待处理 \/ 共/);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

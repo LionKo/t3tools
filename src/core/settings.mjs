@@ -26,6 +26,15 @@ export const DEFAULT_SETTINGS = {
     checkIntervalMinutes: 60,
     skippedVersion: ''
   },
+  multiMachineSync: {
+    enabled: false,
+    syncDir: '',
+    machineLabel: '',
+    syncIntervalMs: 30000,
+    includeThreadTitle: true,
+    includeErrorText: false,
+    sidebarScope: 'all'
+  },
   anomalyConfig: {
     maxGapMs: 180000,
     minPrevCache: 4000,
@@ -165,6 +174,36 @@ export function sanitizeSettingsPatch(patch) {
     }
     clean.appUpdates = cleanUpdates;
   }
+  if (Object.hasOwn(patch, 'multiMachineSync')) {
+    const ms = patch.multiMachineSync;
+    if (!ms || typeof ms !== 'object' || Array.isArray(ms)) throw new Error('multiMachineSync 必须为对象');
+    const cleanSync = {};
+    for (const boolKey of ['enabled', 'includeThreadTitle', 'includeErrorText']) {
+      if (!Object.hasOwn(ms, boolKey)) continue;
+      if (typeof ms[boolKey] !== 'boolean') throw new Error(`${boolKey} 必须为布尔值`);
+      cleanSync[boolKey] = ms[boolKey];
+    }
+    if (Object.hasOwn(ms, 'syncDir')) {
+      if (typeof ms.syncDir !== 'string') throw new Error('syncDir 必须为字符串');
+      const dir = ms.syncDir.trim();
+      if (dir.length > 500 || /[\0\r\n]/.test(dir)) throw new Error('syncDir 路径格式无效');
+      cleanSync.syncDir = dir;
+    }
+    if (Object.hasOwn(ms, 'machineLabel')) {
+      if (typeof ms.machineLabel !== 'string') throw new Error('machineLabel 必须为字符串');
+      const lbl = ms.machineLabel.trim();
+      if (lbl.length > 64 || /[\0\r\n]/.test(lbl)) throw new Error('machineLabel 长度或格式无效');
+      cleanSync.machineLabel = lbl;
+    }
+    if (Object.hasOwn(ms, 'syncIntervalMs')) {
+      cleanSync.syncIntervalMs = clampInt(ms.syncIntervalMs, 10000, 600000, DEFAULT_SETTINGS.multiMachineSync.syncIntervalMs);
+    }
+    if (Object.hasOwn(ms, 'sidebarScope')) {
+      if (!['all', 'local'].includes(ms.sidebarScope)) throw new Error('sidebarScope 必须为 all 或 local');
+      cleanSync.sidebarScope = ms.sidebarScope;
+    }
+    clean.multiMachineSync = cleanSync;
+  }
   return clean;
 }
 
@@ -189,6 +228,7 @@ function mergeSettings(base, rawPatch) {
     ...safePatch,
     alertConfig: { ...base.alertConfig, ...safePatch.alertConfig },
     appUpdates: { ...base.appUpdates, ...(safePatch.appUpdates || {}) },
+    multiMachineSync: { ...base.multiMachineSync, ...(safePatch.multiMachineSync || {}) },
     overviewPosition: {
       ...base.overviewPosition,
       ...(safePatch.overviewPosition || {})

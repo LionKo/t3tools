@@ -112,7 +112,7 @@
       if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
       return j.data;
     }
-    if (['focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates','checkAppUpdate','installAppUpdate','skipAppUpdate'].includes(action)) {
+    if (['focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates','checkAppUpdate','installAppUpdate','skipAppUpdate','triggerMultiMachineSync','clearRemoteSyncData'].includes(action)) {
       const path = {
         focusThread: '/api/t3/focus-thread',
         ackErrors: '/api/errors/ack',
@@ -121,7 +121,9 @@
         checkRuntimeUpdates: '/api/runtime-updates/check',
         checkAppUpdate: '/api/app-update/check',
         installAppUpdate: '/api/app-update/install',
-        skipAppUpdate: '/api/app-update/skip'
+        skipAppUpdate: '/api/app-update/skip',
+        triggerMultiMachineSync: '/api/sync/multi-machine',
+        clearRemoteSyncData: '/api/sync/multi-machine/clear-remote'
       }[action];
       const res = await http(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
       const json = await res.json();
@@ -864,6 +866,7 @@
     tab: 'overview',
     preset: initialDashPreset,
     account: 'all',
+    machine: 'all',
     model: 'all',
     status: 'all',
     session: '',
@@ -1355,6 +1358,8 @@
 
   let appUpdatePollTimer = null;
   let manualAppUpdateCheckInFlight = false;
+  let overlayStatusSeq = 0;
+  let alertMutationSeq = 0;
 
   function syncAppUpdatePoll(upd) {
     const busy = Boolean(upd && ['checking', 'downloading', 'verifying', 'ready'].includes(upd.status));
@@ -1382,13 +1387,18 @@
   }
 
   async function fetchOverlayStatus({ fresh = false } = {}) {
+    const seq = ++overlayStatusSeq;
+    const mutAtStart = alertMutationSeq;
     const initialSettings = lastSettings;
     const revision = settingsRevision;
     try {
       const st = await callRpc('getStatus', fresh ? { fresh: true } : {});
-      if (disposed) return;
+      if (disposed || seq !== overlayStatusSeq) return;
       if (manualAppUpdateCheckInFlight && lastAppUpdate) {
         st.appUpdate = lastAppUpdate;
+      }
+      if (mutAtStart !== alertMutationSeq && lastStatus?.alerts) {
+        st.alerts = lastStatus.alerts;
       }
       lastStatus = st;
       if (st?.appUpdate) {
@@ -1398,7 +1408,11 @@
         renderSidebarWidget();
       }
       if (st?.settings && revision === settingsRevision && lastSettings === initialSettings) lastSettings = st.settings;
-      if (dashboardOpen) renderDashboardOverlay();
+      if (dashboardOpen) {
+        const activeEl = overlayMount?.shadow?.activeElement;
+        const editingSyncInput = dashState.tab === 'settings' && activeEl && activeEl.tagName === 'INPUT' && activeEl.type === 'text' && activeEl.dataset?.syncSetting;
+        if (!editingSyncInput) renderDashboardOverlay();
+      }
     } catch {}
   }
 
@@ -1608,6 +1622,8 @@
         rpc:async (action,params)=>{
           const res = await callRpc(action,params);
           if (['ackErrors','resolveErrors'].includes(action)) {
+            alertMutationSeq++;
+            overlayStatusSeq++;
             applyAlertCounts(res);
             fetchOverlayStatus();
           }
@@ -1675,6 +1691,35 @@
       });
       return;
     }
+    const machEl = target.closest?.('[data-pt-machine-trigger]');
+    if (machEl) {
+      openPtMachineMenu(machEl, lastDash?.facets?.machines || [], dashState.machine, nextMach => {
+        closePtPopMenu();
+        dashState.machine = nextMach || 'all';
+        dashState.page = 1;
+        refreshDashboard();
+      });
+      return;
+    }
+    const suggestEl = target.closest?.('[data-pt-sync-suggest]');
+    if (suggestEl) {
+      const suggestedDir = suggestEl.getAttribute('data-pt-sync-suggest') || '';
+      try {
+        const updated = await callRpc('updateSettings', { multiMachineSync: { syncDir: suggestedDir } });
+        if (updated) {
+          settingsRevision++;
+          lastSettings = updated;
+          if (lastLive) lastLive.settings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+        }
+        await fetchOverlayStatus({ fresh: false });
+        renderDashboardOverlay();
+        showOverlayToast('已填入同步目录');
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
     const actionEl = target.closest?.('[data-pt-action]');
     if (actionEl) {
       const action = actionEl.getAttribute('data-pt-action');
@@ -1693,6 +1738,56 @@
           setTimeout(() => positionSegsThumb(overlayMount?.contentEl, { animate: false }), 200);
         } else {
           renderDashboardOverlay();
+        }
+        return;
+      }
+      if (action === 'save-sync-paths') {
+        const card = overlayMount?.contentEl?.querySelector('[data-pt-multi-sync-card]');
+        const dirInput = card?.querySelector('[data-sync-setting="syncDir"]');
+        const labelInput = card?.querySelector('[data-sync-setting="machineLabel"]');
+        const patch = {};
+        if (dirInput) patch.syncDir = dirInput.value.trim();
+        if (labelInput) patch.machineLabel = labelInput.value.trim();
+        try {
+          const updated = await callRpc('updateSettings', { multiMachineSync: patch });
+          if (updated) {
+            settingsRevision++;
+            lastSettings = updated;
+            if (lastLive) lastLive.settings = updated;
+            if (lastStatus) lastStatus.settings = updated;
+          }
+          await fetchOverlayStatus({ fresh: false });
+          refreshDashboard();
+          pollLive({ force: true });
+          showOverlayToast('多机同步配置已保存');
+        } catch (err) {
+          showOverlayToast(err?.message || '保存失败');
+        }
+        return;
+      }
+      if (action === 'sync-multi-machine') {
+        showOverlayToast('正在执行多机同步...');
+        try {
+          const st = await callRpc('triggerMultiMachineSync', {});
+          await fetchOverlayStatus({ fresh: false });
+          refreshDashboard();
+          pollLive({ force: true });
+          showOverlayToast(st?.lastError ? ('同步部分异常：' + st.lastError) : '多机同步完成');
+        } catch (err) {
+          showOverlayToast(err?.message || '同步失败');
+        }
+        return;
+      }
+      if (action === 'clear-remote-sync') {
+        try {
+          await callRpc('clearRemoteSyncData', {});
+          if (dashState.machine !== 'all' && dashState.machine !== 'local') dashState.machine = 'all';
+          await fetchOverlayStatus({ fresh: false });
+          refreshDashboard();
+          pollLive({ force: true });
+          showOverlayToast('已清除远端同步缓存');
+        } catch (err) {
+          showOverlayToast(err?.message || '清除失败');
         }
         return;
       }
@@ -1879,6 +1974,32 @@
 
   async function onDashboardChange(e) {
     const target = e.target;
+    if (target?.dataset?.syncSetting) {
+      const key = target.dataset.syncSetting;
+      const value = target.type === 'checkbox' ? Boolean(target.checked) : target.value.trim();
+      const patch = { [key]: value };
+      if (key === 'enabled' && value) {
+        const dirInput = overlayMount?.contentEl?.querySelector('[data-pt-multi-sync-card] [data-sync-setting="syncDir"]');
+        if (dirInput && dirInput.value.trim()) patch.syncDir = dirInput.value.trim();
+      }
+      try {
+        const updated = await callRpc('updateSettings', { multiMachineSync: patch });
+        if (updated) {
+          settingsRevision++;
+          lastSettings = updated;
+          if (lastLive) lastLive.settings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+        }
+        await fetchOverlayStatus({ fresh: false });
+        renderDashboardOverlay();
+        refreshDashboard();
+        pollLive({ force: true });
+        showOverlayToast('设置已保存');
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
     if (target?.dataset?.appUpdateSetting) {
       const key = target.dataset.appUpdateSetting;
       const value = key === 'checkIntervalMinutes' ? Number(target.value) : Boolean(target.checked);
@@ -1999,6 +2120,7 @@
     if (!force && inFlightPolls > 0) return;
     const reqSeq = ++liveRequestSeq;
     const settingsAtStart = settingsRevision;
+    const alertMutAtStart = alertMutationSeq;
     inFlightPolls++;
     try {
       ensureMounts();
@@ -2020,7 +2142,7 @@
         lastSettings = live.settings;
       }
       const prevAlerts = lastLive?.globalAlerts;
-      const nextAlerts = live?.globalAlerts;
+      const nextAlerts = alertMutAtStart === alertMutationSeq ? live?.globalAlerts : null;
       const alertsChanged = Boolean(
         nextAlerts && (
           prevAlerts?.unreadCount !== nextAlerts.unreadCount ||
@@ -2029,6 +2151,7 @@
         )
       );
       if (nextAlerts) applyAlertCounts(nextAlerts);
+      else if (live && lastLive?.globalAlerts) live.globalAlerts = lastLive.globalAlerts;
       if (dashboardOpen && alertsChanged) {
         if (dashState.tab === 'models') refreshDashboard();
         else renderDashboardOverlay();

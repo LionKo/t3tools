@@ -151,6 +151,9 @@ test('both inline standalone scripts and shared ledger renderers handle data, de
   // Plan A split: Overview owns interactive KPI strip, trend + rank drill-down, account chip toggle, and heatmap error gating
   const ov = renderOverviewCoreHtml(data, { account: 'main', heatmapMetric: 'errors' });
   for(const cls of ['pt-led-strip','pt-led-chart','pt-led-rank','data-pt-led-day','data-pt-ov-jump="anomaly"','data-pt-ov-account="main"','pt-quota-chip active'])assert.ok(ov.includes(cls),cls);
+  assert.ok(src.includes('@container(max-width:740px){.pt-led-strip{grid-template-columns:repeat(6,minmax(0,1fr))}'));
+  assert.ok(src.includes('@container(max-width:480px){.pt-led-strip{grid-template-columns:repeat(2,minmax(0,1fr))}'));
+  assert.equal(src.includes('@container(max-width:960px){.pt-led-strip'), false);
   assert.equal(ov.includes('data-pt-heatmap-day="2026-10-01"'), false);
   assert.ok(ov.includes('data-pt-heatmap-day="2026-10-02"'));
   // Plan A split: Models Analysis owns median speed / median TTFT ranking & clickable model drill-down

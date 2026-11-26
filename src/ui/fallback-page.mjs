@@ -492,6 +492,8 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
               </div>
             </div>
 
+            <div id="settings-multi-machine-sync-slot"></div>
+
             <div class="settings-group-title">应用更新</div>
             <div class="pt-card">
               <div class="setting-row" style="align-items:flex-start;">
@@ -662,6 +664,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         tab: activeView,
         preset: initialPreset,
         account: 'all',
+        machine: 'all',
         model: 'all',
         status: 'all',
         session: '',
@@ -758,7 +761,10 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         viewDataHeadEl.classList.toggle('active', show);
         if (!show) return;
 
-        if (!viewDataHeadEl.querySelector('[data-pt-period-segs]')) {
+        const machines = Array.isArray(dashData?.facets?.machines) ? dashData.facets.machines : [];
+        const needMachineBtn = machines.length > 1 || String(state.machine || 'all') !== 'all';
+        const hasMachineBtn = Boolean(viewDataHeadEl.querySelector('[data-pt-machine-trigger]'));
+        if (!viewDataHeadEl.querySelector('[data-pt-period-segs]') || needMachineBtn !== hasMachineBtn) {
           viewDataHeadEl.innerHTML = renderViewToolbarHtml(dashData, state, { busy: isRefreshing });
           positionSegsThumb(viewDataHeadEl, { animate: false });
           return;
@@ -777,6 +783,24 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           rangeBtn.setAttribute('aria-selected', isCustom ? 'true' : 'false');
           const span = rangeBtn.querySelector('span');
           if (span) span.textContent = isCustom ? formatPeriodRangeLabel(preset) : '自定义';
+        }
+        const machineBtn = viewDataHeadEl.querySelector('[data-pt-machine-trigger]');
+        if (machineBtn) {
+          const mach = String(state.machine || 'all');
+          const isSet = mach !== 'all';
+          machineBtn.classList.toggle('set', isSet);
+          let dot = machineBtn.querySelector('.pt-pick-dot');
+          if (isSet && !dot) {
+            dot = document.createElement('span');
+            dot.className = 'pt-pick-dot';
+            dot.setAttribute('aria-hidden', 'true');
+            machineBtn.prepend(dot);
+          } else if (!isSet && dot) {
+            dot.remove();
+          }
+          const lbl = machineBtn.querySelector('.pt-pick-btn-label');
+          const found = machines.find(m => m.id === mach);
+          if (lbl) lbl.textContent = isSet ? (found ? (found.isLocal ? found.label + '（本机）' : found.label) : (mach === 'local' ? '仅本机' : mach)) : '全部电脑';
         }
         const accBtn = viewDataHeadEl.querySelector('[data-pt-account-trigger]');
         if (accBtn) {
@@ -816,6 +840,14 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       function applyAccountChoice(nextAccount) {
         closePtPopMenu();
         state.account = nextAccount || 'all';
+        state.page = 1;
+        syncDataHead({ animate: false });
+        fetchDash();
+      }
+
+      function applyMachineChoice(nextMachine) {
+        closePtPopMenu();
+        state.machine = nextMachine || 'all';
         state.page = 1;
         syncDataHead({ animate: false });
         fetchDash();
@@ -948,6 +980,14 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
                 : 'var(--pt-muted, #9ca3af)';
         }
         renderAppUpdateUi(statusData?.appUpdate, cfg.appUpdates);
+        const multiSyncSlot = document.getElementById('settings-multi-machine-sync-slot');
+        if (multiSyncSlot) {
+          const activeEl = document.activeElement;
+          const editingSyncInput = activeEl && multiSyncSlot.contains(activeEl) && activeEl.tagName === 'INPUT' && activeEl.type === 'text';
+          if (!editingSyncInput) {
+            multiSyncSlot.innerHTML = renderMultiMachineSyncCardHtml(statusData, cfg);
+          }
+        }
       }
 
       function formatUpdateBytes(bytes) {
@@ -1286,7 +1326,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
             switchView(msg.view);
             if (msg.focusErrors) {
               focusErrorsOnRender = true;
-              Object.assign(state,{preset:'all',account:'all',day:'',errorCode:'all',errorModel:'',errorSession:''});
+              Object.assign(state,{preset:'all',account:'all',machine:'all',day:'',errorCode:'all',errorModel:'',errorSession:''});
               fetchDash();
             }
           } else if (msg.type === 'refresh') {
@@ -1313,6 +1353,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
             const res = await postApi(pathMap[action] || '/api/t3/focus-thread',params);
             if (!res.ok) throw new Error(res.error);
             if (['ackErrors','resolveErrors'].includes(action)) {
+              statusSeq++;
               if (res.data && typeof res.data.unreadCount === 'number') {
                 statusData = {
                   ...(statusData || {}),
@@ -1352,6 +1393,23 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           openPtAccountMenu(accBtn, dashData?.facets?.accounts || [], state.account, applyAccountChoice);
           return;
         }
+        const machBtn = target.closest?.('[data-pt-machine-trigger]');
+        if (machBtn) {
+          openPtMachineMenu(machBtn, dashData?.facets?.machines || [], state.machine, applyMachineChoice);
+          return;
+        }
+        const suggestBtn = target.closest?.('[data-pt-sync-suggest]');
+        if (suggestBtn) {
+          const suggestedDir = suggestBtn.getAttribute('data-pt-sync-suggest') || '';
+          const input = document.querySelector('#settings-multi-machine-sync-slot [data-sync-setting="syncDir"]');
+          if (input) input.value = suggestedDir;
+          if (await saveSetting('multiMachineSync.syncDir', { multiMachineSync: { syncDir: suggestedDir } })) {
+            showToast('已填入同步目录，开启开关即可生效');
+            await fetchStatus();
+            await fetchDash();
+          }
+          return;
+        }
         const themeBtn = target.closest?.('[data-pt-theme]');
         if (themeBtn) {
           const next = themeBtn.getAttribute('data-pt-theme') === 'light' ? 'light' : 'dark';
@@ -1372,6 +1430,35 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
             positionSegsThumb(viewDataHeadEl, { animate: false });
             positionSegsThumb(settingsThemeSegsEl, { animate: false });
           }, 200);
+          return;
+        }
+        if (act === 'save-sync-paths') {
+          const slot = document.getElementById('settings-multi-machine-sync-slot');
+          const dirInput = slot?.querySelector('[data-sync-setting="syncDir"]');
+          const labelInput = slot?.querySelector('[data-sync-setting="machineLabel"]');
+          const patch = {};
+          if (dirInput) patch.syncDir = dirInput.value.trim();
+          if (labelInput) patch.machineLabel = labelInput.value.trim();
+          if (await saveSetting('multiMachineSync.paths', { multiMachineSync: patch })) {
+            showToast('多机同步配置已保存');
+            await fetchStatus();
+            await fetchDash();
+          }
+          return;
+        }
+        if (act === 'sync-multi-machine') {
+          showToast('正在执行多机同步...');
+          const res = await postApi('/api/sync/multi-machine', {});
+          await Promise.all([fetchStatus(), fetchDash()]);
+          showToast(res?.ok ? (res.data?.lastError ? '同步部分异常：' + res.data.lastError : '多机同步完成') : (res?.error || '同步失败'));
+          return;
+        }
+        if (act === 'clear-remote-sync') {
+          if (!confirm('将清空本机已导入的远端电脑统计缓存（不影响本机数据与同步目录文件），是否继续？')) return;
+          const res = await postApi('/api/sync/multi-machine/clear-remote', {});
+          if (state.machine !== 'all' && state.machine !== 'local') state.machine = 'all';
+          await Promise.all([fetchStatus(), fetchDash()]);
+          showToast(res?.ok ? '已清除远端同步缓存' : (res?.error || '清除失败'));
           return;
         }
         if (act === 'test-alert') { const res = await postApi('/api/alerts/test',{}); showToast(res.ok ? '已发送测试告警' : res.error); return; }
@@ -1574,6 +1661,21 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           if (saved) showToast('设置已保存');
           else if (e.target.type === 'number' && statusData?.settings?.alertConfig) {
             e.target.value = statusData.settings.alertConfig[key] / (key.endsWith('Ms') ? 1000 : 1);
+          }
+          return;
+        }
+        if (e.target.dataset.syncSetting) {
+          const key = e.target.dataset.syncSetting;
+          const value = e.target.type === 'checkbox' ? Boolean(e.target.checked) : e.target.value.trim();
+          const patch = { [key]: value };
+          if (key === 'enabled' && value) {
+            const dirInput = document.querySelector('#settings-multi-machine-sync-slot [data-sync-setting="syncDir"]');
+            if (dirInput && dirInput.value.trim()) patch.syncDir = dirInput.value.trim();
+          }
+          if (await saveSetting('multiMachineSync.' + key, { multiMachineSync: patch })) {
+            showToast('设置已保存');
+            await fetchStatus();
+            await fetchDash();
           }
           return;
         }

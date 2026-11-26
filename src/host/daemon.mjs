@@ -9,6 +9,7 @@ import { createAntigravityAdapter } from '../adapters/antigravity.mjs';
 import { createCodexAdapter } from '../adapters/codex.mjs';
 import { createQuotaAdapter } from '../adapters/quota.mjs';
 import { createRuntimeUpdatesAdapter } from '../adapters/runtime-updates.mjs';
+import { createFolderSync } from '../sync/folder-sync.mjs';
 import { createAnalyticsEngine } from '../analytics/engine.mjs';
 import { createCdpHost, readT3ServerOrigin } from './cdp-host.mjs';
 import { createHttpServer } from './http-server.mjs';
@@ -70,6 +71,12 @@ export function createRuntimeContext(pathOverrides = {}, options = {}) {
     fetchImpl: options.fetchImpl,
     enableRemoteCheck: options.enableRemoteUpdateCheck !== false
   });
+  const folderSync = createFolderSync({
+    paths,
+    store,
+    settings,
+    appVersion: PLUGIN_VERSION
+  });
   const engine = createAnalyticsEngine({
     store,
     settings,
@@ -77,7 +84,8 @@ export function createRuntimeContext(pathOverrides = {}, options = {}) {
     antigravityAdapter,
     codexAdapter,
     quotaAdapter,
-    runtimeUpdatesAdapter
+    runtimeUpdatesAdapter,
+    folderSync
   });
 
   return {
@@ -91,6 +99,7 @@ export function createRuntimeContext(pathOverrides = {}, options = {}) {
     codexAdapter,
     quotaAdapter,
     runtimeUpdatesAdapter,
+    folderSync,
     engine,
     close() {
       store.close();
@@ -113,6 +122,7 @@ export async function startDaemon({
   enableRemoteUpdateCheck = true,
   enableAppUpdateCheck = enableRemoteUpdateCheck,
   appUpdateOptions = {},
+  deferInitialSync = false,
   onAutoExit = null,
   onShutdownRequest = null
 } = {}) {
@@ -140,7 +150,9 @@ export async function startDaemon({
     }
   }
 
-  ctx.engine.syncAll({ force: true });
+  if (!deferInitialSync) {
+    ctx.engine.syncAll({ force: true });
+  }
 
   const startedAtMs = Date.now();
   let cdpHost = null;
@@ -182,6 +194,7 @@ export async function startDaemon({
       alerts: ctx.engine.getAlerts(),
       runtimeUpdates: ctx.engine.getRuntimeUpdates(now),
       appUpdate: appUpdater.getStatus(),
+      multiMachineSync: ctx.folderSync.getStatus(now),
       todayUsage: ctx.engine.getTodayUsageSummary(now),
       sidebarUsage: ctx.engine.getSidebarUsageSummary(now, { preset: settings.sidebarUsageRange }),
       settings,
@@ -223,6 +236,9 @@ export async function startDaemon({
         return ctx.settings.get();
       case 'updateSettings': {
         const updated = ctx.settings.update(params || {});
+        if (params?.multiMachineSync) {
+          try { ctx.folderSync.sync({ force: true }); } catch {}
+        }
         if (enableAppUpdateCheck && params?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
           appUpdater.checkForUpdates({ force: false }).catch(() => {});
         }
@@ -230,7 +246,12 @@ export async function startDaemon({
       }
       case 'forceSync':
         ctx.engine.syncAll({ force: true });
-        return { syncedAtMs: Date.now() };
+        return { syncedAtMs: Date.now(), multiMachineSync: ctx.folderSync.getStatus() };
+      case 'triggerMultiMachineSync':
+        ctx.engine.syncAll({ force: true });
+        return ctx.folderSync.sync({ force: true });
+      case 'clearRemoteSyncData':
+        return ctx.folderSync.clearRemoteData();
       case 'checkRuntimeUpdates':
         return ctx.engine.checkRuntimeUpdates();
       case 'checkAppUpdate':
@@ -268,6 +289,9 @@ export async function startDaemon({
       }
       if (process.platform === 'win32' && patch?.autoPatchLauncher === true && autoPatchDebugArg) {
         try { patchT3ShortcutsDebugArg(ctx.paths); } catch {}
+      }
+      if (patch?.multiMachineSync) {
+        try { ctx.folderSync.sync({ force: true }); } catch {}
       }
       if (enableAppUpdateCheck && patch?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
         appUpdater.checkForUpdates({ force: false }).catch(() => {});
@@ -309,6 +333,7 @@ export async function startDaemon({
     }
   });
 
+  let initialSyncTimer = null;
   let alertTimer = null;
   let watchdogTimer = null;
   let stopped = false;
@@ -344,11 +369,26 @@ export async function startDaemon({
 
     // Scheme A lifecycle watchdog: exit cleanly once T3 Code has completely exited
     // (after startup grace period + 2 consecutive misses so T3 restarts/updates survive smoothly)
-    ctx.engine.tickAlerts();
+    if (!deferInitialSync) {
+      ctx.engine.tickAlerts();
+    }
     appUpdater.start();
   } catch (err) {
     await stop('startup failure');
     throw err;
+  }
+  if (deferInitialSync) {
+    initialSyncTimer = setTimeout(() => {
+      initialSyncTimer = null;
+      if (stopped) return;
+      try {
+        ctx.engine.syncAll({ force: true });
+        ctx.engine.tickAlerts();
+      } catch (err) {
+        console.warn('首次后台同步失败', err?.message || err);
+      }
+    }, 0);
+    initialSyncTimer.unref?.();
   }
   alertTimer = setInterval(() => {
     try { ctx.engine.tickAlerts(); } catch (err) { console.warn('告警同步失败', err.message); }
@@ -367,6 +407,10 @@ export async function startDaemon({
 
   async function closeResources() {
     appUpdater.stop();
+    if (initialSyncTimer) {
+      clearTimeout(initialSyncTimer);
+      initialSyncTimer = null;
+    }
     clearInterval(alertTimer);
     if (watchdogTimer) {
       clearInterval(watchdogTimer);

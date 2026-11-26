@@ -191,13 +191,15 @@ const PT_SHARED_CSS = `
 .pt-led-req h3{display:flex;gap:10px;align-items:center}.pt-led-req pre{padding:10px;background:var(--pt-surface)}
 .pt-led-root *{box-sizing:border-box}.pt-led-root small{color:var(--pt-muted);font-size:11px}.pt-led-tools,.pt-led-tools>div,.pt-led-bar,.pt-led-head,.pt-led-pager{display:flex;align-items:center;flex-wrap:wrap;gap:7px}.pt-led-tools{margin-bottom:12px}.pt-led-tools label,.pt-led-bar span{font-size:12px;color:var(--pt-muted)}.pt-led-tools select{max-width:175px}.pt-led-tools input{flex:1;min-width:180px}.pt-led-root button{cursor:pointer}.pt-led-root button.on{background:var(--pt-surface);color:var(--pt-accent);border-color:var(--pt-accent)}.pt-led-root button:disabled{opacity:.45;cursor:default}
 .pt-led-segs{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:7px;background:var(--pt-surface);border:1px solid var(--pt-border)}.pt-led-segs button{border:0;background:transparent;padding:3px 9px;border-radius:5px;color:var(--pt-muted)}.pt-led-segs button.on{background:var(--pt-card);color:var(--pt-fg);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.2)}
-.pt-led-strip,.pt-led-trend,.pt-led-speed,.pt-led-vias,.pt-led-box,.pt-led-wrap{border:1px solid var(--pt-border);border-radius:var(--pt-radius,10px);background:var(--pt-card);margin-bottom:12px}.pt-led-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr))}.pt-led-strip>div{padding:12px 14px;min-width:0;border-inline-end:1px solid var(--pt-border);transition:background-color .14s ease}.pt-led-strip>div:last-child{border-inline-end:0}.pt-led-strip>div[data-pt-ov-jump]{cursor:pointer}.pt-led-strip>div[data-pt-ov-jump]:hover{background:color-mix(in srgb,var(--pt-accent) 6%,var(--pt-card))}.pt-led-strip strong,.pt-led-strip small{display:block}.pt-led-strip strong{font-size:22px;letter-spacing:-.025em;margin:3px 0}.pt-led-cost,.duration-fast,.pt-led-st.success{color:var(--pt-success)}.duration-slow{color:var(--pt-warning)}.duration-long,.pt-led-st.error,.pt-led-jump[data-pt-led-jump=error],.pt-led-jump[data-pt-ov-jump=error]{color:var(--pt-danger)}.pt-led-root .pt-led-jump{background:none;border:0;padding:0;font-size:inherit;text-decoration:underline dotted;color:inherit;cursor:pointer}.pt-led-root .pt-led-jump:hover{color:var(--pt-accent)}.pt-led-meter{height:5px;border-radius:3px;overflow:hidden;background:var(--pt-surface);margin-top:7px}.pt-led-meter i,.pt-led-hscroll i{display:block;height:100%;background:var(--pt-success)}
+.pt-led-strip,.pt-led-trend,.pt-led-speed,.pt-led-vias,.pt-led-box,.pt-led-wrap{border:1px solid var(--pt-border);border-radius:var(--pt-radius,10px);background:var(--pt-card);margin-bottom:12px}.pt-led-strip{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr) minmax(0,.82fr) minmax(0,1.05fr) minmax(0,1.18fr);overflow:hidden}.pt-led-strip>div{padding:9px 11px;min-width:0;border-inline-end:1px solid var(--pt-border);transition:background-color .14s ease}.pt-led-strip>div:last-child{border-inline-end:0}.pt-led-strip>div[data-pt-ov-jump]{cursor:pointer}.pt-led-strip>div[data-pt-ov-jump]:hover{background:color-mix(in srgb,var(--pt-accent) 6%,var(--pt-card))}.pt-led-strip strong,.pt-led-strip small{display:block}.pt-led-strip strong{font-size:19px;line-height:1.2;letter-spacing:-.025em;margin:2px 0 3px;white-space:nowrap}.pt-led-strip small{line-height:1.35}.pt-led-cost,.duration-fast,.pt-led-st.success{color:var(--pt-success)}.duration-slow{color:var(--pt-warning)}.duration-long,.pt-led-st.error,.pt-led-jump[data-pt-led-jump=error],.pt-led-jump[data-pt-ov-jump=error]{color:var(--pt-danger)}.pt-led-root .pt-led-jump{background:none;border:0;padding:0;font-size:inherit;text-decoration:underline dotted;color:inherit;cursor:pointer}.pt-led-root .pt-led-jump:hover{color:var(--pt-accent)}.pt-led-meter{height:5px;border-radius:3px;overflow:hidden;background:var(--pt-surface);margin-top:6px}.pt-led-meter i,.pt-led-hscroll i{display:block;height:100%;background:var(--pt-success)}
 .pt-ov-root{display:flex;flex-direction:column;gap:12px}.pt-ov-root .pt-led-strip,.pt-ov-root .pt-led-trend{margin-bottom:0}.pt-cycle-pill{appearance:none;border:1px solid var(--pt-border);background:var(--pt-card);color:var(--pt-fg);border-radius:999px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;transition:border-color .14s ease,background-color .14s ease}.pt-cycle-pill:hover{border-color:var(--pt-accent);background:color-mix(in srgb,var(--pt-accent) 10%,var(--pt-card))}.pt-quota-chip.active{border-color:var(--pt-accent);background:color-mix(in srgb,var(--pt-accent) 14%,var(--pt-surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--pt-accent) 30%,transparent)}.pt-ov-hint{font-size:11px;color:var(--pt-muted);margin-inline-start:6px}.pt-led-head-card{border:1px solid var(--pt-border);border-radius:var(--pt-radius,10px);background:var(--pt-card);margin-bottom:10px}.pt-model-link{appearance:none;border:0;background:none;padding:0;color:var(--pt-fg);font:inherit;font-weight:700;cursor:pointer;text-align:left;text-decoration:underline dotted transparent;transition:color .14s ease,text-decoration-color .14s ease}.pt-model-link:hover{color:var(--pt-accent);text-decoration-color:var(--pt-accent)}.pt-sort-th{appearance:none;border:0;background:none;padding:0;color:inherit;font:inherit;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:3px}.pt-sort-th:hover,.pt-sort-th.on{color:var(--pt-fg)}
 .pt-led-bar,.pt-led-head,.pt-led-speed h4{padding:9px 12px}.pt-led-bar span,.pt-led-head small:first-of-type{margin-inline-start:auto}.pt-led-body{display:grid;grid-template-columns:minmax(0,1fr) 272px;border-top:1px solid var(--pt-border)}.pt-led-chart{height:236px;position:relative}.pt-led-chart svg{display:block;width:100%;height:100%;font:11px var(--pt-font-sans);fill:var(--pt-muted)}.pt-led-hit{fill:transparent;cursor:pointer}.pt-led-hit:hover,.pt-led-hit.selected{fill:var(--pt-accent);fill-opacity:.14}.pt-led-tip{position:absolute;z-index:4;background:var(--pt-card);padding:8px 10px;border:1px solid var(--pt-border);border-radius:8px;box-shadow:var(--pt-shadow);pointer-events:none;font-size:11px;max-width:100%;max-height:100%;overflow:hidden}
 .pt-led-rank{height:0;min-height:100%;overflow-y:auto;border-left:1px solid var(--pt-border);padding:5px}.pt-led-rank.more-below{mask-image:linear-gradient(#000 92%,transparent)}.pt-led-rank.more-above{mask-image:linear-gradient(transparent,#000 8%)}.pt-led-rank.more-above.more-below{mask-image:linear-gradient(transparent,#000 8%,#000 92%,transparent)}.pt-led-rank button{display:grid;width:100%;grid-template-columns:minmax(0,1fr) auto;gap:4px;text-align:left;padding:7px;border-radius:7px;background:none;border:0;color:inherit}.pt-led-rank b{color:var(--sw);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pt-led-rank i,.pt-led-rank small{grid-column:span 2}.pt-led-rank i{height:3px;background:var(--sw);border-radius:4px}.pt-led-rank button:hover,.pt-led tbody tr:hover{background:var(--pt-surface)}
 .pt-led-speed>div{max-height:240px;overflow:auto}.pt-led-speed h4{margin:0}.pt-led-speed th{position:sticky;top:0;background:var(--pt-card)}.pt-led-speed table,.pt-led{width:100%;border-collapse:collapse;font-size:12px}.pt-led-speed th,.pt-led-speed td,.pt-led th,.pt-led td{padding:7px 9px;text-align:left;border-bottom:1px solid var(--pt-border)}.pt-led-wrap{overflow:auto;margin-bottom:0}.pt-led th,.pt-led td{white-space:nowrap}.pt-led td.session,.pt-led td.model,.pt-led td.where{max-width:170px;overflow:hidden;text-overflow:ellipsis}.pt-led td.n,.pt-led th.n{text-align:right}.pt-led td small{display:block}.pt-led tr{cursor:pointer}.pt-led-dot{display:inline-block;background:var(--pt-chart-1);width:6px;height:6px;border-radius:50%;vertical-align:middle;margin-right:5px}.pt-led-dot.cx{background:var(--pt-chart-2)}.pt-led-wrap.tight .lc-opt,.pt-led-wrap.tight2 .lc-opt2{display:none}.tight2 .duration:after{content:attr(data-ttft);display:block;font-size:10px;color:var(--pt-muted)}.pt-led-hscroll{overflow-x:auto;position:sticky;bottom:0;background:var(--pt-card);height:16px;z-index:2}.pt-led-hscroll i{height:1px;background:none}.pt-led-pager{justify-content:center;padding:12px}.pt-led-head{font-size:12px}
 .pt-led-vias{display:flex;overflow:auto}.pt-led-vias button{position:relative;flex:1;min-width:120px;border:0;border-radius:0;background:none;padding:10px 14px;text-align:left;display:block}.pt-led-vias button+button{border-left:1px solid var(--pt-border)}.pt-led-vias button:hover{background:var(--pt-surface)}.pt-led-vias button.on{background:transparent;color:var(--pt-fg);font-weight:600}.pt-led-vias small{display:block;margin-top:2px;font-weight:400}.pt-led-vias .on:after{content:"";position:absolute;bottom:0;left:14px;right:14px;height:2px;border-radius:1px;background:var(--pt-accent)}.pt-led-box{padding:16px}.pt-led-dl{display:grid;grid-template-columns:minmax(110px,22%) 1fr;gap:0 12px}.pt-led-dl dt,.pt-led-dl dd{margin:0;padding:7px 0;border-bottom:1px solid var(--pt-border);overflow-wrap:anywhere}.pt-led-dl dt{color:var(--pt-muted)}.pt-led-req{animation:ptLedReqIn .18s cubic-bezier(.23,1,.32,1)}.pt-led-req pre{white-space:pre-wrap;overflow-wrap:anywhere;border-radius:8px;border:1px solid var(--pt-border)}.pt-led-root [hidden]{display:none}@keyframes ptLedReqIn{from{opacity:0;transform:translateX(10px)}}
-@container(max-width:960px){.pt-led-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.pt-led-strip>div:nth-child(even){border-inline-end:0}.pt-led-strip>div:last-child{grid-column:span 2;border-bottom:0}.pt-led-strip>div{border-bottom:1px solid var(--pt-border)}}
+@container(max-width:900px){.pt-led-strip>div{padding:8px 9px}.pt-led-strip strong{font-size:17.5px}.pt-led-strip small{font-size:10.5px}}
+@container(max-width:740px){.pt-led-strip{grid-template-columns:repeat(6,minmax(0,1fr))}.pt-led-strip>div:nth-child(-n+3){grid-column:span 2;border-bottom:1px solid var(--pt-border)}.pt-led-strip>div:nth-child(3){border-inline-end:0}.pt-led-strip>div:nth-child(n+4){grid-column:span 3;border-bottom:0}}
+@container(max-width:480px){.pt-led-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.pt-led-strip>div:nth-child(n){grid-column:auto;border-inline-end:1px solid var(--pt-border);border-bottom:1px solid var(--pt-border)}.pt-led-strip>div:nth-child(even){border-inline-end:0}.pt-led-strip>div:last-child{grid-column:span 2;border-inline-end:0;border-bottom:0}}
 @container(max-width:860px){.pt-led-body{grid-template-columns:1fr}.pt-led-rank{height:auto;min-height:0;max-height:180px;border-left:0;border-top:1px solid var(--pt-border)}}
 
 .pt-badge-btn {
@@ -2692,6 +2694,9 @@ function renderViewToolbarHtml(data, uiState, opts = {}) {
   const busy = Boolean(opts.busy);
   const preset = String(uiState?.preset || data?.range?.preset || 'weeklyQuota');
   const account = String(uiState?.account || 'all');
+  const machine = String(uiState?.machine || 'all');
+  const machines = Array.isArray(data?.facets?.machines) ? data.facets.machines : [];
+  const showMachine = machines.length > 1 || machine !== 'all';
   const isCustomActive = !PT_PERIOD_PRESET_KEYS.has(preset);
   const rangeLabel = isCustomActive ? formatPeriodRangeLabel(preset) : '自定义';
 
@@ -2703,6 +2708,18 @@ function renderViewToolbarHtml(data, uiState, opts = {}) {
       `).join('')}
       <button type="button" class="pt-seg-opt pt-range-opt${isCustomActive ? ' on' : ''}" role="tab" aria-selected="${isCustomActive ? 'true' : 'false'}" aria-haspopup="dialog" aria-expanded="false" data-pt-range-trigger="1" title="自定义时间范围">${PT_CALENDAR_SVG}<span>${esc(rangeLabel)}</span></button>
     </div>
+  ` : '';
+
+  const matchedMachine = machines.find(m => m.id === machine);
+  const machineLabel = machine === 'all'
+    ? '全部电脑'
+    : (matchedMachine ? (matchedMachine.isLocal ? `${matchedMachine.label}（本机）` : matchedMachine.label) : (machine === 'local' ? '仅本机' : machine));
+  const machineBtnHtml = showMachine ? `
+    <button type="button" class="pt-pick-btn${machine !== 'all' ? ' set' : ''}" aria-haspopup="menu" aria-expanded="false" data-pt-machine-trigger="1" title="筛选电脑">
+      ${machine !== 'all' ? '<span class="pt-pick-dot" aria-hidden="true"></span>' : ''}
+      <span class="pt-pick-btn-label">${esc(machineLabel)}</span>
+      ${PT_CHEVRON_SVG}
+    </button>
   ` : '';
 
   const accLabel = account === 'all' ? '全部账号' : account;
@@ -2724,6 +2741,7 @@ function renderViewToolbarHtml(data, uiState, opts = {}) {
       <span class="pt-view-head-grow"></span>
       <div class="pt-view-head-right">
         ${opts.extraRightHtml || ''}
+        ${machineBtnHtml}
         ${accountBtnHtml}
         ${refreshBtnHtml}
       </div>
@@ -2844,6 +2862,42 @@ function openPtAccountMenu(anchor, accounts, activeAccount, onPick) {
     <button type="button" class="pt-pop-item${activeAccount === val ? ' on' : ''}" role="menuitemradio" aria-checked="${activeAccount === val ? 'true' : 'false'}" data-pt-pop-val="${esc(val)}">
       <span class="pt-pop-item-name">${esc(label)}</span>
       ${activeAccount === val ? '<span class="pt-pop-tick">✓</span>' : ''}
+    </button>
+  `).join('');
+
+  menu.addEventListener('click', e => {
+    const btn = e.target.closest?.('[data-pt-pop-val]');
+    if (!btn) return;
+    const val = btn.getAttribute('data-pt-pop-val') || 'all';
+    closePtPopMenu();
+    if (typeof onPick === 'function') onPick(val);
+  });
+
+  mountPtPopover(anchor, menu, 'right');
+}
+
+function openPtMachineMenu(anchor, machines, activeMachine, onPick) {
+  if (ptActivePop?.anchor === anchor) {
+    closePtPopMenu();
+    return;
+  }
+  closePtPopMenu();
+  const list = Array.isArray(machines) ? machines : [];
+  const items = [['all', '全部电脑']];
+  for (const m of list) {
+    const id = String(m?.id || '');
+    if (!id) continue;
+    const base = String(m?.label || id);
+    const label = m.isLocal ? `${base}（本机）` : base;
+    items.push([id, label]);
+  }
+  const menu = document.createElement('div');
+  menu.className = 'pt-pop-menu';
+  menu.setAttribute('role', 'menu');
+  menu.innerHTML = '<div class="pt-pop-head">统计设备 / 电脑</div>' + items.map(([val, label]) => `
+    <button type="button" class="pt-pop-item${activeMachine === val ? ' on' : ''}" role="menuitemradio" aria-checked="${activeMachine === val ? 'true' : 'false'}" data-pt-pop-val="${esc(val)}">
+      <span class="pt-pop-item-name">${esc(label)}</span>
+      ${activeMachine === val ? '<span class="pt-pop-tick">✓</span>' : ''}
     </button>
   `).join('');
 
@@ -4080,7 +4134,7 @@ function renderQuotaMatrixTableHtml(groups, { now, hideEmail, accountUsage }) {
         <table class="pt-table">
           <thead>
             <tr>
-              <th>账号 / 凭据</th><th>驱动</th><th>健康</th><th>模型额度池</th>
+              <th>账号 / 凭据</th><th>渠道</th><th>健康</th><th>模型额度池</th>
               <th>短周期 (5h)</th><th>周额度 (7d)</th><th>最近重置</th><th>本周期用量</th><th>操作</th>
             </tr>
           </thead>
@@ -4517,7 +4571,12 @@ const ledBtn = (key,val,label,on=false,extra='') => '<button type="button" class
 const ledSpeedParts = s => ['decode','floor'].filter(k=>s[k+'N']).sort((a,b)=>s[b+'N']-s[a+'N']).map(k=>({
   value:1000*s[k+'Out']/s[k+'Ms'],label:(k==='floor'?'≥':'')+Math.round(1000*s[k+'Out']/s[k+'Ms'])+' tok/s',count:s[k+'N']+(k==='floor'?' 次估算':' 次实测')}));
 const ledPreferences = Object.create(null);
-const ledDims = {model:'模型',modelAt:'模型 · 账号',account:'账号',driver:'驱动'};
+const ledDims = {model:'模型',modelAt:'模型 · 账号',account:'账号',driver:'渠道'};
+function getLedDims(l) {
+  return (l?.chartBy?.machine?.length > 1 || l?.by?.machine?.length > 1)
+    ? { ...ledDims, machine: '电脑' }
+    : ledDims;
+}
 const ledMetrics = {tokens:'Token',cost:'费用',calls:'请求',speed:'速度'};
 function ledPref(k,choices) {
   try { const v=localStorage.getItem('t3tools.requests.'+k); if(Object.hasOwn(choices,v)) return v; } catch {}
@@ -4533,7 +4592,7 @@ function ledControls(data,s) {
   if(s.errorCode && s.errorCode!=='all') codes.add(s.errorCode);
   const active=s.onlyAnomalies?'anomaly':s.status || 'all';
   const anomTotal=Number(data?.anomalySummary?.total || 0);
-  return ((f.drivers?.length>1 || (s.driver && s.driver!=='all'))?ledSelect('driver','驱动',(f.drivers || []).map(d=>[d,d]),s.driver):'')+
+  return ((f.drivers?.length>1 || (s.driver && s.driver!=='all'))?ledSelect('driver','渠道',(f.drivers || []).map(d=>[d,d]),s.driver):'')+
     ledSelect('model','模型',[...models].map(([m,n])=>[m,m+' · '+fmtTokens(n)]),s.model)+
     (codes.size?ledSelect('errorCode','错误类型',[...codes].map(c=>[c,ERROR_CODE_LABELS[c] || c]),s.errorCode):'')+
     '<span class="pt-led-segs">'+[['all','全部'],['error','失败'],['retried','重试'],['anomaly',anomTotal>0?'掉缓存 <b data-pt-anomaly-count>'+anomTotal+'</b>':'掉缓存']].map(([v,n])=>ledBtn('status',v,n,active===v)).join('')+'</span>'+
@@ -4561,7 +4620,8 @@ function ledCurve(points) {
   }).join('');
 }
 function ledTrend(l,s) {
-  const m=ledPref('metric',ledMetrics),dim=ledPref('split',ledDims),style=ledPref('style',{bars:1,line:1});
+  const activeDims = getLedDims(l);
+  const m=ledPref('metric',ledMetrics),dim=ledPref('split',activeDims),style=ledPref('style',{bars:1,line:1});
   const sorted=rows=>rows.slice().sort((a,b)=>(ledValue(m,b)||0)-(ledValue(m,a)||0));
   const top=sorted(l.chartBy[dim]).slice(0,6),ids=top.map(r=>r.id),color=i=>i<0 || i===6?'var(--pt-muted)':'var(--pt-chart-'+(i+1)+')';
   const W=Math.max(360,Math.round(s._chartW || 600));
@@ -4615,7 +4675,7 @@ function ledTrend(l,s) {
   });
   const rank=sorted(l.by[dim]),sum=rank.reduce((a,r)=>a+(speed?r.calls:ledValue(m,r)||0),0);
   const rows=rank.map(r=>{
-    const i=ids.indexOf(r.id),n=ledValue(m,r)||0,chosen=dim==='account' && s.account===r.id;
+    const i=ids.indexOf(r.id),n=ledValue(m,r)||0,chosen=(dim==='account' && s.account===r.id) || (dim==='machine' && s.machine===r.id);
     return '<button type="button" class="'+(chosen?'on':'')+'" data-pt-led-rank="'+esc(r.id)+'" data-index="'+i+'" style="--sw:'+color(i)+'" title="点击在请求明细中下钻查看该项请求"><b>● '+esc([r.name,r.sub].filter(Boolean).join(' · '))+'</b><strong>'+ledMetricText(m,r)+'</strong><i style="width:'+100*n/(ledValue(m,rank[0]) || 1)+'%"></i><small>'+r.calls+' 次请求 · '+fmtTokens(r.tokens)+' tokens · '+fmtUsd(r.costUsd)+' · '+ledMetricText('speed',r)+' · 首字 '+fmtDuration(r.avgTtftMs)+' · 命中率 '+ledPct(r.cacheHitPercent)+' · 占比 '+ledPct(sum?100*(speed?r.calls:n)/sum:null)+(r.errors?' · '+r.errors+' 失败':'')+'</small></button>';
   }).join('');
   const buttons=(k,choices,v)=>Object.entries(choices).map(([id,label])=>{
@@ -4629,7 +4689,7 @@ function ledTrend(l,s) {
       ${buttons('metric',ledMetrics,m)}
       ${buttons('style',{bars:'▥',line:'∿'},style)}
       <small class="pt-ov-hint">点击${l.bucket==='day'?'柱状或':''}排行看明细</small>
-      <span>维度</span>${buttons('split',ledDims,dim)}
+      <span>维度</span>${buttons('split',activeDims,dim)}
     </div>
     <div class="pt-led-body">
       <div class="pt-led-chart">
@@ -4643,10 +4703,12 @@ function ledTrend(l,s) {
 function renderRequestsTableCardHtml(data,s={}) {
   const p=data?.requests || {items:[],total:0,page:1,totalPages:1},l=data?.requestsLedger,t=l?.totals;
   const cols=[['时间','when'],['账号 / 来源','where'],['模型','model'],['推理','lc-opt'],['会话','session'],['输入','n'],['输出','n'],['缓存写','n lc-opt'],['缓存读','n lc-opt'],['命中率','n lc-opt2'],['费用','n cost'],['首字响应','n ttft lc-opt2'],['耗时','n duration'],['速度','n speed'],['状态','st']];
+  const multiMachine = (data?.facets?.machines?.length || 0) > 1;
   const rows=p.items.map((r,i)=>{
     const ttft=r.ttftMs!=null?'首字响应 '+fmtDuration(r.ttftMs)+(r.streamingMs!=null?' · 流式生成 '+fmtDuration(r.streamingMs):''):'当前数据源无首字计时';
     const source={antigravity:'AG',codex:'CX',t3scan:'扫描缓存'}[r.sourceGroup] || '其他';
-    const values=[esc(fmtTime(r.timestampMs)), '<i class="pt-led-dot '+(r.providerDriver==='codex'?'cx':'')+'"></i>'+esc(r.accountId)+' <small>'+source+' '+esc(r.role)+'</small>',
+    const whereMeta = [source, r.role, multiMachine ? (r.machineLabel || (r.isRemote ? r.machineId : '本机')) : ''].filter(Boolean).join(' · ');
+    const values=[esc(fmtTime(r.timestampMs)), '<i class="pt-led-dot '+(r.providerDriver==='codex'?'cx':'')+'"></i>'+esc(r.accountId)+' <small>'+esc(whereMeta)+'</small>',
       esc(r.modelId),esc(r.effort || '—'),esc(r.t3ThreadTitle || r.nativeSessionId?.slice(0,14) || '—'),fmtTokens(r.inputTokens),fmtTokens(r.outputTokens),fmtTokens(r.cacheWriteTokens),fmtTokens(r.cacheReadTokens),ledPct(r.cacheHitPercent),fmtUsd(r.costUsd),fmtDuration(r.ttftMs),fmtDuration(r.durationMs),r.tps!=null?(r.tpsEstimated || r.tpsKind==='e2e-estimate'?'≥':'')+Math.round(r.tps)+' tok/s':'—',
       '<b class="pt-led-st '+esc(r.status)+'">● '+ledStatus(r)+'</b>'+[r.retries?'重试 '+r.retries:'',r.cacheAnomaly?.label,r.excludedCompaction?'压缩排除':''].filter(Boolean).map(b=>'<small>'+esc(b)+'</small>').join('')];
     const tip={2:r.modelRaw,4:r.t3ThreadTitle || r.nativeSessionId,6:'思考 '+fmtTokens(r.thinkingTokens),11:ttft,12:(r.durationMs ?? '—')+' ms · ≤10s 快 · 10–30s 中 · >30s 慢 · '+ttft,13:r.tpsKind==='generation'?'流式生成实测':r.tpsKind==='e2e-estimate'?'端到端耗时推算的速度下限':'暂无计时'};
@@ -4668,10 +4730,11 @@ function renderRequestsTableCardHtml(data,s={}) {
 function ledDetail(r,p,data) {
   const i=p.items.indexOf(r),session=r.t3ThreadId || r.nativeSessionId;
   const dt=(k,v)=>'<dt>'+k+'</dt><dd>'+esc(v ?? '—')+'</dd>';
-  const pairs=[['时间',new Date(r.timestampMs).toLocaleString()],['计费时间',r.billingTsMs!=null?new Date(r.billingTsMs).toLocaleString():null],['驱动 / 账号',[r.providerDriver,r.accountId].join(' / ')],['数据来源',(ledLabels[r.sourceGroup] || '其他')+' · '+r.sourceKey],['模型 / 原始模型名',[r.modelId,r.modelRaw].join(' / ')],['推理强度 / 角色',[r.effort,r.role].filter(Boolean).join(' / ') || '—'],['所属会话',[r.t3ThreadTitle,r.t3ThreadId].filter(Boolean).join(' · ') || '—'],['原生会话 ID',r.nativeSessionId],['状态 / 重试',ledStatus(r)+' · '+r.retries+' 次重试'],['Token 拆解',[['输入',r.inputTokens],['输出',r.outputTokens],['缓存读',r.cacheReadTokens],['缓存写',r.cacheWriteTokens],['思考',r.thinkingTokens]].map(([k,v])=>k+' '+(v??'—')).join(' · ')],['上下文窗口',(r.contextUsedTokens??'—')+' / '+(r.contextMaxTokens??'—')+' · '+ledPct(r.contextMaxTokens && r.contextUsedTokens!=null?100*r.contextUsedTokens/r.contextMaxTokens:null)],['缓存命中率',ledPct(r.cacheHitPercent)],['缓存诊断',r.cacheAnomaly?r.cacheAnomaly.reason+' · 间隔 '+fmtDuration(r.cacheAnomaly.gapMs)+' · '+ledPct(r.cacheAnomaly.prevHit)+' → '+ledPct(r.cacheAnomaly.curHit)+' · 缓存 '+r.cacheAnomaly.prevCache+' → '+r.cacheAnomaly.curCache:r.excludedCompaction?'上下文压缩已排除':'—'],['参考费用 / 缓存节省',fmtUsd(r.costUsd)+' / '+fmtUsd(r.savedUsd)],['耗时拆解','总耗时 '+fmtDuration(r.durationMs)+' · 首字 '+fmtDuration(r.ttftMs)+' · 流式生成 '+fmtDuration(r.streamingMs)],['输出速度',r.tps!=null?(r.tpsEstimated?'≥':'')+r.tps+' tok/s · '+(r.tpsKind==='generation'?'流式生成实测':'端到端估算'):'—'],['请求 ID',r.id],['去重键',r.dedupeKey]];
+  const multiMachine = (data?.facets?.machines?.length || 0) > 1 || Boolean(r.isRemote);
+  const pairs=[['时间',new Date(r.timestampMs).toLocaleString()],['计费时间',r.billingTsMs!=null?new Date(r.billingTsMs).toLocaleString():null],...(multiMachine?[['所属电脑',(r.machineLabel || r.machineId || '本机')+(r.isRemote?'（远端同步）':'（本机）')]]:[]),['渠道 / 账号',[r.providerDriver,r.accountId].join(' / ')],['数据来源',(ledLabels[r.sourceGroup] || '其他')+' · '+r.sourceKey],['模型 / 原始模型名',[r.modelId,r.modelRaw].join(' / ')],['推理强度 / 角色',[r.effort,r.role].filter(Boolean).join(' / ') || '—'],['所属会话',[r.t3ThreadTitle,r.t3ThreadId].filter(Boolean).join(' · ') || '—'],['原生会话 ID',r.nativeSessionId],['状态 / 重试',ledStatus(r)+' · '+r.retries+' 次重试'],['Token 拆解',[['输入',r.inputTokens],['输出',r.outputTokens],['缓存读',r.cacheReadTokens],['缓存写',r.cacheWriteTokens],['思考',r.thinkingTokens]].map(([k,v])=>k+' '+(v??'—')).join(' · ')],['上下文窗口',(r.contextUsedTokens??'—')+' / '+(r.contextMaxTokens??'—')+' · '+ledPct(r.contextMaxTokens && r.contextUsedTokens!=null?100*r.contextUsedTokens/r.contextMaxTokens:null)],['缓存命中率',ledPct(r.cacheHitPercent)],['缓存诊断',r.cacheAnomaly?r.cacheAnomaly.reason+' · 间隔 '+fmtDuration(r.cacheAnomaly.gapMs)+' · '+ledPct(r.cacheAnomaly.prevHit)+' → '+ledPct(r.cacheAnomaly.curHit)+' · 缓存 '+r.cacheAnomaly.prevCache+' → '+r.cacheAnomaly.curCache:r.excludedCompaction?'上下文压缩已排除':'—'],['参考费用 / 缓存节省',fmtUsd(r.costUsd)+' / '+fmtUsd(r.savedUsd)],['耗时拆解','总耗时 '+fmtDuration(r.durationMs)+' · 首字 '+fmtDuration(r.ttftMs)+' · 流式生成 '+fmtDuration(r.streamingMs)],['输出速度',r.tps!=null?(r.tpsEstimated?'≥':'')+r.tps+' tok/s · '+(r.tpsKind==='generation'?'流式生成实测':'端到端估算'):'—'],['请求 ID',r.id],['去重键',r.dedupeKey]];
   const canStep=j=>Boolean(p.items[j] || (j<0 ? p.page>1 : p.page<p.totalPages));
   const step=(j,label)=>'<button class="pt-btn" data-pt-led-row="'+j+'" '+(!canStep(j)?'disabled':'')+'>'+label+'</button>';
-  return '<article class="pt-led-req"><div class="pt-led-bar">'+ledBtn('back',1,'‹ 返回请求明细')+step(i-1,'← 上一条')+step(i+1,'下一条 →')+(r.t3ThreadId?errorButton('focus','前往 T3 Code 对话',{thread:r.t3ThreadId,title:r.t3ThreadTitle}):'')+(session?ledBtn('session',session,'筛选此会话'):'')+errorButton('copy','复制诊断摘要',{text:pairs.map(([k,v])=>k+' '+(v??'—')).concat(r.errorText || '').join('\n')})+'</div><h3>'+esc(r.modelId || r.modelRaw)+' <small class="pt-led-st '+esc(r.status)+'">● '+ledStatus(r)+(r.cacheAnomaly?.label?' · '+esc(r.cacheAnomaly.label):'')+'</small></h3><div class="pt-led-box"><dl class="pt-led-dl">'+pairs.map(([k,v])=>dt(k,v)).join('')+'</dl>'+((r.retries || r.status==='error')?'<h4>'+esc(ERROR_CODE_LABELS[r.errorCode] || r.errorCode || '错误信息')+'</h4><pre>'+esc(r.errorText || '未记录错误文本')+'</pre><p>健康替代模型 · '+esc(data?.errorInsights?.healthyAlternatives?.filter(m=>m!==r.modelId).join('、') || '暂无')+'</p>':'')+'</div></article>';
+  return '<article class="pt-led-req"><div class="pt-led-bar">'+ledBtn('back',1,'‹ 返回请求明细')+step(i-1,'← 上一条')+step(i+1,'下一条 →')+(r.t3ThreadId && !r.isRemote?errorButton('focus','前往 T3 Code 对话',{thread:r.t3ThreadId,title:r.t3ThreadTitle}):'')+(session?ledBtn('session',session,'筛选此会话'):'')+errorButton('copy','复制诊断摘要',{text:pairs.map(([k,v])=>k+' '+(v??'—')).concat(r.errorText || '').join('\n')})+'</div><h3>'+esc(r.modelId || r.modelRaw)+' <small class="pt-led-st '+esc(r.status)+'">● '+ledStatus(r)+(r.cacheAnomaly?.label?' · '+esc(r.cacheAnomaly.label):'')+'</small></h3><div class="pt-led-box"><dl class="pt-led-dl">'+pairs.map(([k,v])=>dt(k,v)).join('')+'</dl>'+((r.retries || r.status==='error')?'<h4>'+esc(ERROR_CODE_LABELS[r.errorCode] || r.errorCode || '错误信息')+'</h4><pre>'+esc(r.errorText || '未记录错误文本')+'</pre><p>健康替代模型 · '+esc(data?.errorInsights?.healthyAlternatives?.filter(m=>m!==r.modelId).join('、') || '暂无')+'</p>':'')+'</div></article>';
 }
 function renderRequestsViewHtml(data,s={}) {
   const row=s.detailId && data?.requests?.items?.find(r=>r.id===s.detailId);
@@ -4760,7 +4823,7 @@ function bindOverview(host,data,s,{render,openView,applyAccount}) {
       return;
     }
     if (d.ptLedRank) {
-      const dim = ledPref('split', ledDims);
+      const dim = ledPref('split', getLedDims(l));
       if (dim === 'modelAt') {
         const [model, account] = JSON.parse(d.ptLedRank);
         drillToRequests({ model, account });
@@ -4808,7 +4871,7 @@ function bindOverview(host,data,s,{render,openView,applyAccount}) {
   chart.onpointermove = e => {
     const el = e.target.closest('[data-point]'); if (!el) { tip.hidden = true; return; }
     chart.querySelector('.hot')?.classList.remove('hot'); el.classList.add('hot');
-    const p = l.series[+el.dataset.point], m = ledPref('metric', ledMetrics), dim = ledPref('split', ledDims);
+    const p = l.series[+el.dataset.point], m = ledPref('metric', ledMetrics), dim = ledPref('split', getLedDims(l));
     tip.innerHTML = '<b>' + esc(l.bucket === 'hour' ? new Date(p.timeMs).toLocaleString() : p.dayKey + (l.bucket === 'week' ? ' 当周' : '')) + '</b>' + p.by[dim].slice().sort((a,b)=>(ledValue(m,b)||0)-(ledValue(m,a)||0)).map(r=>'<div>'+esc([r.name,r.sub].filter(Boolean).join(' · '))+'　'+ledMetricText(m,r)+(m==='speed'?' · 首字 '+fmtDuration(r.avgTtftMs):'')+'</div>').join('') + '<b>合计 ' + ledMetricText(m,p) + ' · ' + p.calls + ' 次请求</b>';
     tip.hidden = false;
     const rect = chart.getBoundingClientRect();
@@ -5027,6 +5090,133 @@ function renderOverlayAppUpdateBannerHtml(upd, dismissedVer = '') {
           </div>`;
 }
 
+function renderMultiMachineSyncCardHtml(statusData = null, fallbackSettings = null) {
+  const cfg = statusData?.settings?.multiMachineSync || fallbackSettings?.multiMachineSync || {};
+  const st = statusData?.multiMachineSync || {};
+  const enabled = Boolean(cfg.enabled);
+  const syncDir = String(cfg.syncDir ?? st.syncDir ?? '');
+  const machineLabel = String(cfg.machineLabel ?? '');
+  const defaultLabel = String(st.defaultMachineLabel || st.machineLabel || '本机');
+  const sidebarScope = cfg.sidebarScope === 'local' ? 'local' : 'all';
+  const includeThreadTitle = cfg.includeThreadTitle !== false;
+  const includeErrorText = Boolean(cfg.includeErrorText);
+  const peers = Array.isArray(st.peers) ? st.peers : [];
+  const suggested = Array.isArray(st.suggestedDirs) ? st.suggestedDirs : [];
+
+  const stateBadge = (() => {
+    if (!enabled) return '<span class="pt-badge pt-badge-muted">未开启</span>';
+    if (!syncDir.trim() || st.state === 'unconfigured') return '<span class="pt-badge pt-badge-warn">待填写同步目录</span>';
+    if (st.state === 'error') return '<span class="pt-badge pt-badge-danger">同步失败</span>';
+    if (st.state === 'partial') return '<span class="pt-badge pt-badge-warn">部分同步</span>';
+    if (st.state === 'ok') return '<span class="pt-badge pt-badge-ok">已同步</span>';
+    return '<span class="pt-badge pt-badge-muted">就绪</span>';
+  })();
+
+  const statusLine = (() => {
+    if (!enabled) return '默认关闭，单机使用零影响。开启后可将多台电脑的 Token 消耗自动汇总到一起，不改动 Codex 或反重力任何配置与文件位置。';
+    if (!syncDir.trim()) return '请填写多台电脑共用的同步文件夹路径（支持 OneDrive、Dropbox、iCloud、Syncthing 或 NAS 共享盘）。';
+    if (st.lastError) return `异常：${st.lastError}`;
+    const lastText = st.lastSyncAtMs ? `上次同步 ${fmtTime(st.lastSyncAtMs)}` : '等待首次同步';
+    return `${lastText} · 本机（${st.machineLabel || defaultLabel}）已导出 ${st.lastExportedRequests || 0} 条 · 已汇总 ${peers.length} 台远端电脑（${st.remoteRequestsCount || 0} 条请求）`;
+  })();
+
+  const suggestHtml = suggested.length ? `
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;">
+      <span class="pt-muted" style="font-size:11px;">检测到可用目录：</span>
+      ${suggested.map(s => `<button type="button" class="pt-btn" style="padding:2px 8px;font-size:11px;" data-pt-sync-suggest="${esc(s.suggestedPath)}" title="${esc(s.suggestedPath)}">填入 ${esc(s.provider)}</button>`).join('')}
+    </div>
+  ` : '';
+
+  const peersHtml = peers.length ? `
+    <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px;padding:8px 10px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));">
+      <div class="pt-muted" style="font-size:11px;font-weight:600;">已汇总的远端电脑（${peers.length} 台）</div>
+      ${peers.map(p => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;">
+          <span><strong>${esc(p.machineLabel || p.machineId)}</strong> <span class="pt-muted pt-mono" style="font-size:11px;">${esc(p.platform || '')}</span></span>
+          <span class="pt-muted pt-mono" style="font-size:11px;">${p.requestCount || 0} 条${p.lastExportedAtMs ? ' · ' + esc(fmtTime(p.lastExportedAtMs)) : ''}${p.lastError ? ' · ' + esc(p.lastError) : ''}</span>
+        </div>
+      `).join('')}
+    </div>
+  ` : '';
+
+  return `
+    <div class="settings-group-title">多机数据同步</div>
+    <div class="pt-card" data-pt-multi-sync-card="1">
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">开启多机目录同步 ${stateBadge}</div>
+          <div class="setting-desc">${esc(statusLine)}</div>
+        </div>
+        <label class="pt-switch">
+          <input type="checkbox" data-sync-setting="enabled" ${enabled ? 'checked' : ''} />
+          <span class="pt-switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:6px;">
+        <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <div>
+            <div class="setting-label">共享同步文件夹</div>
+            <div class="setting-desc">支持 OneDrive / Dropbox / iCloud / Syncthing / NAS 任意同步目录（每台电脑仅写各自子目录，绝不锁库）</div>
+          </div>
+        </div>
+        <div style="width:100%;display:flex;align-items:center;gap:8px;">
+          <input type="text" class="pt-input pt-mono" style="flex:1;min-width:180px;" placeholder="例如 C:\\Users\\You\\OneDrive\\T3ToolsSync 或 Syncthing/NAS 路径" value="${esc(syncDir)}" data-sync-setting="syncDir" />
+          <button type="button" class="pt-btn pt-btn-accent" data-pt-action="save-sync-paths">保存</button>
+        </div>
+        ${suggestHtml}
+      </div>
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">本机显示名称</div>
+          <div class="setting-desc">留空自动使用系统名（当前默认：${esc(defaultLabel)}）</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <input type="text" class="pt-input" style="width:190px;" maxlength="64" placeholder="${esc(defaultLabel)}" value="${esc(machineLabel)}" data-sync-setting="machineLabel" />
+        </div>
+      </div>
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">左下角用量统计范围</div>
+          <div class="setting-desc">控制 T3 Code 侧边栏左下角统计全部电脑合计，或仅统计本机</div>
+        </div>
+        <select class="pt-select" aria-label="左下角用量统计范围" data-sync-setting="sidebarScope" style="max-width:220px;">
+          <option value="all"${sidebarScope === 'all' ? ' selected' : ''}>全部电脑合计（默认）</option>
+          <option value="local"${sidebarScope === 'local' ? ' selected' : ''}>仅统计本机</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">隐私控制</div>
+          <div class="setting-desc">仅导出 Token、模型、费用等统计指标；可选择是否包含会话标题或错误原文</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;">
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+            <input type="checkbox" data-sync-setting="includeThreadTitle" ${includeThreadTitle ? 'checked' : ''} />
+            <span>同步会话标题</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;">
+            <input type="checkbox" data-sync-setting="includeErrorText" ${includeErrorText ? 'checked' : ''} />
+            <span>同步错误原文</span>
+          </label>
+        </div>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:6px;">
+        <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div>
+            <div class="setting-label">同步操作</div>
+            <div class="setting-desc">开启后每 30 秒自动增量同步；也可手动立即同步或清空已导入的远端缓存</div>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="pt-btn" data-pt-action="sync-multi-machine" ${!enabled || !syncDir.trim() ? 'disabled' : ''}>立即同步</button>
+            ${peers.length > 0 ? '<button type="button" class="pt-btn pt-btn-danger" data-pt-action="clear-remote-sync">清除远端缓存</button>' : ''}
+          </div>
+        </div>
+        ${peersHtml}
+      </div>
+    </div>
+  `;
+}
+
 function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, version = '0.1.0') {
   const cfg = fallbackSettings || statusData?.settings || {};
   const alertCfg = cfg.alertConfig || {};
@@ -5150,6 +5340,8 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, 
           <button type="button" class="pt-btn" data-pt-action="test-alert">发送测试</button>
         </div>
       </div>
+
+      ${renderMultiMachineSyncCardHtml(statusData, fallbackSettings)}
 
       ${renderEmbeddedAppUpdateCardHtml(statusData, fallbackSettings, version)}
 
@@ -5308,7 +5500,7 @@ function renderDashboardHtml(data, uiState, {
             <button type="button" class="nav-item${tab === 'models' ? ' active' : ''}" data-pt-tab="models">
               <svg class="nav-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 16V9M8 16V5M12 16v-5M16 16V7"/></svg>
               <span>模型分析</span>
-              ${unreadIncidents > 0 ? `<span class="nav-badge" data-tone="${errBadgeTone}">${unreadIncidents}</span>` : ''}
+              ${unreadIncidents > 0 ? `<span class="nav-badge" title="${esc(`今日待处理：失败 ${unreadFailed} · 重试恢复 ${unreadRecovered}`)}" data-tone="${errBadgeTone}">${unreadIncidents}</span>` : ''}
             </button>
             <button type="button" class="nav-item${tab === 'requests' ? ' active' : ''}" data-pt-tab="requests">
               <svg class="nav-ic" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h12M4 10h12M4 14.5h8"/></svg>
@@ -5420,11 +5612,26 @@ function renderErrorTracker(data, state = {}) {
       : '周期异常';
   const totalIncidents = summary.totalIncidents ?? (summary.totalErrors + (summary.totalRetriedRecovered || 0));
   const recoveredTotal = summary.totalRetriedRecovered || 0;
+  const unresolvedFailedRunsCount = (info.failedRuns || []).filter(a => !a.resolved).length;
   const unreadTotal = summary.unreadIncidents ?? summary.unreadCount ?? 0;
   const hasUnresolvedFailed = (summary.unreadCount || 0) > 0;
   const hasUnresolvedRecovered = (summary.unreadRecoveredCount || 0) > 0;
-  const hasUnresolvedRuns = Boolean(info.failedRuns?.some(a => !a.resolved));
+  const hasUnresolvedRuns = unresolvedFailedRunsCount > 0;
   const canResolveAll = unreadTotal > 0 || hasUnresolvedRuns;
+  const unresolvedSessionCount = affectedSessions.filter(s => !s.resolved).length;
+  const affectedHeading = !affectedSessions.length
+    ? '受影响对话 (0)'
+    : unresolvedSessionCount === affectedSessions.length
+      ? `受影响对话 (${affectedSessions.length})`
+      : `受影响对话 (${unresolvedSessionCount} 待处理 / 共 ${affectedSessions.length})`;
+  const failedRunsHeading = !info.failedRuns?.length
+    ? ''
+    : unresolvedFailedRunsCount === info.failedRuns.length
+      ? `T3 会话运行失败 (${info.failedRuns.length})`
+      : `T3 会话运行失败 (${unresolvedFailedRunsCount} 待处理 / 共 ${info.failedRuns.length})`;
+  const detailHeading = totalIncidents > recentErrors.length
+    ? `异常明细 (最近 ${recentErrors.length} / 共 ${totalIncidents})`
+    : `异常明细 (${recentErrors.length})`;
   const unreadTone = hasUnresolvedFailed ? 'pt-badge-err' : unreadTotal > 0 ? 'pt-badge-warn' : 'pt-badge-ok';
   const unreadBadge = unreadTotal > 0
     ? `<span class="pt-badge ${unreadTone} pt-mono" title="待处理失败 ${summary.unreadCount || 0} · 待处理重试恢复 ${summary.unreadRecoveredCount || 0}">${unreadTotal} 待处理</span>`
@@ -5487,7 +5694,7 @@ function renderErrorTracker(data, state = {}) {
 
     <div>
       <div class="pt-tracker-subhead">
-        <span>受影响对话 (${affectedSessions.length})</span>
+        <span>${esc(affectedHeading)}</span>
         <span class="pt-muted">红：失败 · 黄：重试恢复</span>
       </div>
       ${affectedSessions.length ? `<div class="pt-session-list">${affectedSessions.map(s => {
@@ -5498,6 +5705,8 @@ function renderErrorTracker(data, state = {}) {
         const stateText = isResolved ? '已解决' : s.state === 'failing' ? '持续异常中' : isOnlyRetry ? '重试恢复' : '已恢复';
         const sRecovered = s.recoveredCount || 0;
         const sTotal = s.incidentCount || (s.errorCount + sRecovered);
+        const sUnresolved = Number.isFinite(Number(s.unresolvedCount)) ? Number(s.unresolvedCount) : (isResolved ? 0 : sTotal);
+        const countLabel = !isResolved && sUnresolved < sTotal ? `待处理 ${sUnresolved} / 共 ${sTotal} 次` : `共 ${sTotal} 次`;
         const codeStats = s.errorCodeStats || {};
         const codeBadges = Object.entries(s.errorCodes || {}).map(([k, n]) => {
           const st = codeStats[k] || { failed: s.errorCount > 0 ? n : 0, recovered: 0, total: n };
@@ -5515,7 +5724,7 @@ function renderErrorTracker(data, state = {}) {
             <span class="pt-session-title" title="${esc(s.title)}">${esc(s.title)}</span>
             <span class="pt-mono pt-muted" style="font-size:10.5px;flex:none;">${esc(fmtAge(Date.now()-s.lastErrorAtMs))}</span>
           </div>
-          <div class="pt-muted pt-mono" style="font-size:10.5px;">${esc(fmtTime(s.lastErrorAtMs))} · ${esc(s.models.join('、'))} · ${esc(s.accountId)} · 共 ${sTotal} 次</div>
+          <div class="pt-muted pt-mono" style="font-size:10.5px;">${esc(fmtTime(s.lastErrorAtMs))} · ${esc(s.models.join('、'))} · ${esc(s.accountId)} · ${esc(countLabel)}</div>
           <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
             ${s.errorCount > 0 ? `<span class="pt-badge ${isResolved ? 'pt-badge-muted' : 'pt-badge-err'} pt-mono">失败 ${s.errorCount}</span>` : ''}
             ${sRecovered > 0 ? `<span class="pt-badge ${isResolved ? 'pt-badge-muted' : 'pt-badge-warn'} pt-mono">重试恢复 ${sRecovered}</span>` : ''}
@@ -5533,7 +5742,7 @@ function renderErrorTracker(data, state = {}) {
     </div>
 
     ${info.failedRuns?.length ? `<div>
-      <div class="pt-tracker-subhead"><span>T3 会话运行失败 (${info.failedRuns.length})</span></div>
+      <div class="pt-tracker-subhead"><span>${esc(failedRunsHeading)}</span></div>
       <div class="pt-session-list">${info.failedRuns.map(a => `<article class="pt-session-card ${a.resolved ? '' : 'failing'}">
         <div class="pt-session-top">
           <span class="pt-badge ${a.resolved ? 'pt-badge-ok' : 'pt-badge-err'}">${a.resolved ? '已解决' : '会话失败'}</span>
@@ -5549,7 +5758,7 @@ function renderErrorTracker(data, state = {}) {
 
     <div>
       <div class="pt-tracker-subhead">
-        <span>异常明细 (${recentErrors.length})</span>
+        <span>${esc(detailHeading)}</span>
         <span class="pt-muted">点击展开详情</span>
       </div>
       <div class="pt-error-list">${recentErrors.map(r => errorDiagnostic(r, data)).join('') || `<div class="pt-muted" style="padding:6px 2px;">${esc(onlyToday ? '今日暂无匹配记录' : '暂无匹配记录')}</div>`}</div>

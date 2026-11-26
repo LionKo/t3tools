@@ -880,8 +880,11 @@ namespace T3ToolsTray
         public bool IsSeparator;
         public bool IsHeader;
         public string Text;
+        public string Subtitle;
+        public Color StatusDotColor;
         public string Glyph;
         public bool IsAccentWarning;
+        public bool IsDestructive;
         public Action OnClick;
 
         public static FluentTrayMenuEntry Separator()
@@ -889,16 +892,18 @@ namespace T3ToolsTray
             return new FluentTrayMenuEntry { IsSeparator = true };
         }
 
-        public static FluentTrayMenuEntry Header(string text)
+        public static FluentTrayMenuEntry Header(string text, string subtitle = null, Color statusDotColor = default(Color))
         {
             return new FluentTrayMenuEntry
             {
                 IsHeader = true,
-                Text = text
+                Text = text,
+                Subtitle = subtitle,
+                StatusDotColor = statusDotColor
             };
         }
 
-        public static FluentTrayMenuEntry Item(string text, string glyph, Action onClick, bool isAccentWarning = false)
+        public static FluentTrayMenuEntry Item(string text, string glyph, Action onClick, bool isAccentWarning = false, bool isDestructive = false)
         {
             return new FluentTrayMenuEntry
             {
@@ -907,12 +912,13 @@ namespace T3ToolsTray
                 Text = text,
                 Glyph = glyph,
                 IsAccentWarning = isAccentWarning,
+                IsDestructive = isDestructive,
                 OnClick = onClick
             };
         }
     }
 
-    // Magpie-inspired minimalist Windows 11 Fluent MenuFlyout for system tray
+    // Minimalist Windows 11 Fluent MenuFlyout for system tray
     internal sealed class FluentTrayMenuForm : Form
     {
         private const int WS_EX_TOOLWINDOW = 0x00000080;
@@ -924,19 +930,25 @@ namespace T3ToolsTray
         private readonly Color _bgColor;
         private readonly Color _borderColor;
         private readonly Color _textColor;
+        private readonly Color _headerTitleColor;
         private readonly Color _mutedTextColor;
         private readonly Color _iconColor;
         private readonly Color _warnColor;
         private readonly Color _hoverColor;
         private readonly Color _pressedColor;
+        private readonly Color _dangerHoverColor;
+        private readonly Color _dangerPressedColor;
+        private readonly Color _dangerTextColor;
         private readonly Color _sepColor;
 
-        private readonly Font _textFont;
-        private readonly Font _headerFont;
-        private readonly Font _iconFont;
+        private Font _textFont;
+        private Font _headerFont;
+        private Font _headerSubFont;
+        private Font _iconFont;
 
         private bool _hasWin11RoundedChrome;
         private float _scale = 1f;
+        private float _fontScale = -1f;
         private int _hoverIndex = -1;
         private int _pressedIndex = -1;
         private bool _closing;
@@ -948,27 +960,35 @@ namespace T3ToolsTray
 
             if (_isDark)
             {
-                _bgColor = Color.FromArgb(44, 44, 44);
-                _borderColor = Color.FromArgb(67, 67, 67);
-                _textColor = Color.FromArgb(255, 255, 255);
-                _mutedTextColor = Color.FromArgb(158, 158, 158);
-                _iconColor = Color.FromArgb(232, 232, 232);
+                _bgColor = Color.FromArgb(34, 35, 39);
+                _borderColor = Color.FromArgb(58, 60, 68);
+                _textColor = Color.FromArgb(242, 243, 245);
+                _headerTitleColor = Color.FromArgb(228, 230, 236);
+                _mutedTextColor = Color.FromArgb(136, 140, 152);
+                _iconColor = Color.FromArgb(192, 196, 206);
                 _warnColor = Color.FromArgb(245, 158, 11);
-                _hoverColor = Color.FromArgb(56, 56, 56);
-                _pressedColor = Color.FromArgb(51, 51, 51);
-                _sepColor = Color.FromArgb(61, 61, 61);
+                _hoverColor = Color.FromArgb(52, 54, 61);
+                _pressedColor = Color.FromArgb(45, 47, 53);
+                _dangerHoverColor = Color.FromArgb(68, 36, 40);
+                _dangerPressedColor = Color.FromArgb(58, 30, 34);
+                _dangerTextColor = Color.FromArgb(248, 138, 138);
+                _sepColor = Color.FromArgb(56, 58, 66);
             }
             else
             {
-                _bgColor = Color.FromArgb(249, 249, 249);
-                _borderColor = Color.FromArgb(220, 220, 220);
-                _textColor = Color.FromArgb(26, 26, 26);
-                _mutedTextColor = Color.FromArgb(107, 107, 107);
-                _iconColor = Color.FromArgb(51, 51, 51);
+                _bgColor = Color.FromArgb(250, 250, 252);
+                _borderColor = Color.FromArgb(216, 219, 226);
+                _textColor = Color.FromArgb(24, 25, 29);
+                _headerTitleColor = Color.FromArgb(36, 38, 44);
+                _mutedTextColor = Color.FromArgb(116, 120, 132);
+                _iconColor = Color.FromArgb(88, 92, 104);
                 _warnColor = Color.FromArgb(217, 119, 6);
-                _hoverColor = Color.FromArgb(239, 239, 239);
-                _pressedColor = Color.FromArgb(232, 232, 232);
-                _sepColor = Color.FromArgb(229, 229, 229);
+                _hoverColor = Color.FromArgb(236, 238, 244);
+                _pressedColor = Color.FromArgb(227, 230, 237);
+                _dangerHoverColor = Color.FromArgb(254, 235, 235);
+                _dangerPressedColor = Color.FromArgb(252, 224, 224);
+                _dangerTextColor = Color.FromArgb(204, 46, 46);
+                _sepColor = Color.FromArgb(224, 227, 234);
             }
 
             this.FormBorderStyle = FormBorderStyle.None;
@@ -976,7 +996,7 @@ namespace T3ToolsTray
             this.TopMost = true;
             this.StartPosition = FormStartPosition.Manual;
             this.BackColor = _bgColor;
-            this.Opacity = 0.98;
+            this.Opacity = 0.97;
             this.KeyPreview = true;
             this.SetStyle(
                 ControlStyles.AllPaintingInWmPaint |
@@ -986,9 +1006,50 @@ namespace T3ToolsTray
                 true
             );
 
-            _textFont = new Font("Microsoft YaHei UI", 9.5f, FontStyle.Regular, GraphicsUnit.Point);
-            _headerFont = new Font("Segoe UI", 8.5f, FontStyle.Regular, GraphicsUnit.Point);
-            _iconFont = CreateFluentIconFont(10.5f);
+            EnsureFontsForScale(1f);
+        }
+
+        private void EnsureFontsForScale(float scale)
+        {
+            if (scale < 0.75f) scale = 1f;
+            if (Math.Abs(scale - _fontScale) < 0.01f && _textFont != null) return;
+            _fontScale = scale;
+
+            if (_textFont != null) _textFont.Dispose();
+            if (_headerFont != null) _headerFont.Dispose();
+            if (_headerSubFont != null) _headerSubFont.Dispose();
+            if (_iconFont != null) _iconFont.Dispose();
+
+            // Pixel-based sizing tied to the target monitor's exact DPI:
+            // crisp 12px at 100% DPI and compact, refined proportions on 125%-200% screens.
+            float textPx = Math.Max(12f, (float)Math.Round(10f * scale));
+            float headerPx = Math.Max(11.5f, (float)Math.Round(10f * scale));
+            float headerSubPx = Math.Max(10.5f, (float)Math.Round(9f * scale));
+            float iconPx = Math.Max(12f, (float)Math.Round(10.5f * scale));
+
+            _textFont = new Font("Microsoft YaHei UI", textPx, FontStyle.Regular, GraphicsUnit.Pixel);
+            _headerFont = CreateHeaderTitleFont(headerPx);
+            _headerSubFont = new Font("Segoe UI", headerSubPx, FontStyle.Regular, GraphicsUnit.Pixel);
+            _iconFont = CreateFluentIconFont(iconPx);
+        }
+
+        private static Font CreateHeaderTitleFont(float sizePx)
+        {
+            try
+            {
+                using (var fc = new InstalledFontCollection())
+                {
+                    for (int i = 0; i < fc.Families.Length; i++)
+                    {
+                        if (string.Equals(fc.Families[i].Name, "Segoe UI Semibold", StringComparison.OrdinalIgnoreCase))
+                        {
+                            return new Font("Segoe UI Semibold", sizePx, FontStyle.Regular, GraphicsUnit.Pixel);
+                        }
+                    }
+                }
+            }
+            catch { }
+            return new Font("Segoe UI", sizePx, FontStyle.Bold, GraphicsUnit.Pixel);
         }
 
         protected override CreateParams CreateParams
@@ -1017,12 +1078,13 @@ namespace T3ToolsTray
             {
                 if (_textFont != null) _textFont.Dispose();
                 if (_headerFont != null) _headerFont.Dispose();
+                if (_headerSubFont != null) _headerSubFont.Dispose();
                 if (_iconFont != null) _iconFont.Dispose();
             }
             base.Dispose(disposing);
         }
 
-        private static Font CreateFluentIconFont(float sizePt)
+        private static Font CreateFluentIconFont(float sizePx)
         {
             try
             {
@@ -1036,8 +1098,8 @@ namespace T3ToolsTray
                         if (string.Equals(n, "Segoe Fluent Icons", StringComparison.OrdinalIgnoreCase)) hasFluent = true;
                         else if (string.Equals(n, "Segoe MDL2 Assets", StringComparison.OrdinalIgnoreCase)) hasMdl2 = true;
                     }
-                    if (hasFluent) return new Font("Segoe Fluent Icons", sizePt, FontStyle.Regular, GraphicsUnit.Point);
-                    if (hasMdl2) return new Font("Segoe MDL2 Assets", sizePt, FontStyle.Regular, GraphicsUnit.Point);
+                    if (hasFluent) return new Font("Segoe Fluent Icons", sizePx, FontStyle.Regular, GraphicsUnit.Pixel);
+                    if (hasMdl2) return new Font("Segoe MDL2 Assets", sizePx, FontStyle.Regular, GraphicsUnit.Pixel);
                 }
             }
             catch { }
@@ -1049,49 +1111,75 @@ namespace T3ToolsTray
             return Math.Max(1, (int)Math.Round(logicalPx * _scale));
         }
 
+        private static int Clamp(int value, int min, int max)
+        {
+            if (max < min) return min;
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
+        }
+
         public void ShowAtCursor(Point anchor)
         {
+            // Place on the target monitor before querying per-monitor DPI
+            this.Location = anchor;
             CreateHandle();
             _scale = NativeMethods.GetWindowScale(this.Handle);
             if (_scale <= 0.1f)
             {
                 using (Graphics g = CreateGraphics()) { _scale = g.DpiX / 96f; }
             }
+            EnsureFontsForScale(_scale);
 
             Size menuSize = ComputeLayout();
             this.ClientSize = menuSize;
 
             Screen scr = Screen.FromPoint(anchor);
             Rectangle wa = scr.WorkingArea;
-            Rectangle bounds = scr.Bounds;
-            int gap = S(6);
+            int edgeGap = S(12);
+            int cursorGap = S(12);
 
-            // Place above the cursor by default (standard Windows 11 taskbar tray behavior),
-            // shifting inward if near screen edges.
-            int x = anchor.X;
-            int y = anchor.Y - menuSize.Height - gap;
+            int x;
+            int y;
 
-            if (x + menuSize.Width > wa.Right - gap)
+            if (anchor.Y >= wa.Bottom)
             {
-                x = anchor.X - menuSize.Width;
+                // Bottom taskbar: float cleanly above the taskbar like native Win11 flyouts
+                x = anchor.X - (menuSize.Width / 2);
+                y = wa.Bottom - menuSize.Height - edgeGap;
             }
-            if (x + menuSize.Width > bounds.Right - gap)
+            else if (anchor.Y <= wa.Top)
             {
-                x = bounds.Right - menuSize.Width - gap;
+                // Top taskbar
+                x = anchor.X - (menuSize.Width / 2);
+                y = wa.Top + edgeGap;
             }
-            if (x < bounds.Left + gap)
+            else if (anchor.X <= wa.Left)
             {
-                x = bounds.Left + gap;
+                // Left taskbar
+                x = wa.Left + edgeGap;
+                y = anchor.Y - (menuSize.Height / 2);
+            }
+            else if (anchor.X >= wa.Right)
+            {
+                // Right taskbar
+                x = wa.Right - menuSize.Width - edgeGap;
+                y = anchor.Y - (menuSize.Height / 2);
+            }
+            else
+            {
+                // Inside working area (e.g., Windows 11 hidden tray overflow flyout):
+                // open above the cursor and never sink into the taskbar.
+                x = anchor.X - (menuSize.Width / 2);
+                y = anchor.Y - menuSize.Height - cursorGap;
+                if (y < wa.Top + edgeGap)
+                {
+                    y = anchor.Y + cursorGap;
+                }
             }
 
-            if (y < bounds.Top + gap)
-            {
-                y = anchor.Y + gap;
-            }
-            if (y + menuSize.Height > bounds.Bottom - gap)
-            {
-                y = bounds.Bottom - menuSize.Height - gap;
-            }
+            x = Clamp(x, wa.Left + edgeGap, wa.Right - menuSize.Width - edgeGap);
+            y = Clamp(y, wa.Top + edgeGap, wa.Bottom - menuSize.Height - edgeGap);
 
             this.Location = new Point(x, y);
             this.Show();
@@ -1102,17 +1190,17 @@ namespace T3ToolsTray
         private Size ComputeLayout()
         {
             _entryRects.Clear();
-            int padX = S(4);
-            int padY = S(4);
-            int itemH = S(32);
-            int headerH = S(26);
+            int padX = S(5);
+            int padY = S(5);
+            int itemH = S(26);
+            int headerH = S(23);
             int itemGap = S(2);
             int sepH = S(9);
-            int leftInset = S(11);
-            int iconW = S(16);
-            int iconTextGap = S(12);
-            int rightInset = S(16);
-            int minWidth = S(156);
+            int leftInset = S(8);
+            int iconW = S(15);
+            int iconTextGap = S(8);
+            int rightInset = S(14);
+            int minWidth = S(158);
 
             int maxContentW = minWidth;
             using (Graphics g = CreateGraphics())
@@ -1121,18 +1209,44 @@ namespace T3ToolsTray
                 {
                     var entry = _entries[i];
                     if (entry.IsSeparator) continue;
-                    Font f = entry.IsHeader ? _headerFont : _textFont;
-                    Size textSz = TextRenderer.MeasureText(
-                        g,
-                        entry.Text ?? "",
-                        f,
-                        new Size(int.MaxValue, int.MaxValue),
-                        TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
-                    );
-                    int rowW = entry.IsHeader
-                        ? (padX * 2 + leftInset + textSz.Width + rightInset)
-                        : (padX * 2 + leftInset + iconW + iconTextGap + textSz.Width + rightInset);
-                    if (rowW > maxContentW) maxContentW = rowW;
+
+                    if (entry.IsHeader)
+                    {
+                        Size titleSz = TextRenderer.MeasureText(
+                            g,
+                            entry.Text ?? "",
+                            _headerFont,
+                            new Size(int.MaxValue, int.MaxValue),
+                            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                        );
+                        int leadingBlock = entry.StatusDotColor.IsEmpty ? 0 : (iconW + iconTextGap);
+                        int subBlock = 0;
+                        if (!string.IsNullOrEmpty(entry.Subtitle))
+                        {
+                            Size subSz = TextRenderer.MeasureText(
+                                g,
+                                entry.Subtitle,
+                                _headerSubFont,
+                                new Size(int.MaxValue, int.MaxValue),
+                                TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                            );
+                            subBlock = S(16) + subSz.Width;
+                        }
+                        int hdrW = padX * 2 + leftInset + leadingBlock + titleSz.Width + subBlock + leftInset;
+                        if (hdrW > maxContentW) maxContentW = hdrW;
+                    }
+                    else
+                    {
+                        Size textSz = TextRenderer.MeasureText(
+                            g,
+                            entry.Text ?? "",
+                            _textFont,
+                            new Size(int.MaxValue, int.MaxValue),
+                            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                        );
+                        int rowW = padX * 2 + leftInset + iconW + iconTextGap + textSz.Width + rightInset;
+                        if (rowW > maxContentW) maxContentW = rowW;
+                    }
                 }
             }
 
@@ -1168,13 +1282,15 @@ namespace T3ToolsTray
         {
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
             g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             g.Clear(_bgColor);
 
-            int radius = S(4);
-            int leftInset = S(11);
-            int iconW = S(16);
-            int iconTextGap = S(12);
+            int radius = S(5);
+            int leftInset = S(8);
+            int iconW = S(15);
+            int iconTextGap = S(8);
+            int sepInset = S(10);
 
             for (int i = 0; i < _entries.Count && i < _entryRects.Count; i++)
             {
@@ -1186,28 +1302,72 @@ namespace T3ToolsTray
                     int lineY = r.Top + r.Height / 2;
                     using (var pen = new Pen(_sepColor, 1f))
                     {
-                        g.DrawLine(pen, S(1), lineY, this.ClientSize.Width - S(1) - 1, lineY);
+                        g.DrawLine(pen, sepInset, lineY, this.ClientSize.Width - sepInset - 1, lineY);
                     }
                     continue;
                 }
 
                 if (entry.IsHeader)
                 {
-                    Rectangle hdrRect = new Rectangle(r.Left + leftInset, r.Top, r.Width - leftInset - S(8), r.Height);
+                    int xCur = r.Left + leftInset;
+                    if (!entry.StatusDotColor.IsEmpty)
+                    {
+                        int dotSize = S(5.5f);
+                        int dotX = xCur + (iconW - dotSize) / 2;
+                        int dotY = r.Top + (r.Height - dotSize) / 2;
+                        using (var halo = new SolidBrush(Color.FromArgb(_isDark ? 48 : 38, entry.StatusDotColor)))
+                        using (var dotBrush = new SolidBrush(entry.StatusDotColor))
+                        {
+                            int haloPad = Math.Max(1, S(2));
+                            g.FillEllipse(halo, dotX - haloPad, dotY - haloPad, dotSize + haloPad * 2, dotSize + haloPad * 2);
+                            g.FillEllipse(dotBrush, dotX, dotY, dotSize, dotSize);
+                        }
+                        xCur += iconW + iconTextGap;
+                    }
+
+                    int rightEdge = r.Right - leftInset;
+                    int subWidth = 0;
+                    if (!string.IsNullOrEmpty(entry.Subtitle))
+                    {
+                        Size subSz = TextRenderer.MeasureText(
+                            g,
+                            entry.Subtitle,
+                            _headerSubFont,
+                            new Size(int.MaxValue, int.MaxValue),
+                            TextFormatFlags.NoPadding | TextFormatFlags.SingleLine
+                        );
+                        subWidth = subSz.Width + S(6);
+                        Rectangle subRect = new Rectangle(rightEdge - subSz.Width, r.Top, subSz.Width, r.Height);
+                        TextRenderer.DrawText(
+                            g,
+                            entry.Subtitle,
+                            _headerSubFont,
+                            subRect,
+                            _mutedTextColor,
+                            TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding
+                        );
+                    }
+
+                    Rectangle hdrRect = new Rectangle(xCur, r.Top, Math.Max(10, rightEdge - subWidth - xCur), r.Height);
                     TextRenderer.DrawText(
                         g,
                         entry.Text ?? "",
                         _headerFont,
                         hdrRect,
-                        _mutedTextColor,
+                        _headerTitleColor,
                         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding
                     );
                     continue;
                 }
 
-                if (i == _pressedIndex || i == _hoverIndex)
+                bool isHovered = (i == _hoverIndex);
+                bool isPressed = (i == _pressedIndex);
+                bool isActive = isHovered || isPressed;
+                if (isActive)
                 {
-                    Color fill = (i == _pressedIndex) ? _pressedColor : _hoverColor;
+                    Color fill = entry.IsDestructive
+                        ? (isPressed ? _dangerPressedColor : _dangerHoverColor)
+                        : (isPressed ? _pressedColor : _hoverColor);
                     using (var path = CreateRoundedRectPath(new RectangleF(r.X, r.Y, r.Width - 1f, r.Height - 1f), radius))
                     using (var br = new SolidBrush(fill))
                     {
@@ -1215,7 +1375,11 @@ namespace T3ToolsTray
                     }
                 }
 
-                Color icColor = entry.IsAccentWarning ? _warnColor : _iconColor;
+                Color icColor = (entry.IsDestructive && isActive)
+                    ? _dangerTextColor
+                    : (entry.IsAccentWarning ? _warnColor : _iconColor);
+                Color txtColor = (entry.IsDestructive && isActive) ? _dangerTextColor : _textColor;
+
                 Rectangle iconRect = new Rectangle(r.Left + leftInset, r.Top, iconW, r.Height);
                 if (_iconFont != null && !string.IsNullOrEmpty(entry.Glyph))
                 {
@@ -1230,7 +1394,7 @@ namespace T3ToolsTray
                 }
                 else
                 {
-                    int dot = S(6);
+                    int dot = S(5);
                     using (var br = new SolidBrush(icColor))
                     {
                         g.FillEllipse(br, iconRect.Left + (iconRect.Width - dot) / 2, iconRect.Top + (iconRect.Height - dot) / 2, dot, dot);
@@ -1248,7 +1412,7 @@ namespace T3ToolsTray
                     entry.Text ?? "",
                     _textFont,
                     textRect,
-                    _textColor,
+                    txtColor,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding
                 );
             }
@@ -1590,7 +1754,7 @@ namespace T3ToolsTray
                     if (_restartTimes.Count >= 5)
                     {
                         _breakerOpen = true;
-                        _lastDaemonError = "后台多次重启失败，请右键选择“重启后台服务”";
+                        _lastDaemonError = "后台多次重启失败，请右键选择“重启”";
                         TrayLog.Event("automatic recovery paused", true);
                         SafeInvoke(delegate { UpdateTrayIndicator(); });
                         return;
@@ -2028,13 +2192,22 @@ namespace T3ToolsTray
             }
         }
 
+        private Color GetStatusDotColor()
+        {
+            if (!string.IsNullOrEmpty(_lastDaemonError)) return Color.FromArgb(239, 68, 68);
+            if (!_autoAttach) return Color.FromArgb(156, 163, 175);
+            if (_cdpConnected) return Color.FromArgb(34, 197, 94);
+            if (_t3UiRunning) return Color.FromArgb(245, 158, 11);
+            return Color.FromArgb(99, 102, 241);
+        }
+
         private void ShowFluentTrayMenu(Point cursorPos)
         {
             DismissActiveTrayMenu();
 
-            string verLabel = "T3Tools v" + (string.IsNullOrEmpty(_daemonVersion) ? "0.1.0" : _daemonVersion);
+            string verTag = "v" + (string.IsNullOrEmpty(_daemonVersion) ? "0.1.0" : _daemonVersion);
             var entries = new List<FluentTrayMenuEntry>();
-            entries.Add(FluentTrayMenuEntry.Header(verLabel));
+            entries.Add(FluentTrayMenuEntry.Header("T3Tools", verTag, GetStatusDotColor()));
             entries.Add(FluentTrayMenuEntry.Separator());
             if (_updateHasNew && !string.IsNullOrEmpty(_updateLatestVersion))
             {
@@ -2051,7 +2224,8 @@ namespace T3ToolsTray
                     entries.Add(FluentTrayMenuEntry.Item(
                         "立即更新到 v" + upVer,
                         "\uE896",
-                        delegate { TriggerAppUpdateInstall(); }
+                        delegate { TriggerAppUpdateInstall(); },
+                        true
                     ));
                 }
                 else
@@ -2060,7 +2234,8 @@ namespace T3ToolsTray
                     entries.Add(FluentTrayMenuEntry.Item(
                         "新版本 v" + _updateLatestVersion + "（前往下载）",
                         "\uE896",
-                        delegate { OpenAllowedExternalUrl(relUrl); }
+                        delegate { OpenAllowedExternalUrl(relUrl); },
+                        true
                     ));
                 }
                 entries.Add(FluentTrayMenuEntry.Separator());
@@ -2070,8 +2245,7 @@ namespace T3ToolsTray
                 "\uE80F",
                 delegate { ShowMainWindow(); }
             ));
-            entries.Add(FluentTrayMenuEntry.Item("检查更新", "\uE777", delegate { TriggerAppUpdateCheck(); }));
-            entries.Add(FluentTrayMenuEntry.Item("重启后台服务", "\uE72C", delegate { QueueRecovery(true); }));
+            entries.Add(FluentTrayMenuEntry.Item("检查更新", "\uE896", delegate { TriggerAppUpdateCheck(); }));
             entries.Add(FluentTrayMenuEntry.Item(
                 "重启",
                 "\uE72C",
@@ -2081,7 +2255,9 @@ namespace T3ToolsTray
             entries.Add(FluentTrayMenuEntry.Item(
                 "退出",
                 "\uE7E8",
-                delegate { ExitApplication(); }
+                delegate { ExitApplication(); },
+                false,
+                true
             ));
 
             bool trayDark = NativeMethods.IsSystemTrayDarkTheme();

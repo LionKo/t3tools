@@ -66,6 +66,7 @@ async function cmdStart() {
     autoPatchLauncher,
     autoPatchDebugArg,
     autoExitWhenT3Gone,
+    deferInitialSync: true,
     onAutoExit: () => {
       console.log('[T3Tools] 检测到 T3 Code 已关闭，守护进程自动退出。');
       exitAfterFlush(0);
