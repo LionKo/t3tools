@@ -1540,103 +1540,98 @@ const PT_SHARED_CSS = `
 .pt-sidebar-update-row:hover {
   border-color: var(--pt-accent, #6366f1);
 }
-.pt-sidebar-update-row.pt-sidebar-app-update {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 4px;
-  padding: 7px 8px;
-  border-radius: 9px;
-  border-color: color-mix(in srgb, var(--pt-accent, #6366f1) 52%, var(--pt-border, rgba(255,255,255,0.14)));
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--pt-accent, #6366f1) 18%, var(--pt-card, #14161b)),
-    color-mix(in srgb, var(--pt-accent, #6366f1) 9%, var(--pt-card, #14161b))
-  );
-  box-shadow: 0 4px 14px color-mix(in srgb, var(--pt-accent, #6366f1) 14%, transparent);
-}
-.pt-sidebar-app-update-head {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  min-width: 0;
-}
-.pt-sidebar-app-update-title {
-  flex: 1;
-  min-width: 0;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--pt-fg, #f3f4f6);
+.pt-sidebar-trigger-split {
+  position: relative;
+  padding: 5px 9px 5px 7px;
+  cursor: default;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
-.pt-sidebar-app-update-sub {
-  font-size: 10.5px;
-  color: var(--pt-muted, #9ca3af);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.pt-sidebar-trigger-split.has-app-update {
+  border-color: color-mix(in srgb, var(--pt-accent, #6366f1) 40%, var(--pt-border, rgba(255,255,255,0.12)));
 }
-.pt-sidebar-app-update-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 2px;
+.pt-sidebar-trigger-split.is-update-ready {
+  border-color: color-mix(in srgb, var(--pt-success, #22c55e) 48%, var(--pt-border, rgba(255,255,255,0.12)));
 }
-.pt-sidebar-app-update-primary {
+.pt-sidebar-trigger-split.is-update-error {
+  border-color: color-mix(in srgb, var(--pt-danger, #ef4444) 48%, var(--pt-border, rgba(255,255,255,0.12)));
+}
+.pt-sidebar-trigger-main {
   appearance: none;
   border: 0;
-  border-radius: 6px;
-  padding: 3px 8px;
-  background: var(--pt-accent, #6366f1);
-  color: var(--pt-accent-fg, #ffffff);
-  font: inherit;
-  font-size: 10.5px;
-  font-weight: 600;
-  line-height: 1.35;
-  cursor: pointer;
+  background: transparent;
+  color: inherit;
+  padding: 1px 0;
+  margin: 0;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pt-sidebar-app-update-primary:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-.pt-sidebar-app-update-primary:disabled {
-  opacity: 0.7;
-  cursor: default;
-}
-.pt-sidebar-app-update-secondary {
-  appearance: none;
-  border: 1px solid color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
-  border-radius: 6px;
-  padding: 2px 7px;
-  background: color-mix(in srgb, var(--pt-fg, #fff) 6%, transparent);
-  color: var(--pt-fg, #f3f4f6);
+  display: flex;
+  align-items: center;
+  gap: 7px;
   font: inherit;
-  font-size: 10.5px;
-  line-height: 1.35;
   cursor: pointer;
+}
+.pt-sidebar-update-icon {
+  appearance: none;
+  position: relative;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  margin: 0;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex: none;
+  box-sizing: border-box;
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--pt-accent, #6366f1) 90%, #ffffff 10%);
+  background: var(--pt-accent, #6366f1);
+  color: var(--pt-accent-fg, #ffffff);
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--pt-accent, #6366f1) 22%, transparent);
+  transition: transform .12s ease, filter .15s ease, border-color .15s ease, background-color .15s ease;
 }
-.pt-sidebar-app-update-secondary:hover {
-  border-color: var(--pt-accent, #6366f1);
+.pt-sidebar-update-icon:hover {
+  filter: brightness(1.1);
+  transform: translateY(-0.5px);
 }
-.pt-sidebar-app-update-bar {
-  width: 100%;
-  height: 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--pt-fg, #fff) 14%, transparent);
-  overflow: hidden;
-  margin-top: 2px;
+.pt-sidebar-update-icon:active {
+  transform: translateY(0);
 }
-.pt-sidebar-app-update-bar-fill {
+.pt-sidebar-update-icon.is-busy {
+  background: color-mix(in srgb, var(--pt-accent, #6366f1) 22%, var(--pt-card, #14161b));
+  border-color: color-mix(in srgb, var(--pt-accent, #6366f1) 60%, transparent);
+  color: var(--pt-accent, #6366f1);
+  box-shadow: none;
+}
+.pt-sidebar-update-icon.is-ready {
+  background: color-mix(in srgb, var(--pt-success, #22c55e) 20%, var(--pt-card, #14161b));
+  border-color: color-mix(in srgb, var(--pt-success, #22c55e) 65%, transparent);
+  color: var(--pt-success, #22c55e);
+  box-shadow: none;
+}
+.pt-sidebar-update-icon.is-error {
+  background: var(--pt-danger, #ef4444);
+  border-color: color-mix(in srgb, var(--pt-danger, #ef4444) 88%, #ffffff 12%);
+  color: #ffffff;
+  box-shadow: 0 0 0 2.5px color-mix(in srgb, var(--pt-danger, #ef4444) 22%, transparent);
+}
+.pt-sidebar-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--pt-fg, #fff) 10%, transparent);
+  pointer-events: none;
+}
+.pt-sidebar-progress-fill {
   height: 100%;
   border-radius: 999px;
   background: var(--pt-accent, #6366f1);
   transition: width 180ms ease;
+}
+.pt-sidebar-progress-fill.is-ready {
+  background: var(--pt-success, #22c55e);
 }
 .side-ver-dot {
   display: none;
@@ -3388,58 +3383,12 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
   const appUpdate = live?.appUpdate && typeof live.appUpdate === 'object' ? live.appUpdate : null;
   const dismissedAppVer = String(options.dismissedAppUpdateVer || '').trim();
   const appUpdateBusy = Boolean(appUpdate && ['downloading', 'verifying', 'ready'].includes(appUpdate.status));
-  const showAppUpdateBanner = Boolean(
+  const showAppUpdateIcon = Boolean(
     appUpdate &&
     appUpdate.hasUpdate &&
     appUpdate.latestVersion &&
     (appUpdateBusy || (!appUpdate.isSkipped && dismissedAppVer !== appUpdate.latestVersion))
   );
-
-  let appUpdateRowHtml = '';
-  if (showAppUpdateBanner) {
-    const ver = String(appUpdate.latestVersion);
-    const curVer = String(appUpdate.currentVersion || '?');
-    const pct = Math.max(0, Math.min(100, Number(appUpdate.progressPercent) || 0));
-    const appTitle = appUpdate.status === 'downloading'
-      ? `T3Tools 更新中 ${pct}%`
-      : appUpdate.status === 'verifying'
-        ? 'T3Tools 校验中...'
-        : appUpdate.status === 'ready'
-          ? 'T3Tools 正在重启更新...'
-          : `发现 T3Tools v${ver}`;
-    const appSub = appUpdate.status === 'error' && appUpdate.lastError
-      ? String(appUpdate.lastError)
-      : `v${curVer} → v${ver}${appUpdate.canAutoUpdate ? ' · 一键自动更新' : ' · 新版本已发布'}`;
-    const primaryLabel = appUpdate.status === 'downloading'
-      ? `下载中 ${pct}%`
-      : (appUpdate.status === 'verifying' || appUpdate.status === 'ready')
-        ? '正在重启...'
-        : (appUpdate.canAutoUpdate ? '立即更新' : '前往下载');
-    const appTip = appUpdate.canAutoUpdate
-      ? `T3Tools v${curVer} → v${ver} · 点击立即自动更新并重启`
-      : `T3Tools v${curVer} → v${ver} · 点击前往 GitHub Releases 下载`;
-    const dismissBtn = appUpdateBusy
-      ? ''
-      : `<button type="button" class="pt-sidebar-update-dismiss" data-pt-action="dismiss-app-update" data-pt-app-ver="${esc(ver)}" title="暂不提醒此版本" aria-label="暂不提醒此版本">×</button>`;
-    const progressHtml = appUpdateBusy
-      ? `<div class="pt-sidebar-app-update-bar"><div class="pt-sidebar-app-update-bar-fill" style="width:${appUpdate.status === 'verifying' ? 98 : appUpdate.status === 'ready' ? 100 : pct}%;"></div></div>`
-      : '';
-    appUpdateRowHtml = `
-      <div class="pt-sidebar-update-row pt-sidebar-app-update" data-pt-app-update="${esc(ver)}" role="status" aria-live="polite">
-        <div class="pt-sidebar-app-update-head">
-          <span class="pt-sidebar-update-dot" aria-hidden="true"></span>
-          <span class="pt-sidebar-app-update-title" title="${esc(appTip)}">${appUpdateBusy ? '↻' : '↑'} ${esc(appTitle)}</span>
-          ${dismissBtn}
-        </div>
-        <div class="pt-sidebar-app-update-sub" title="${esc(appSub)}">${esc(appSub)}</div>
-        ${progressHtml}
-        <div class="pt-sidebar-app-update-actions">
-          <button type="button" class="pt-sidebar-app-update-primary" data-pt-action="install-app-update" title="${esc(appTip)}"${appUpdateBusy ? ' disabled' : ''}>${esc(primaryLabel)}</button>
-          <button type="button" class="pt-sidebar-app-update-secondary" data-pt-action="open-app-update-settings" title="查看更新详情与检查频率设置">详情</button>
-        </div>
-      </div>
-    `;
-  }
 
   let updateRowHtml = '';
   if (showUpdateBanner) {
@@ -3477,10 +3426,63 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
       `
     : `<span class="pt-sidebar-fallback">${esc(rangeMeta.short)}用量看板</span>`;
 
-  return `
-    <div class="pt-sidebar-stack">
-      ${appUpdateRowHtml}
-      ${updateRowHtml}
+  let triggerHtml = '';
+  if (showAppUpdateIcon) {
+    const ver = String(appUpdate.latestVersion);
+    const curVer = String(appUpdate.currentVersion || '?');
+    const rawPct = Math.max(0, Math.min(100, Number(appUpdate.progressPercent) || 0));
+    const effPct = appUpdate.status === 'ready' ? 100 : appUpdate.status === 'verifying' ? 98 : rawPct;
+    const isReady = appUpdate.status === 'ready';
+    const isError = appUpdate.status === 'error' && Boolean(appUpdate.lastError);
+    const iconAction = appUpdateBusy ? 'open-app-update-settings' : 'install-app-update';
+    const iconCls = isReady
+      ? 'is-ready'
+      : appUpdateBusy
+        ? 'is-busy'
+        : isError
+          ? 'is-error'
+          : 'is-available';
+    const barCls = isReady
+      ? 'is-update-ready'
+      : isError
+        ? 'is-update-error'
+        : 'has-app-update';
+    const iconTip = isReady
+      ? `T3Tools v${ver} 已就绪，正在重启更新...（点击查看详情）`
+      : appUpdate.status === 'verifying'
+        ? `T3Tools v${ver} 校验中...（点击查看详情）`
+        : appUpdate.status === 'downloading'
+          ? `正在下载 T3Tools v${ver}（${effPct}%）· 点击查看详情`
+          : isError
+            ? `T3Tools v${ver} 更新失败：${appUpdate.lastError} · 点击重试`
+            : appUpdate.canAutoUpdate
+              ? `发现 T3Tools v${ver}（v${curVer} → v${ver}）· 点击立即自动更新并重启`
+              : `发现 T3Tools v${ver}（v${curVer} → v${ver}）· 点击前往 GitHub Releases 下载`;
+
+    let iconSvg = '';
+    if (isReady) {
+      iconSvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L6.7 11.7 12.8 4.8"/></svg>`;
+    } else if (appUpdateBusy) {
+      const circ = 43.98;
+      const offset = (circ * (1 - Math.max(4, effPct) / 100)).toFixed(2);
+      iconSvg = `<svg width="16" height="16" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-opacity="0.22" stroke-width="2.2"/><circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="${circ}" stroke-dashoffset="${offset}" transform="rotate(-90 10 10)"/><path d="M10 6.8v5.2M7.8 9.9L10 12.1l2.2-2.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    } else {
+      iconSvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7.5"/><path d="M4.75 7.25L8 10.5l3.25-3.25"/><path d="M3 13h10"/></svg>`;
+    }
+
+    const progressLineHtml = appUpdateBusy
+      ? `<span class="pt-sidebar-progress" aria-hidden="true"><span class="pt-sidebar-progress-fill${isReady ? ' is-ready' : ''}" style="width:${effPct}%;"></span></span>`
+      : '';
+
+    triggerHtml = `
+      <div class="pt-sidebar-trigger pt-sidebar-trigger-split ${barCls}" data-pt-app-update="${esc(ver)}">
+        <button type="button" class="pt-sidebar-update-icon ${iconCls}" data-pt-action="${iconAction}" data-pt-app-ver="${esc(ver)}" title="${esc(iconTip)}" aria-label="${esc(iconTip)}">${iconSvg}</button>
+        <button type="button" class="pt-sidebar-trigger-main" data-pt-action="open-dashboard" title="${esc(triggerTitle)}" aria-label="${esc(triggerTitle)}">${bodyHtml}</button>
+        ${progressLineHtml}
+      </div>
+    `;
+  } else {
+    triggerHtml = `
       <button type="button" class="pt-sidebar-trigger" data-pt-action="open-dashboard" title="${esc(triggerTitle)}" aria-label="${esc(triggerTitle)}">
         <span class="pt-sidebar-logo" data-state="${esc(badgeState)}" aria-hidden="true">
           <span class="pt-sidebar-logo-text">T3</span>
@@ -3488,6 +3490,13 @@ function renderSidebarTriggerHtml(live = null, options = {}) {
         </span>
         ${bodyHtml}
       </button>
+    `;
+  }
+
+  return `
+    <div class="pt-sidebar-stack">
+      ${updateRowHtml}
+      ${triggerHtml}
     </div>
   `;
 }

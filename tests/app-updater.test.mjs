@@ -613,15 +613,48 @@ test('Magpie-style updater supports configurable checkIntervalMinutes, 5-min fre
       assert.match(dashHtml, /立即更新到 v9\.9\.9/);
 
       const sidebarHtml = sandbox.renderSidebarTriggerHtml(
-        { appUpdate: { ...settled, currentVersion: '0.1.3' }, settings: { sidebarUsageRange: 'today' } },
+        { appUpdate: { ...settled, currentVersion: '0.1.3', canAutoUpdate: true }, settings: { sidebarUsageRange: 'today' } },
         { status: 'attached' }
       );
-      assert.match(sidebarHtml, /pt-sidebar-app-update/);
+      assert.equal(sidebarHtml.includes('pt-sidebar-app-update'), false, 'should not render extra update card above sidebar trigger');
+      assert.match(sidebarHtml, /pt-sidebar-update-icon is-available/);
       assert.match(sidebarHtml, /data-pt-app-update="9\.9\.9"/);
       assert.match(sidebarHtml, /发现 T3Tools v9\.9\.9/);
       assert.match(sidebarHtml, /v0\.1\.3 → v9\.9\.9/);
       assert.match(sidebarHtml, /data-pt-action="install-app-update"/);
-      assert.match(sidebarHtml, /data-pt-action="open-app-update-settings"/);
+      assert.match(sidebarHtml, /data-pt-action="open-dashboard"/);
+      assert.equal(sidebarHtml.includes('pt-sidebar-logo-text'), false, 'T3 icon slot should be replaced by download icon when update is available');
+
+      const downloadingSidebarHtml = sandbox.renderSidebarTriggerHtml(
+        {
+          appUpdate: { ...settled, currentVersion: '0.1.3', canAutoUpdate: true, status: 'downloading', progressPercent: 64 },
+          settings: { sidebarUsageRange: 'today' }
+        },
+        { status: 'attached' }
+      );
+      assert.match(downloadingSidebarHtml, /pt-sidebar-update-icon is-busy/);
+      assert.match(downloadingSidebarHtml, /data-pt-action="open-app-update-settings"/);
+      assert.match(downloadingSidebarHtml, /pt-sidebar-progress-fill" style="width:64%;"/);
+
+      const readySidebarHtml = sandbox.renderSidebarTriggerHtml(
+        {
+          appUpdate: { ...settled, currentVersion: '0.1.3', canAutoUpdate: true, status: 'ready', progressPercent: 100 },
+          settings: { sidebarUsageRange: 'today' }
+        },
+        { status: 'attached' }
+      );
+      assert.match(readySidebarHtml, /pt-sidebar-update-icon is-ready/);
+      assert.match(readySidebarHtml, /pt-sidebar-progress-fill is-ready" style="width:100%;"/);
+
+      const skippedSidebarHtml = sandbox.renderSidebarTriggerHtml(
+        {
+          appUpdate: { ...settled, currentVersion: '0.1.3', isSkipped: true },
+          settings: { sidebarUsageRange: 'today' }
+        },
+        { status: 'attached' }
+      );
+      assert.match(skippedSidebarHtml, /pt-sidebar-logo-text">T3</);
+      assert.equal(skippedSidebarHtml.includes('pt-sidebar-update-icon'), false);
 
       const fbHtml = buildFallbackHtml({ version: '0.1.3', authToken: daemon.authToken });
       assert.match(fbHtml, /data-app-update-setting="checkIntervalMinutes"/);

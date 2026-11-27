@@ -1581,12 +1581,16 @@
       if (upd && !upd.canAutoUpdate) {
         if (upd.releaseUrl) window.open(upd.releaseUrl, '_blank', 'noopener,noreferrer');
       } else {
+        if (upd && !['downloading', 'verifying', 'ready'].includes(upd.status)) {
+          applyAppUpdateState({ ...upd, status: 'downloading', progressPercent: 0, lastError: '' });
+        }
         callRpc('installAppUpdate', {}).then(res => {
-          if (res?.status) {
-            applyAppUpdateState(res.status);
-          }
           if (res?.ok === false && res.error) {
+            const base = res?.status || lastAppUpdate || upd;
+            if (base) applyAppUpdateState({ ...base, status: 'error', lastError: res.error });
             showOverlayToast(res.error);
+          } else if (res?.status) {
+            applyAppUpdateState(res.status);
           }
         }).catch(err => {
           const msg = err?.message || '启动自动更新失败';
