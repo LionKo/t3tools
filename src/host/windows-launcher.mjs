@@ -78,7 +78,7 @@ function runPowerShell(script, extraEnv = {}) {
   return { ok: true, stdout: (res.stdout || '').trim(), stderr: '' };
 }
 
-function runPowerShellAsync(script, extraEnv = {}, { signal } = {}) {
+function runPowerShellAsync(script, extraEnv = {}, { signal, timeoutMs = 12000 } = {}) {
   return new Promise(resolveResult => {
     execFile(
       'powershell.exe',
@@ -86,7 +86,7 @@ function runPowerShellAsync(script, extraEnv = {}, { signal } = {}) {
       {
         encoding: 'utf8',
         windowsHide: true,
-        timeout: 12000,
+        timeout: timeoutMs,
         signal,
         env: { ...process.env, ...extraEnv }
       },
@@ -631,13 +631,15 @@ export function isT3ProcessRunning({ runner = spawnSync } = {}) {
   }
 }
 
-export async function launchT3WithDebugPort(paths, extraArgs = []) {
+export async function launchT3WithDebugPort(paths, extraArgs = [], { env = undefined } = {}) {
   const exe = findT3Executable(paths);
   if (!exe) return { ok: false, error: '未找到 T3 Code 可执行文件' };
   const cleanArgs = Array.isArray(extraArgs) ? extraArgs.filter(a => typeof a === 'string') : [];
   const hasFlag = cleanArgs.some(a => DEBUG_TOKEN.test(a));
   const finalArgs = hasFlag ? cleanArgs : [DEBUG_FLAG, ...cleanArgs];
-  const child = spawn(exe, finalArgs, { detached: true, stdio: 'ignore', windowsHide: false });
+  const spawnOpts = { detached: true, stdio: 'ignore', windowsHide: false };
+  if (env && typeof env === 'object') spawnOpts.env = env;
+  const child = spawn(exe, finalArgs, spawnOpts);
   try {
     await new Promise((resolve, reject) => {
       child.once('error', reject);
@@ -1069,59 +1071,129 @@ $mains | ConvertTo-Json -Compress -Depth 3
 }
 
 /**
- * Gracefully close the main T3 Code Electron UI window (leaving unrelated acp-mcp-bridge
- * helpers untouched) and relaunch T3 Code with `--remote-debugging-port=0`.
+ * Gracefully close the main T3 Code Electron UI window (and ONLY its own child
+ * server.asar backend verified by parent PID ancestry and exact bin.mjs script path,
+ * leaving unrelated instances and acp-mcp-bridge helpers untouched), then relaunch
+ * T3 Code with `--remote-debugging-port=0`.
+ * Fully asynchronous so the T3Tools daemon event loop and tray health probes never block.
  */
-export function relaunchT3WithDebugPort(paths, extraArgs = [], { runner = runPowerShell, launchImpl = launchT3WithDebugPort } = {}) {
+export async function relaunchT3WithDebugPort(
+  paths,
+  extraArgs = [],
+  { runner = null, runnerAsync = null, launchImpl = launchT3WithDebugPort, env = undefined } = {}
+) {
   const exe = findT3Executable(paths);
   if (!exe) return { ok: false, error: '未找到 T3 Code 可执行文件' };
 
   if (process.platform === 'win32') {
     const ps = `
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
-$procs = Get-CimInstance Win32_Process -Filter "Name LIKE 'T3%Code%.exe' OR Name LIKE 't3code%.exe'" -ErrorAction SilentlyContinue
-$mainPids = @()
+$targetExe = $env:T3TOOLS_TARGET_EXE
+$procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'T3%Code%.exe' OR Name LIKE 't3code%.exe'" -ErrorAction SilentlyContinue)
+$mainEntries = @()
+$mainPidSet = New-Object 'System.Collections.Generic.HashSet[int]'
 foreach ($p in $procs) {
-  if ($p.ExecutablePath -ne $env:T3TOOLS_TARGET_EXE) { continue }
+  if ($p.ExecutablePath -ne $targetExe) { continue }
   $cmd = [string]$p.CommandLine
   if ($cmd -match '--type=' -or $cmd -match 'acp-mcp-bridge' -or $cmd -match 'server\\.asar') { continue }
-  $mainPids += [int]$p.ProcessId
+  $pidInt = [int]$p.ProcessId
+  $mainEntries += [PSCustomObject]@{ pid = $pidInt; created = $p.CreationDate }
+  [void]$mainPidSet.Add($pidInt)
 }
-foreach ($procId in $mainPids) {
+# Identify ONLY server.asar backends whose direct parent is one of the main UI PIDs being closed
+$ownedServerEntries = @()
+$ambiguousServerPids = @()
+foreach ($p in $procs) {
+  if ($p.ExecutablePath -ne $targetExe) { continue }
+  $cmd = [string]$p.CommandLine
+  if ($cmd -match '--type=' -or $cmd -match 'acp-mcp-bridge') { continue }
+  if ($cmd -notmatch 'resources[\\\\/]server\\.asar[\\\\/]apps[\\\\/]server[\\\\/]dist[\\\\/]bin\\.mjs') { continue }
+  $pidInt = [int]$p.ProcessId
+  $ppidInt = [int]$p.ParentProcessId
+  if ($mainPidSet.Contains($ppidInt)) {
+    $ownedServerEntries += [PSCustomObject]@{ pid = $pidInt; created = $p.CreationDate }
+  } else {
+    $ambiguousServerPids += $pidInt
+  }
+}
+foreach ($m in $mainEntries) {
   try {
-    $gp = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if ($gp -and $gp.Path -eq $env:T3TOOLS_TARGET_EXE) {
+    $gp = Get-Process -Id $m.pid -ErrorAction SilentlyContinue
+    if ($gp -and $gp.Path -eq $targetExe) {
       [void]$gp.CloseMainWindow()
     }
   } catch {}
 }
 $deadline = [DateTime]::UtcNow.AddSeconds(8)
 while ([DateTime]::UtcNow -lt $deadline) {
-  $alive = @()
-  foreach ($procId in $mainPids) {
-    if (Get-Process -Id $procId -ErrorAction SilentlyContinue) { $alive += $procId }
+  $aliveMain = 0
+  foreach ($m in $mainEntries) {
+    if (Get-Process -Id $m.pid -ErrorAction SilentlyContinue) { $aliveMain++ }
   }
-  if ($alive.Count -eq 0) { break }
+  $aliveServer = 0
+  foreach ($s in $ownedServerEntries) {
+    if (Get-Process -Id $s.pid -ErrorAction SilentlyContinue) { $aliveServer++ }
+  }
+  if ($aliveMain -eq 0 -and $aliveServer -eq 0) { break }
   Start-Sleep -Milliseconds 250
 }
-foreach ($procId in $mainPids) {
+foreach ($m in $mainEntries) {
   try {
-    $gp = Get-Process -Id $procId -ErrorAction SilentlyContinue
-    if ($gp -and $gp.Path -eq $env:T3TOOLS_TARGET_EXE) {
-      $gp | Stop-Process -Force -ErrorAction SilentlyContinue
+    $cur = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $m.pid) -ErrorAction SilentlyContinue
+    if ($cur -and $cur.ExecutablePath -eq $targetExe -and $cur.CreationDate -eq $m.created) {
+      Stop-Process -Id $m.pid -Force -ErrorAction SilentlyContinue
     }
   } catch {}
 }
+if ($ownedServerEntries.Count -gt 0) {
+  $srvDeadline = [DateTime]::UtcNow.AddSeconds(2)
+  while ([DateTime]::UtcNow -lt $srvDeadline) {
+    $aliveServer = 0
+    foreach ($s in $ownedServerEntries) {
+      if (Get-Process -Id $s.pid -ErrorAction SilentlyContinue) { $aliveServer++ }
+    }
+    if ($aliveServer -eq 0) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  foreach ($s in $ownedServerEntries) {
+    try {
+      $cur = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $s.pid) -ErrorAction SilentlyContinue
+      if ($cur -and $cur.ExecutablePath -eq $targetExe -and $cur.CreationDate -eq $s.created -and ([string]$cur.CommandLine -match 'resources[\\\\/]server\\.asar[\\\\/]apps[\\\\/]server[\\\\/]dist[\\\\/]bin\\.mjs')) {
+        Stop-Process -Id $s.pid -Force -ErrorAction SilentlyContinue
+      }
+    } catch {}
+  }
+}
 Start-Sleep -Milliseconds 300
-Write-Output ($mainPids -join ',')
+[PSCustomObject]@{
+  closedMainPids = @($mainEntries | ForEach-Object { $_.pid })
+  closedServerPids = @($ownedServerEntries | ForEach-Object { $_.pid })
+  ambiguousServerPids = @($ambiguousServerPids)
+} | ConvertTo-Json -Compress
 `;
-    const closeRes = runner(ps, { T3TOOLS_TARGET_EXE: exe });
+    const execAsync = runnerAsync
+      || (runner ? (script, extraEnv) => Promise.resolve(runner(script, extraEnv)) : (script, extraEnv) => runPowerShellAsync(script, extraEnv, { timeoutMs: 16000 }));
+    const closeRes = await execAsync(ps, { T3TOOLS_TARGET_EXE: exe });
     if (!closeRes.ok) {
       return { ok: false, error: closeRes.stderr || '关闭 T3 Code 主窗口失败' };
     }
+    let closeMeta = null;
+    try {
+      if (closeRes.stdout && closeRes.stdout.trim().startsWith('{')) {
+        closeMeta = JSON.parse(closeRes.stdout.trim());
+      }
+    } catch {}
+    const launched = env ? await launchImpl(paths, extraArgs, { env }) : await launchImpl(paths, extraArgs);
+    if (closeMeta && launched && typeof launched === 'object') {
+      return {
+        ...launched,
+        ambiguousServerPids: Array.isArray(closeMeta.ambiguousServerPids) ? closeMeta.ambiguousServerPids : []
+      };
+    }
+    return launched;
   }
 
-  return launchImpl(paths, extraArgs);
+  return env ? await launchImpl(paths, extraArgs, { env }) : await launchImpl(paths, extraArgs);
 }
 
 const AUTOSTART_REG_KEY = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';

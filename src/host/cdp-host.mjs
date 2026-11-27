@@ -221,6 +221,7 @@ export function createCdpHost({
   pollIntervalMs = 4000,
   fastPollIntervalMs = 1500,
   initialEnabled = true,
+  initialBlockedUrls = [],
   fetchImpl = globalThis.fetch,
   connectImpl = connectCdpSocket,
   version = '0.1.0'
@@ -230,8 +231,141 @@ export function createCdpHost({
   let stopped = false;
   let discovery = new AbortController();
   let enabled = Boolean(initialEnabled);
+  let blockedUrls = normalizeBlockedUrls(initialBlockedUrls);
+  let blockedRuleRevision = blockedUrls.length > 0 ? 1 : 0;
   let activePoll = null;
   let timer = null;
+
+  function normalizeBlockedUrls(urls) {
+    if (!Array.isArray(urls)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const raw of urls) {
+      const s = String(raw || '').trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      out.push(s);
+    }
+    return out;
+  }
+
+  /**
+   * Strict HTTPS-only rule matcher for Fetch.requestPaused.
+   * Prevents substring / query-string / ws / loopback / t3code:// false positives.
+   */
+  function matchesBlockedUrlRule(rawUrl, rules) {
+    if (!rawUrl || !Array.isArray(rules) || rules.length === 0) return false;
+    let parsed;
+    try {
+      parsed = new URL(String(rawUrl));
+    } catch {
+      return false;
+    }
+    if (parsed.protocol !== 'https:') return false;
+    for (const rule of rules) {
+      const starIdx = rule.indexOf('*');
+      const prefix = starIdx >= 0 ? rule.slice(0, starIdx) : rule;
+      let ruleUrl;
+      try {
+        ruleUrl = new URL(prefix);
+      } catch {
+        continue;
+      }
+      if (ruleUrl.protocol !== 'https:') continue;
+      if (parsed.origin !== ruleUrl.origin) continue;
+      if (starIdx >= 0) {
+        if (parsed.pathname.startsWith(ruleUrl.pathname)) return true;
+      } else if (parsed.pathname === ruleUrl.pathname && parsed.search === ruleUrl.search) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  async function disableFetchOrClose(meta, reason = '', { fromPauseRecovery = false } = {}) {
+    if (!meta?.client) return false;
+    if (fromPauseRecovery) {
+      meta.pauseRecoveryEpoch = (meta.pauseRecoveryEpoch || 0) + 1;
+    }
+    if (reason) {
+      meta.blockedApplyOk = false;
+      meta.blockedApplyError = reason;
+    }
+    if (meta.fetchState === 'disabled') return true;
+    try {
+      await meta.client.send('Fetch.disable');
+      meta.fetchState = 'disabled';
+      meta.appliedRuleRevision = 0;
+      return true;
+    } catch (disableErr) {
+      // If socket is still open and Fetch.disable failed, close the CDP session so Chromium
+      // immediately releases any paused requests rather than leaving them hung indefinitely.
+      if (meta.client.socket?.readyState === 1) {
+        try { meta.client.socket.close(); } catch {}
+      }
+      meta.fetchState = 'disabled';
+      meta.appliedRuleRevision = 0;
+      meta.blockedApplyOk = false;
+      meta.blockedApplyError = reason || disableErr?.message || String(disableErr);
+      return false;
+    }
+  }
+
+  function applyBlockedUrlsToMeta(meta) {
+    if (!meta?.client) return Promise.resolve(false);
+    const run = async () => {
+      if (!meta.client || clients.get(meta.targetId) !== meta) return false;
+      const desired = [...blockedUrls];
+      const targetRevision = blockedRuleRevision;
+      if (desired.length === 0) {
+        meta.blockedApplyError = '';
+        if (meta.fetchState === 'disabled') {
+          meta.blockedApplyOk = true;
+          meta.appliedRuleRevision = targetRevision;
+          return true;
+        }
+        const disabled = await disableFetchOrClose(meta);
+        if (disabled) {
+          meta.blockedApplyOk = true;
+          meta.blockedApplyError = '';
+          meta.appliedRuleRevision = targetRevision;
+        }
+        return disabled;
+      }
+      const startEpoch = meta.pauseRecoveryEpoch || 0;
+      try {
+        const patterns = desired.map(urlPattern => ({ urlPattern, requestStage: 'Request' }));
+        // Mark state as unknown BEFORE awaiting Fetch.enable so pause-failure recovery during
+        // an in-flight enable cannot short-circuit on stale 'disabled' state.
+        meta.fetchState = 'unknown';
+        await meta.client.send('Fetch.enable', { patterns });
+        if ((meta.pauseRecoveryEpoch || 0) !== startEpoch) {
+          // A pause failure triggered recovery while Fetch.enable was in flight: keep interception
+          // disabled and preserve the recorded error instead of falsely reporting active.
+          await disableFetchOrClose(meta, meta.blockedApplyError || 'Fetch 拦截恢复后已停用');
+          return false;
+        }
+        meta.fetchState = 'enabled';
+        meta.blockedApplyOk = true;
+        meta.blockedApplyError = '';
+        meta.appliedRuleRevision = targetRevision;
+        return true;
+      } catch (err) {
+        // Outcome of timed-out or failed Fetch.enable is unknown (Chromium may have enabled it late).
+        meta.fetchState = 'unknown';
+        meta.blockedApplyOk = false;
+        meta.blockedApplyError = err?.message || String(err);
+        // Proactively recover by disabling interception when socket is open so no late enable survives
+        if (meta.client.socket?.readyState === 1) {
+          await disableFetchOrClose(meta, meta.blockedApplyError);
+        }
+        return false;
+      }
+    };
+    const next = (meta.blockedApplyChain || Promise.resolve()).then(run, run);
+    meta.blockedApplyChain = next.catch(() => false);
+    return next;
+  }
   let lastState = {
     enabled,
     connected: false,
@@ -315,6 +449,12 @@ export function createCdpHost({
       topFrameId: '',
       isolatedContextId: null,
       knownIsolatedContextIds: new Map(),
+      fetchState: 'disabled',
+      pauseRecoveryEpoch: 0,
+      appliedRuleRevision: blockedUrls.length === 0 ? blockedRuleRevision : -1,
+      blockedApplyOk: blockedUrls.length === 0,
+      blockedApplyError: '',
+      blockedApplyChain: Promise.resolve(),
       attachedAtMs: Date.now(),
       client
     };
@@ -324,7 +464,40 @@ export function createCdpHost({
       if (clients.get(target.id) === meta) clients.delete(target.id);
     });
 
+    async function handleFetchRequestPaused(evt) {
+      const requestId = evt.params?.requestId;
+      if (!requestId) return;
+      const reqUrl = String(evt.params?.request?.url || '');
+      const shouldFail = !stopped && enabled && clients.get(target.id) === meta && matchesBlockedUrlRule(reqUrl, blockedUrls);
+      const isAlreadyGoneError = err => /Invalid InterceptionId|CDP 连接已断开|CDP 连接已关闭/i.test(err?.message || String(err));
+      try {
+        if (shouldFail) {
+          await client.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' });
+        } else {
+          await client.send('Fetch.continueRequest', { requestId });
+        }
+      } catch (err) {
+        if (isAlreadyGoneError(err) || client.socket?.readyState !== 1) return;
+        // Fallback: try continuing the request so it never stays paused; if that also fails,
+        // tear down Fetch interception (or close session) so Chromium unpauses all requests.
+        if (shouldFail) {
+          try {
+            await client.send('Fetch.continueRequest', { requestId });
+            meta.blockedApplyOk = false;
+            meta.blockedApplyError = err?.message || String(err);
+            return;
+          } catch {}
+        }
+        await disableFetchOrClose(meta, err?.message || String(err), { fromPauseRecovery: true });
+      }
+    }
+
     client.onEvent(async evt => {
+      // Always handle Fetch.requestPaused even during teardown/disable so requests are never left paused.
+      if (evt.method === 'Fetch.requestPaused') {
+        await handleFetchRequestPaused(evt);
+        return;
+      }
       if (stopped || !enabled || clients.get(target.id) !== meta) return;
       if (evt.method === 'Runtime.executionContextCreated') {
         const ctx = evt.params?.context;
@@ -396,6 +569,7 @@ export function createCdpHost({
 
     await client.send('Runtime.enable');
     await client.send('Page.enable');
+    await applyBlockedUrlsToMeta(meta);
 
     const bundleSource = buildClientBundle({ transport: 'cdp', bootId });
     await installInTopIsolatedWorld(meta, bundleSource);
@@ -559,11 +733,16 @@ export function createCdpHost({
     let timer;
     try {
       await Promise.race([
-        Promise.allSettled(targets.filter(meta => Number.isInteger(meta.isolatedContextId)).map(meta =>
-          meta.client.send('Runtime.evaluate', {
-            expression: 'globalThis.__t3Tools?.dispose?.()', contextId: meta.isolatedContextId
-          })
-        )),
+        Promise.allSettled(targets.map(async meta => {
+          if (meta.fetchState !== 'disabled') {
+            await disableFetchOrClose(meta);
+          }
+          if (Number.isInteger(meta.isolatedContextId)) {
+            await meta.client.send('Runtime.evaluate', {
+              expression: 'globalThis.__t3Tools?.dispose?.()', contextId: meta.isolatedContextId
+            });
+          }
+        })),
         new Promise(resolve => { timer = setTimeout(resolve, 800); })
       ]);
     } finally {
@@ -639,9 +818,12 @@ export function createCdpHost({
     return getStatus();
   }
 
-  async function reattachNow() {
+  async function reattachNow({ preserveDisabled = false } = {}) {
     if (stopped) return getStatus();
-    if (!enabled) enabled = true;
+    if (!enabled) {
+      if (preserveDisabled) return getStatus();
+      enabled = true;
+    }
     clearTimer();
     await activePoll;
     const st = await pollOnce(true);
@@ -657,8 +839,33 @@ export function createCdpHost({
     lastState = { ...lastState, connected: false, attachedTargets: 0 };
   }
 
+  async function setBlockedUrls(nextUrls = []) {
+    blockedUrls = normalizeBlockedUrls(nextUrls);
+    blockedRuleRevision++;
+    const targets = [...clients.values()];
+    if (!targets.length) {
+      return { appliedTargets: 0, failedTargets: 0, error: '', urls: [...blockedUrls], revision: blockedRuleRevision };
+    }
+    const results = await Promise.allSettled(targets.map(meta => applyBlockedUrlsToMeta(meta)));
+    const appliedTargets = results.filter(r => r.status === 'fulfilled' && r.value === true).length;
+    const failedTargets = targets.length - appliedTargets;
+    const error = targets.map(m => m.blockedApplyError).filter(Boolean).join('; ');
+    return { appliedTargets, failedTargets, error, urls: [...blockedUrls], revision: blockedRuleRevision };
+  }
+
   function getStatus() {
-    return { ...lastState, enabled };
+    const targets = [...clients.values()];
+    const blockedTargets = blockedUrls.length > 0
+      ? targets.filter(m => m.fetchState === 'enabled' && m.blockedApplyOk && m.appliedRuleRevision === blockedRuleRevision).length
+      : 0;
+    const blockedApplyError = targets.map(m => m.blockedApplyError).filter(Boolean).join('; ');
+    return {
+      ...lastState,
+      enabled,
+      blockedUrls: [...blockedUrls],
+      blockedTargets,
+      blockedApplyError
+    };
   }
 
   async function focusThread({ threadId, environmentId } = {}) {
@@ -716,5 +923,5 @@ export function createCdpHost({
     }
     return fail('未找到目标对话');
   }
-  return { focusThread, start, stop, pollOnce, reattachNow, setEnabled, getStatus };
+  return { focusThread, start, stop, pollOnce, reattachNow, setEnabled, setBlockedUrls, getStatus };
 }

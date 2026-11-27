@@ -14,6 +14,7 @@ import { createAnalyticsEngine } from '../analytics/engine.mjs';
 import { createCdpHost, readT3ServerOrigin } from './cdp-host.mjs';
 import { createHttpServer } from './http-server.mjs';
 import { createAppUpdater } from './app-updater.mjs';
+import { createPrivacyGuard } from './privacy-guard.mjs';
 import {
   inspectShortcuts,
   inspectShortcutsAsync,
@@ -127,6 +128,7 @@ export async function startDaemon({
   enableRemoteUpdateCheck = true,
   enableAppUpdateCheck = enableRemoteUpdateCheck,
   appUpdateOptions = {},
+  privacyGuardOptions = {},
   deferInitialSync = false,
   onAutoExit = null,
   onShutdownRequest = null
@@ -143,6 +145,11 @@ export async function startDaemon({
     fetchImpl,
     enableBackgroundCheck: Boolean(enableAppUpdateCheck),
     ...appUpdateOptions
+  });
+  const privacyGuard = createPrivacyGuard({
+    paths: ctx.paths,
+    settings: ctx.settings,
+    ...privacyGuardOptions
   });
   const cfg = ctx.settings.get();
   const port = Number.isInteger(portOverride) ? portOverride : (cfg.port || 17373);
@@ -241,6 +248,73 @@ export async function startDaemon({
   let activeCdpThreadId = '';
   let activeCdpThreadAtMs = 0;
   const ACTIVE_CDP_THREAD_TTL_MS = 30000;
+  let privacyApplySeq = 0;
+  let privacyApplyPending = false;
+  let cdpBlockChain = Promise.resolve();
+  let activeRelaunchPromise = null;
+
+  function schedulePrivacyApply(nextPrivacyCfg, { waitBudgetMs = 1500 } = {}) {
+    const seq = ++privacyApplySeq;
+    privacyApplyPending = true;
+    privacyGuard.setExternalError('');
+    const envTask = privacyGuard.applySettingsAsync(nextPrivacyCfg);
+    const cdpTask = cdpHost
+      ? (cdpBlockChain = cdpBlockChain.catch(() => {}).then(() => {
+          if (seq !== privacyApplySeq) {
+            return { appliedTargets: 0, failedTargets: 0, error: '', superseded: true };
+          }
+          return cdpHost.setBlockedUrls(privacyGuard.getBlockedCdpUrls(ctx.settings.get()?.privacyGuard));
+        }))
+      : Promise.resolve({ appliedTargets: 0, failedTargets: 0, error: '' });
+    const combined = Promise.allSettled([envTask, cdpTask])
+      .then(results => {
+        if (seq !== privacyApplySeq) return;
+        const rejected = results.find(r => r.status === 'rejected');
+        if (rejected) {
+          privacyGuard.setExternalError(rejected.reason?.message || String(rejected.reason));
+        }
+      })
+      .finally(() => {
+        if (seq === privacyApplySeq) privacyApplyPending = false;
+      });
+    if (waitBudgetMs <= 0) return Promise.resolve();
+    return Promise.race([
+      combined,
+      new Promise(resolve => {
+        const t = setTimeout(resolve, waitBudgetMs);
+        t.unref?.();
+      })
+    ]);
+  }
+
+  function runRelaunchT3Async() {
+    if (activeRelaunchPromise) return activeRelaunchPromise;
+    privacyGuard.setExternalError('');
+    activeRelaunchPromise = Promise.resolve()
+      .then(() => relaunchT3WithDebugPort(ctx.paths, [], { env: privacyGuard.getLaunchEnv() }))
+      .then(res => {
+        if (res?.ok === false) {
+          privacyGuard.setExternalError(res.error || '重启 T3 Code 失败');
+        } else if (res?.ok && cdpHost && ctx.settings.get()?.autoAttachT3 !== false) {
+          const t = setTimeout(() => {
+            if (!stopped && ctx.settings.get()?.autoAttachT3 !== false) {
+              cdpHost.reattachNow({ preserveDisabled: true }).catch(() => {});
+            }
+          }, 2500);
+          t.unref?.();
+        }
+        return res;
+      })
+      .catch(err => {
+        const msg = err?.message || String(err);
+        privacyGuard.setExternalError(`重启 T3 Code 失败: ${msg}`);
+        return { ok: false, error: msg };
+      })
+      .finally(() => {
+        activeRelaunchPromise = null;
+      });
+    return activeRelaunchPromise;
+  }
 
   function getActiveCdpThreadId(now = Date.now()) {
     if (!activeCdpThreadId) return '';
@@ -254,15 +328,17 @@ export async function startDaemon({
       appUpdater.refreshIfStale();
     }
     const settings = ctx.settings.get();
+    const cdpStatus = cdpHost ? cdpHost.getStatus() : { connected: false, message: 'CDP 未启用', lastError: '' };
     return {
       version: PLUGIN_VERSION,
       pid: process.pid,
       startedAtMs,
       httpUrl: `http://127.0.0.1:${boundPort}`,
-      cdp: cdpHost ? cdpHost.getStatus() : { connected: false, message: 'CDP 未启用', lastError: '' },
+      cdp: cdpStatus,
       alerts: ctx.engine.getAlerts(),
       runtimeUpdates: ctx.engine.getRuntimeUpdates(now),
       appUpdate: appUpdater.getStatus(),
+      privacyGuard: privacyGuard.getStatus({ cdpStatus, fresh, pendingApply: privacyApplyPending }),
       multiMachineSync: ctx.folderSync.getStatus(now),
       todayUsage: ctx.engine.getTodayUsageSummary(now),
       sidebarUsage: ctx.engine.getSidebarUsageSummary(now, { preset: settings.sidebarUsageRange }),
@@ -318,7 +394,19 @@ export async function startDaemon({
         if (enableAppUpdateCheck && params?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
           appUpdater.checkForUpdates({ force: false }).catch(() => {});
         }
+        if (params?.privacyGuard) {
+          await schedulePrivacyApply(updated.privacyGuard, { waitBudgetMs: 1500 });
+        }
         return updated;
+      }
+      case 'relaunchT3': {
+        // When invoked from inside the T3 Code window that is about to close, acknowledge
+        // immediately before triggering the async relaunch so the closing window never hangs.
+        const t = setTimeout(() => {
+          if (!stopped) runRelaunchT3Async().catch(() => {});
+        }, 40);
+        t.unref?.();
+        return { ok: true, accepted: true, message: '已开始异步重启 T3 Code' };
       }
       case 'forceSync':
         ctx.engine.syncAll({ force: true, includeFolderSync: false });
@@ -376,6 +464,9 @@ export async function startDaemon({
       if (enableAppUpdateCheck && patch?.appUpdates && updated?.appUpdates?.autoCheck !== false) {
         appUpdater.checkForUpdates({ force: false }).catch(() => {});
       }
+      if (patch?.privacyGuard) {
+        await schedulePrivacyApply(updated.privacyGuard, { waitBudgetMs: 1500 });
+      }
     },
     onReattachCdp: async () => {
       await refreshFixedShortcutPortsAsync();
@@ -394,19 +485,18 @@ export async function startDaemon({
       return res;
     },
     onLaunchT3: async () => {
-      const res = await launchT3WithDebugPort(ctx.paths);
-      if (res.ok && cdpHost) {
-        setTimeout(() => { cdpHost.reattachNow().catch(() => {}); }, 2000);
+      const res = await launchT3WithDebugPort(ctx.paths, [], { env: privacyGuard.getLaunchEnv() });
+      if (res.ok && cdpHost && ctx.settings.get()?.autoAttachT3 !== false) {
+        const t = setTimeout(() => {
+          if (!stopped && ctx.settings.get()?.autoAttachT3 !== false) {
+            cdpHost.reattachNow({ preserveDisabled: true }).catch(() => {});
+          }
+        }, 2000);
+        t.unref?.();
       }
       return res;
     },
-    onRelaunchT3: async () => {
-      const res = await relaunchT3WithDebugPort(ctx.paths);
-      if (res.ok && cdpHost) {
-        setTimeout(() => { cdpHost.reattachNow().catch(() => {}); }, 2500);
-      }
-      return res;
-    },
+    onRelaunchT3: async () => runRelaunchT3Async(),
     onShutdown: async () => {
       await stop('HTTP shutdown request');
       if (typeof onShutdownRequest === 'function') onShutdownRequest();
@@ -429,6 +519,7 @@ export async function startDaemon({
         paths: ctx.paths,
         getFixedPorts: () => fixedShortcutPorts,
         initialEnabled: cfg.autoAttachT3 !== false,
+        initialBlockedUrls: privacyGuard.getBlockedCdpUrls(cfg.privacyGuard),
         buildClientBundle: opts => buildClientBundle({
           ...opts,
           version: PLUGIN_VERSION,
@@ -480,9 +571,16 @@ export async function startDaemon({
       initialShortcutTimer = null;
       if (stopped) return;
       runStartupShortcutSetupAsync().catch(() => {});
+      const latestPrivacy = ctx.settings.get()?.privacyGuard;
+      if (latestPrivacy?.blockTelemetryAndTracing || existsSync(ctx.paths.privacyEnvBackupPath)) {
+        privacyGuard.applySettingsAsync(latestPrivacy).catch(() => {});
+      }
     }, 300);
     initialShortcutTimer.unref?.();
   } else {
+    if (cfg?.privacyGuard?.blockTelemetryAndTracing || existsSync(ctx.paths.privacyEnvBackupPath)) {
+      await privacyGuard.applySettingsAsync(cfg.privacyGuard).catch(() => {});
+    }
     try {
       await ctx.folderSync.syncAsync({ force: true });
     } catch {}
@@ -533,6 +631,7 @@ export async function startDaemon({
       clearInterval(watchdogTimer);
       watchdogTimer = null;
     }
+    try { await privacyGuard.stopAndDrain(3000); } catch (err) { console.error('[daemon] privacyGuard drain failed', err); }
     try { await cdpHost?.stop(); } catch (err) { console.error('[daemon] CDP shutdown failed', err); }
     try { await httpServer.close(); } catch (err) { console.error('[daemon] HTTP shutdown failed', err); }
     try { await ctx.folderSync.whenIdle?.(1500); } catch (err) { console.error('[daemon] folderSync shutdown failed', err); }
@@ -577,6 +676,7 @@ export async function startDaemon({
     cdpHost,
     httpServer,
     appUpdater,
+    privacyGuard,
     getStatus: getDaemonStatus,
     stop
   };

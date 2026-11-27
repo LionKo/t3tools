@@ -492,6 +492,8 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
               </div>
             </div>
 
+            <div id="settings-privacy-guard-slot"></div>
+
             <div id="settings-multi-machine-sync-slot"></div>
 
             <div class="settings-group-title">应用更新</div>
@@ -980,6 +982,10 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
                 : 'var(--pt-muted, #9ca3af)';
         }
         renderAppUpdateUi(statusData?.appUpdate, cfg.appUpdates);
+        const privacyGuardSlot = document.getElementById('settings-privacy-guard-slot');
+        if (privacyGuardSlot) {
+          privacyGuardSlot.innerHTML = renderPrivacyGuardCardHtml(statusData, cfg, { embedded: false });
+        }
         const multiSyncSlot = document.getElementById('settings-multi-machine-sync-slot');
         if (multiSyncSlot) {
           const activeEl = document.activeElement;
@@ -1551,6 +1557,16 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           showToast(res?.ok ? '快捷方式调试参数已就绪' : (res?.error || '快捷方式配置失败'));
           return;
         }
+        if (act === 'relaunch-t3-privacy') {
+          if (hasWebViewBridge) {
+            postHostMessage({ action: 'confirmRelaunchT3' });
+          } else if (confirm('将优雅重启 T3 Code 以使隐私环境变量生效并自动吸附，是否继续？')) {
+            showToast('正在重启 T3 Code...');
+            await postApi('/api/t3/relaunch', {}).catch(() => {});
+            setTimeout(() => { fetchStatus(); }, 2500);
+          }
+          return;
+        }
         if (act === 't3-primary') {
           const mode = t3PrimaryBtn?.dataset?.mode;
           if (mode === 'enable-attach') {
@@ -1661,6 +1677,25 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           if (saved) showToast('设置已保存');
           else if (e.target.type === 'number' && statusData?.settings?.alertConfig) {
             e.target.value = statusData.settings.alertConfig[key] / (key.endsWith('Ms') ? 1000 : 1);
+          }
+          return;
+        }
+        if (e.target.dataset.privacySetting) {
+          const key = e.target.dataset.privacySetting;
+          const value = Boolean(e.target.checked);
+          if (await saveSetting('privacyGuard.' + key, { privacyGuard: { [key]: value } })) {
+            await fetchStatus();
+            const pg = statusData?.privacyGuard;
+            if (pg?.applying) {
+              showToast('设置已保存，正在后台应用隐私规则...');
+              setTimeout(() => { fetchStatus(); }, 1500);
+            } else if (pg?.lastError) {
+              showToast('保存失败：' + pg.lastError);
+            } else if (key === 'blockTelemetryAndTracing' && value && pg?.restartRequired) {
+              showToast('隐私规则已写入，请重启 T3 Code 使后端继承新环境');
+            } else {
+              showToast('隐私防护设置已生效');
+            }
           }
           return;
         }

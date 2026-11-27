@@ -1272,19 +1272,22 @@
     }
   }
 
-  function navigateToProviderSettings() {
+  function navigateToT3Settings(targetPath = '/settings/providers') {
     if (dashboardOpen) {
       closePtPopMenu();
       dashboardOpen = false;
       renderDashboardOverlay();
     }
-    const targetPath = '/settings/providers';
     if (String(location.hash || '').startsWith('#/') || location.protocol === 't3code:') {
       location.hash = `#${targetPath}`;
     } else {
       history.pushState({}, '', targetPath);
       window.dispatchEvent(new PopStateEvent('popstate'));
     }
+  }
+
+  function navigateToProviderSettings() {
+    navigateToT3Settings('/settings/providers');
   }
 
   function hasMatchingLiveForThread(live, threadId) {
@@ -1894,6 +1897,21 @@
         navigateToProviderSettings();
         return;
       }
+      if (action === 'open-connections-settings') {
+        navigateToT3Settings('/settings/connections');
+        return;
+      }
+      if (action === 'relaunch-t3-privacy') {
+        if (!window.confirm('将优雅重启 T3 Code 以使隐私环境变量生效并自动重新吸附，是否继续？')) return;
+        showOverlayToast('正在重启 T3 Code...');
+        try {
+          const res = await callRpc('relaunchT3', {});
+          if (res?.ok === false) showOverlayToast(res.error || '重启 T3 Code 失败');
+        } catch (err) {
+          showOverlayToast(err?.message || '重启 T3 Code 失败');
+        }
+        return;
+      }
       if (action === 'refresh') {
         actionEl.classList?.add('busy');
         fetchOverlayStatus();
@@ -1978,6 +1996,35 @@
 
   async function onDashboardChange(e) {
     const target = e.target;
+    if (target?.dataset?.privacySetting) {
+      const key = target.dataset.privacySetting;
+      const value = Boolean(target.checked);
+      try {
+        const updated = await callRpc('updateSettings', { privacyGuard: { [key]: value } });
+        if (updated) {
+          settingsRevision++;
+          lastSettings = updated;
+          if (lastLive) lastLive.settings = updated;
+          if (lastStatus) lastStatus.settings = updated;
+        }
+        await fetchOverlayStatus({ fresh: true });
+        renderDashboardOverlay();
+        const pg = lastStatus?.privacyGuard;
+        if (pg?.applying) {
+          showOverlayToast('设置已保存，正在后台应用隐私规则...');
+          setTimeout(() => { fetchOverlayStatus({ fresh: true }).then(() => renderDashboardOverlay()).catch(() => {}); }, 1500);
+        } else if (pg?.lastError) {
+          showOverlayToast('保存失败：' + pg.lastError);
+        } else if (key === 'blockTelemetryAndTracing' && value && pg?.restartRequired) {
+          showOverlayToast('隐私规则已写入，请重启 T3 Code 使后端继承新环境');
+        } else {
+          showOverlayToast('隐私防护设置已生效');
+        }
+      } catch (err) {
+        showOverlayToast(err?.message || '保存失败');
+      }
+      return;
+    }
     if (target?.dataset?.syncSetting) {
       const key = target.dataset.syncSetting;
       const value = target.type === 'checkbox' ? Boolean(target.checked) : target.value.trim();

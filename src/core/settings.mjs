@@ -35,6 +35,10 @@ export const DEFAULT_SETTINGS = {
     includeErrorText: false,
     sidebarScope: 'all'
   },
+  privacyGuard: {
+    blockTelemetryAndTracing: false,
+    blockGoogleFavicons: false
+  },
   anomalyConfig: {
     maxGapMs: 180000,
     minPrevCache: 4000,
@@ -204,6 +208,17 @@ export function sanitizeSettingsPatch(patch) {
     }
     clean.multiMachineSync = cleanSync;
   }
+  if (Object.hasOwn(patch, 'privacyGuard')) {
+    const pg = patch.privacyGuard;
+    if (!pg || typeof pg !== 'object' || Array.isArray(pg)) throw new Error('privacyGuard 必须为对象');
+    const cleanPrivacy = {};
+    for (const boolKey of ['blockTelemetryAndTracing', 'blockGoogleFavicons']) {
+      if (!Object.hasOwn(pg, boolKey)) continue;
+      if (typeof pg[boolKey] !== 'boolean') throw new Error(`${boolKey} 必须为布尔值`);
+      cleanPrivacy[boolKey] = pg[boolKey];
+    }
+    clean.privacyGuard = cleanPrivacy;
+  }
   return clean;
 }
 
@@ -229,6 +244,7 @@ function mergeSettings(base, rawPatch) {
     alertConfig: { ...base.alertConfig, ...safePatch.alertConfig },
     appUpdates: { ...base.appUpdates, ...(safePatch.appUpdates || {}) },
     multiMachineSync: { ...base.multiMachineSync, ...(safePatch.multiMachineSync || {}) },
+    privacyGuard: { ...base.privacyGuard, ...(safePatch.privacyGuard || {}) },
     overviewPosition: {
       ...base.overviewPosition,
       ...(safePatch.overviewPosition || {})

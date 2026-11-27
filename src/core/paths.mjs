@@ -56,6 +56,7 @@ export function resolvePaths(overrides = {}) {
     settingsPath: join(t3UserData, 'settings.json'),
     serverRuntimePath: join(t3UserData, 'server-runtime.json'),
     modelRatesPath: join(t3UserData, 'usage-model-rates.json'),
+    t3LogsDir: join(t3UserData, 'logs'),
     electronUserData,
     electronUserDataCandidates,
     devToolsPortFile,
@@ -69,6 +70,7 @@ export function resolvePaths(overrides = {}) {
     telemetryDbPath: join(pluginDataDir, 'telemetry.sqlite'),
     runtimeFilePath: join(pluginDataDir, 'runtime.json'),
     launcherBackupPath: join(pluginDataDir, 'launcher-backup.json'),
+    privacyEnvBackupPath: join(pluginDataDir, 'privacy-env-backup.json'),
     launcherVbsPath: join(pluginDataDir, 'launch-t3.vbs'),
     trayExePath: join(pluginDataDir, 'T3Tools.exe'),
     trayConfigPath: join(pluginDataDir, 'tray-config.json')

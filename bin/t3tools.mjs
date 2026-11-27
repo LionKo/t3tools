@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolvePaths, findLatestUsageScanCache } from '../src/core/paths.mjs';
+import { createSettingsStore } from '../src/core/settings.mjs';
 import { createRuntimeContext, probeRunningDaemon, startDaemon, PLUGIN_VERSION } from '../src/host/daemon.mjs';
+import { createPrivacyGuard, restorePrivacyEnvBackup } from '../src/host/privacy-guard.mjs';
 import {
   inspectShortcuts,
   patchT3Launchers,
@@ -123,7 +125,9 @@ async function cmdLaunch() {
     }
   }
 
-  const launched = await launchT3WithDebugPort(paths, extraArgs);
+  const settingsStore = createSettingsStore(paths.pluginSettingsPath);
+  const privacyGuard = createPrivacyGuard({ paths, settings: settingsStore });
+  const launched = await launchT3WithDebugPort(paths, extraArgs, { env: privacyGuard.getLaunchEnv() });
   if (!launched.ok) {
     console.error('启动 T3 Code 失败：', launched.error);
     process.exitCode = 1;
@@ -201,7 +205,9 @@ async function cmdTray() {
 
 async function cmdRelaunchT3() {
   const paths = resolvePaths();
-  const res = await relaunchT3WithDebugPort(paths, args.slice(1));
+  const settingsStore = createSettingsStore(paths.pluginSettingsPath);
+  const privacyGuard = createPrivacyGuard({ paths, settings: settingsStore });
+  const res = await relaunchT3WithDebugPort(paths, args.slice(1), { env: privacyGuard.getLaunchEnv() });
   if (!res.ok) {
     console.error('重启 T3 Code 失败：', res.error);
     process.exitCode = 1;
@@ -218,11 +224,18 @@ async function cmdUninstall() {
     process.exitCode = 1;
     return;
   }
+  const envRestore = restorePrivacyEnvBackup(paths);
+  if (!envRestore.ok) {
+    console.error('隐私环境变量还原失败：', envRestore.error || '未知错误');
+    process.exitCode = 1;
+    return;
+  }
   if (process.platform === 'win32') {
     setTrayAutoStart(false, '');
     removeT3ToolsTrayShortcuts(paths);
   }
-  console.log(`[T3Tools] 已无损还原 ${res.restored} 个 T3 Code 快捷方式并清理托盘快捷方式与自启配置。`);
+  const envNote = envRestore.restored ? '，并还原了 T3Tools 写入的隐私环境变量' : '';
+  console.log(`[T3Tools] 已无损还原 ${res.restored} 个 T3 Code 快捷方式并清理托盘快捷方式与自启配置${envNote}。`);
 }
 
 async function cmdStatus() {

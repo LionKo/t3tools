@@ -22,12 +22,12 @@ Get-InstalledTrayProcess | Stop-Process -Force -ErrorAction SilentlyContinue
 node "$root\bin\t3tools.mjs" stop 2>$null
 node "$root\bin\t3tools.mjs" uninstall
 if ($LASTEXITCODE -ne 0) {
-  throw "快捷方式还原失败（退出码 $LASTEXITCODE）"
+  throw "卸载还原失败（快捷方式或隐私环境变量，退出码 $LASTEXITCODE）"
 }
 
 if (Test-Path -LiteralPath $installedExe) {
   Remove-Item -LiteralPath $installedExe -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "已还原 T3 Code 快捷方式，并移除 T3Tools 托盘快捷方式与开机自启。" -ForegroundColor Green
+Write-Host "已还原 T3 Code 快捷方式与隐私环境变量，并移除 T3Tools 托盘快捷方式与开机自启。" -ForegroundColor Green
 Write-Host "如需清理插件缓存，可手动删除 $env:USERPROFILE\.t3tools"

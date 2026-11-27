@@ -1,6 +1,6 @@
 {
   "name": "t3tools",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Windows T3 Code 原生增强插件：上下文/缓存/实时速度监控、运行阶段与多模型组额度卡片、周限额周期用量看板、53周热力图与异常掉缓存排查",
   "type": "module",
   "license": "MIT",

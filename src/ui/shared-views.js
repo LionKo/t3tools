@@ -5099,6 +5099,110 @@ function renderOverlayAppUpdateBannerHtml(upd, dismissedVer = '') {
           </div>`;
 }
 
+function renderPrivacyGuardCardHtml(statusData = null, fallbackSettings = null, { embedded = false } = {}) {
+  const cfg = statusData?.settings?.privacyGuard || fallbackSettings?.privacyGuard || {};
+  const st = statusData?.privacyGuard || {};
+  const blockTelemetry = Boolean(cfg.blockTelemetryAndTracing);
+  const blockFavicons = Boolean(cfg.blockGoogleFavicons);
+  const cdpConnected = Boolean(st.cdpConnected ?? statusData?.cdp?.connected);
+  const cdpBlockedActive = Boolean(st.cdpBlockedActive);
+  const cdpBlockError = String(st.cdpBlockError || '');
+  const applying = Boolean(st.applying || st.state === 'applying');
+  const restartRequired = Boolean(st.restartRequired);
+  const lastError = String(st.lastError || '');
+
+  const mainBadge = (() => {
+    if (applying) return '<span class="pt-badge pt-badge-warn">应用中...</span>';
+    if (lastError) return '<span class="pt-badge pt-badge-danger">配置失败</span>';
+    if (!blockTelemetry) return '<span class="pt-badge pt-badge-muted">未开启</span>';
+    if (!st.envSynced) return '<span class="pt-badge pt-badge-warn">待同步</span>';
+    if (restartRequired) return '<span class="pt-badge pt-badge-warn">需重启 T3 Code</span>';
+    return '<span class="pt-badge pt-badge-ok">已生效</span>';
+  })();
+
+  const faviconBadge = (() => {
+    if (!blockFavicons) return '<span class="pt-badge pt-badge-muted">未开启</span>';
+    if (cdpBlockError) return '<span class="pt-badge pt-badge-danger">拦截异常</span>';
+    if (cdpBlockedActive) return '<span class="pt-badge pt-badge-ok">热拦截中</span>';
+    return cdpConnected
+      ? '<span class="pt-badge pt-badge-warn">等待生效</span>'
+      : '<span class="pt-badge pt-badge-warn">等待吸附</span>';
+  })();
+
+  const telemetryStatusLine = (() => {
+    if (applying) return '正在后台写入并校验 T3CODE_TELEMETRY_ENABLED 用户级环境变量，期间不影响 T3 Code 与看板响应...';
+    if (lastError) return `异常：${lastError}`;
+    if (!blockTelemetry) {
+      const hits = Number(st.recentTelemetryHits) || 0;
+      return hits > 0
+        ? `默认关闭。近期日志样本检测到 ${hits} 次发往 ingest.t3.codes 的埋点请求；开启后仅写入 T3 专属环境变量 T3CODE_TELEMETRY_ENABLED=false（不改动全局 DO_NOT_TRACK，关闭或卸载自动还原）并启用窄范围 Fetch 拦截。`
+        : '默认关闭。开启后将设置 T3 专属环境变量 T3CODE_TELEMETRY_ENABLED=false 并通过窄范围 Fetch 拦截 PostHog（ingest.t3.codes）与 Axiom（axiom.co），不订阅 WebSocket 会话流，不影响 T3 Connect。';
+    }
+    if (restartRequired) {
+      return '用户级环境变量已写入并校验，窄范围前端拦截已就绪；需重启一次 T3 Code 使后端进程继承新环境。';
+    }
+    const sinceHits = Number(st.telemetryHitsSinceApply) || 0;
+    const cdpNote = cdpBlockedActive
+      ? '环境变量与前端窄范围 Fetch 拦截已生效'
+      : (cdpConnected ? '环境变量已生效（前端拦截等待就绪）' : '环境变量已生效');
+    return sinceHits === 0
+      ? `${cdpNote} · 生效后近期日志样本未检测到埋点上报（T3 Connect 隧道与远程访问不受影响）`
+      : `${cdpNote} · 生效后近期日志样本仍检测到 ${sinceHits} 次上报记录，建议重启一次 T3 Code`;
+  })();
+
+  const activityState = st.publishAgentActivityState || 'unknown';
+  const activityBadge = (() => {
+    if (activityState === 'enabled') return '<span class="pt-badge pt-badge-warn">检测到已开启</span>';
+    if (activityState === 'disabled') return '<span class="pt-badge pt-badge-ok">已关闭</span>';
+    return st.t3ConnectTunnelDetected
+      ? '<span class="pt-badge pt-badge-muted">检测到历史中继日志</span>'
+      : '<span class="pt-badge pt-badge-muted">未检测到推送</span>';
+  })();
+
+  const activityDesc = activityState === 'enabled'
+    ? '近期日志样本显示 T3 Connect 正在向 relay.t3.codes 推送本地项目名与对话标题（用于手机通知/灵动岛）。如不需要手机推送，请在 T3 Code「Settings → Connections」关闭「Publish agent activity」——关闭后远程连接与隧道依然完全正常。'
+    : 'T3 Connect 远程访问必需通道（clerk.t3.codes / relay.t3.codes / Cloudflare Tunnel）始终放行。如不希望向手机端推送项目名与对话标题，可在 T3 Code「Settings → Connections」关闭「Publish agent activity」（T3Tools 不修改 T3 Code 内部密钥库）。';
+
+  return `
+    <div class="settings-group-title">T3 Code 隐私与外连防护</div>
+    <div class="pt-card" data-pt-privacy-guard-card="1">
+      <div class="setting-row" style="align-items:flex-start;">
+        <div style="min-width:0;flex:1;">
+          <div class="setting-label">屏蔽非必要遥测与追踪（保留 T3 Connect） ${mainBadge}</div>
+          <div class="setting-desc">${esc(telemetryStatusLine)}</div>
+          ${restartRequired ? `
+            <div style="margin-top:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="pt-btn pt-btn-accent" data-pt-action="relaunch-t3-privacy">重启 T3 Code 使配置生效</button>
+              <span class="pt-muted" style="font-size:11px;">将优雅重启 T3 Code 窗口与本地服务并重新吸附，自动带入隐私环境变量</span>
+            </div>
+          ` : ''}
+        </div>
+        <label class="pt-switch">
+          <input type="checkbox" data-privacy-setting="blockTelemetryAndTracing" ${blockTelemetry ? 'checked' : ''} />
+          <span class="pt-switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-row">
+        <div style="min-width:0;flex:1;">
+          <div class="setting-label">屏蔽 Google Favicon 代理 ${faviconBadge}</div>
+          <div class="setting-desc">通过窄范围 CDP Fetch 仅拦截 google.com/s2/favicons 请求（不订阅 WebSocket 与会话流量，自动回退为默认图标，无需重启）</div>
+        </div>
+        <label class="pt-switch">
+          <input type="checkbox" data-privacy-setting="blockGoogleFavicons" ${blockFavicons ? 'checked' : ''} />
+          <span class="pt-switch-track"></span>
+        </label>
+      </div>
+      <div class="setting-row" style="align-items:flex-start;">
+        <div style="min-width:0;flex:1;">
+          <div class="setting-label">T3 Connect 标题推送检测 ${activityBadge}</div>
+          <div class="setting-desc">${esc(activityDesc)}</div>
+        </div>
+        ${embedded ? '<button type="button" class="pt-btn" data-pt-action="open-connections-settings">前往连接设置</button>' : ''}
+      </div>
+    </div>
+  `;
+}
+
 function renderMultiMachineSyncCardHtml(statusData = null, fallbackSettings = null) {
   const cfg = statusData?.settings?.multiMachineSync || fallbackSettings?.multiMachineSync || {};
   const st = statusData?.multiMachineSync || {};
@@ -5349,6 +5453,8 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, 
           <button type="button" class="pt-btn" data-pt-action="test-alert">发送测试</button>
         </div>
       </div>
+
+      ${renderPrivacyGuardCardHtml(statusData, fallbackSettings, { embedded: true })}
 
       ${renderMultiMachineSyncCardHtml(statusData, fallbackSettings)}
 
