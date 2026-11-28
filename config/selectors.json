@@ -59,6 +59,10 @@
       "[aria-current=\"page\"]"
     ]
   },
+  "routeTargetPatterns": [
+    "^/threads?/([^/?#]+)/([^/?#]+)$",
+    "^/(?!settings(?:/|$)|usage(?:/|$)|projects?(?:/|$)|themes?(?:/|$)|login(?:/|$)|auth(?:/|$)|draft(?:/|$)|threads?(?:/|$)|c(?:/|$))([^/?#]+)/([^/?#]+)$"
+  ],
   "routeThreadPatterns": [
     "^/threads?/[^/?#]+/([^/?#]+)",
     "^/threads?/([^/?#]+)$",

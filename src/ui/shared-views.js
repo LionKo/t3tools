@@ -711,6 +711,24 @@ const PT_SHARED_CSS = `
   line-height: 1.5;
   flex: none;
 }
+.pt-remote-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--pt-accent, #6366f1) 35%, var(--pt-border, rgba(255,255,255,0.12)));
+  color: var(--pt-accent, #6366f1);
+  background: color-mix(in srgb, var(--pt-accent, #6366f1) 12%, transparent);
+  line-height: 1.55;
+  flex: none;
+}
 .pt-overview-header {
   display: flex;
   align-items: center;
@@ -3180,6 +3198,129 @@ function renderUsageTipHtml(title, tag, desc, tagClass = '') {
   `;
 }
 
+function describeRemoteBridgeLiveState(remote) {
+  if (!remote || !remote.isRemote) return null;
+  const rawLabel = String(remote.peerLabel || '').trim();
+  const shortEnv = String(remote.environmentId || '').slice(0, 8);
+  const peerLabel = rawLabel || (shortEnv ? shortEnv : '远端电脑');
+  const status = String(remote.status || 'offline');
+  switch (status) {
+    case 'connected':
+      return { connected: true, peerLabel, phaseLabel: '', tone: 'accent', reason: '', showSettingsAction: false };
+    case 'unpaired':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '远端未配对',
+        tone: 'warning',
+        reason: '当前为远端 Connect 会话，配置跨机桥接后可查看实时指标与额度',
+        showSettingsAction: true
+      };
+    case 'disabled':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '远端已停用',
+        tone: 'muted',
+        reason: `远端节点（${peerLabel}）已停用，可在设置中重新开启`,
+        showSettingsAction: true
+      };
+    case 'offline':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '远端离线',
+        tone: 'warning',
+        reason: `无法连接远端 T3Tools（${peerLabel}），请确认远端已开启共享且网络互通`,
+        showSettingsAction: true
+      };
+    case 'unauthorized':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '鉴权失败',
+        tone: 'danger',
+        reason: `远端（${peerLabel}）令牌已失效或已重置，请重新粘贴配对码`,
+        showSettingsAction: true
+      };
+    case 'identityMismatch':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '身份不匹配',
+        tone: 'danger',
+        reason: '远端环境标识与配对记录不一致，请核对地址后重新配对',
+        showSettingsAction: true
+      };
+    case 'incompatible':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '版本不兼容',
+        tone: 'warning',
+        reason: '远端 T3Tools 桥接协议版本不兼容，请更新两端版本',
+        showSettingsAction: true
+      };
+    case 'threadNotFound':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '远端无记录',
+        tone: 'muted',
+        reason: `远端（${peerLabel}）暂未落盘此会话，发送消息后自动同步`,
+        showSettingsAction: false
+      };
+    case 'localEnvUnknown':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '本机环境未知',
+        tone: 'warning',
+        reason: '未读取到本机 T3 Code 环境标识，暂无法区分远端会话',
+        showSettingsAction: true
+      };
+    case 'reconfigured':
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '正在重连',
+        tone: 'muted',
+        reason: '桥接配置已更新，正在重新同步远端会话...',
+        showSettingsAction: false
+      };
+    default:
+      return {
+        connected: false,
+        peerLabel,
+        phaseLabel: '远端不可用',
+        tone: 'warning',
+        reason: '暂无法获取远端会话实时数据',
+        showSettingsAction: true
+      };
+  }
+}
+
+function formatRemoteBridgeErrorMessage(raw = '') {
+  const code = String(raw || '').trim();
+  const map = {
+    serverUnavailable: '本机共享服务未处于监听状态，请先开启共享并确认网卡就绪',
+    'Invalid pairing code': '配对码格式无效，请检查是否完整复制（或在监听全部接口时先填写对端可达地址）',
+    Invalid_pairing_code: '配对码格式无效',
+    'Invalid bridge configuration': '桥接配置格式或地址无效，请检查端口与地址格式',
+    identityMismatch: '远端环境标识不匹配（不可配对本机或目标环境已变化）',
+    invalidAddress: '目标地址不被允许（请使用 Tailscale / 局域网 / HTTPS 地址，或勾选本地隧道选项）',
+    unauthorized: '远端令牌校验失败，请重新复制远端最新配对码',
+    incompatible: '远端桥接协议版本不兼容',
+    offline: '无法连接到远端机器，请检查远端 T3Tools 共享开关与网络连通性',
+    unpaired: '未找到对应的远端节点记录',
+    disabled: '桥接服务已停止',
+    reconfigured: '配置刚被修改，请重试',
+    secretStoreUnavailable: '本地私密凭据文件不可用，请检查权限',
+    BRIDGE_ACTION_FAILED: '桥接操作失败，请检查配置或远端状态'
+  };
+  return map[code] || code || '操作失败';
+}
+
 function renderComposerBarHtml(live, options = {}) {
   const hideWhenUnresolved = Boolean(options?.hideWhenUnresolved);
   const inline = Boolean(options?.inline);
@@ -3189,6 +3330,11 @@ function renderComposerBarHtml(live, options = {}) {
       return `<div class="${barClass}" role="status" data-hidden="true"></div>`;
     }
   }
+
+  const remoteInfo = describeRemoteBridgeLiveState(live?.remote);
+  const remotePillHtml = remoteInfo?.connected
+    ? `<span class="pt-remote-pill" data-pt-remote-badge="1" title="${esc(`远端电脑：${remoteInfo.peerLabel}`)}">远端 · ${esc(remoteInfo.peerLabel)}</span><span class="pt-usage-sep" aria-hidden="true"></span>`
+    : '';
 
   const ctx = live?.thread?.unresolved ? null : (live?.context || null);
   const speedDisplay = resolveComposerSpeedDisplay(ctx);
@@ -3258,15 +3404,17 @@ function renderComposerBarHtml(live, options = {}) {
   const contextTip = renderUsageTipHtml('上下文', ctxTag, ctxDesc);
 
   const ariaLabel = [
+    remoteInfo?.connected ? `远端 ${remoteInfo.peerLabel}` : null,
     '状态栏',
     `${speedDisplay.value} tok/s`,
     `首字 ${ttftSecondsText}`,
     `缓存 ${cachePctText}`,
     `上下文 ${contextValueText}`
-  ].join(' · ');
+  ].filter(Boolean).join(' · ');
 
   return `
-    <div class="${barClass}" role="status" data-hidden="false" data-stale="${stale ? 'true' : 'false'}" aria-label="${esc(ariaLabel)}">
+    <div class="${barClass}" role="status" data-hidden="false" data-stale="${stale ? 'true' : 'false'}"${remoteInfo?.connected ? ' data-remote="true"' : ''} aria-label="${esc(ariaLabel)}">
+      ${remotePillHtml}
       <span class="pt-usage-item" data-usage="speed" data-live="${isLiveStream ? 'true' : 'false'}">
         <svg class="pt-usage-icon" viewBox="0 0 16 16" width="12.5" height="12.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M2 12.5a6 6 0 0 1 12 0" />
@@ -3612,6 +3760,9 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options =
   const dockStyle = options?.dockStyle === 'stack' ? 'stack' : 'flush';
   const thread = live?.thread;
   const unresolved = Boolean(thread?.unresolved);
+  const remoteInfo = describeRemoteBridgeLiveState(live?.remote);
+  const isRemote = Boolean(remoteInfo);
+  const isRemoteConnected = Boolean(remoteInfo?.connected);
   const activeAccountId = !unresolved
     ? String(thread?.accountId || live?.context?.accountId || '').trim()
     : '';
@@ -3622,10 +3773,12 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options =
   const activeGroup = quotas[0] || null;
   const now = live?.quotas?.updatedAtMs || live?.updatedAtMs || Date.now();
   const isRunning = !unresolved && thread?.run?.status === 'running';
-  const phaseLabel = unresolved ? '未选会话'
+  const phaseLabel = unresolved
+    ? (remoteInfo ? remoteInfo.phaseLabel : '未选会话')
     : thread?.phase === 'error' ? '已结束'
     : (thread?.phaseLabel || '空闲');
-  const phaseTone = unresolved ? 'muted'
+  const phaseTone = unresolved
+    ? (remoteInfo ? remoteInfo.tone : 'muted')
     : thread?.phase === 'waiting_approval' ? 'warning'
     : thread?.phase === 'error' ? 'muted'
     : isRunning ? 'accent'
@@ -3649,8 +3802,14 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options =
   const visibleSteps = showAllSteps ? allSteps.slice().reverse() : allSteps.slice(-10).reverse();
   const hasMoreSteps = allSteps.length > 10;
 
+  const unresolvedReason = remoteInfo && unresolved
+    ? remoteInfo.reason
+    : (thread?.reason || '打开会话后显示');
+  const remoteActionHtml = remoteInfo && unresolved && remoteInfo.showSettingsAction
+    ? `<div style="margin-top:6px;"><button type="button" class="pt-btn pt-btn-accent" data-pt-action="open-remote-bridge-settings" style="padding:2px 8px;font-size:10.5px;">打开桥接设置</button></div>`
+    : '';
   const stepRowsHtml = unresolved
-    ? `<div class="pt-muted" style="font-size:11px;padding:4px 2px;">${esc(thread?.reason || '打开会话后显示')}</div>`
+    ? `<div class="pt-muted" style="font-size:11px;padding:4px 2px;">${esc(unresolvedReason)}${remoteActionHtml}</div>`
     : visibleSteps.length
       ? visibleSteps.map(s => {
           const sTone = s.status === 'running' ? 'accent' : s.status === 'failed' ? 'muted' : 'success';
@@ -3673,7 +3832,7 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options =
   });
   const quotaHeaderLabel = activeGroup
     ? activeGroup.displayName
-    : '当前额度';
+    : (isRemote ? '远端额度' : '当前额度');
   const creditTag = activeGroup?.resetCredits?.availableCount > 0
     ? `<span class="pt-badge pt-badge-ok pt-mono" style="font-size:9px;padding:0 5px;flex:none;" title="可用重置券">重置券×${esc(activeGroup.resetCredits.availableCount)}</span>`
     : '';
@@ -3681,16 +3840,20 @@ function renderOverviewCardHtml(live, collapsed, showAllSteps = false, options =
   const queuedBadge = !unresolved && thread?.queuedRuns > 0
     ? `<span class="pt-badge pt-badge-warn" style="margin-left:4px;">排队 ${esc(thread.queuedRuns)}</span>`
     : '';
+  const remotePill = isRemoteConnected
+    ? `<span class="pt-remote-pill" data-pt-remote-badge="1" title="${esc(`远端电脑：${remoteInfo.peerLabel}`)}">远端 · ${esc(remoteInfo.peerLabel)}</span>`
+    : '';
 
   const headerTitle = docked ? '已合并到右侧面板 · 点击折叠 / 展开' : '折叠 / 展开';
   const dockPill = docked ? '<span class="pt-dock-pill">已合并</span>' : '';
 
   return `
-    <div class="pt-overview-card${collapsed ? ' collapsed' : ''}${docked ? (dockStyle === 'stack' ? ' docked docked-stack' : ' docked') : ''}" data-pt-overview-mode="${docked ? 'docked' : 'floating'}">
+    <div class="pt-overview-card${collapsed ? ' collapsed' : ''}${docked ? (dockStyle === 'stack' ? ' docked docked-stack' : ' docked') : ''}" data-pt-overview-mode="${docked ? 'docked' : 'floating'}"${isRemote ? ` data-pt-remote-status="${esc(live?.remote?.status || '')}"` : ''}>
       <div class="pt-overview-header" data-pt-action="toggle-overview" title="${headerTitle}">
         <div style="display:flex;align-items:center;gap:6px;min-width:0;">
           <span class="pt-dot pt-tone-${phaseTone}${isRunning ? ' pt-dot-pulse' : ''}"></span>
           <strong style="white-space:nowrap;">${esc(phaseLabel)}</strong>
+          ${remotePill}
           ${queuedBadge}
           <span class="pt-mono pt-muted" style="font-size:11px;white-space:nowrap;">
             ${!unresolved && thread?.run?.durationMs != null ? esc(fmtDuration(thread.run.durationMs)) : ''}${collapsed ? esc(collapsedQuota) : ''}
@@ -5203,6 +5366,217 @@ function renderPrivacyGuardCardHtml(statusData = null, fallbackSettings = null, 
   `;
 }
 
+function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, bridgeUi = null, { embedded = false } = {}) {
+  const cfg = statusData?.settings?.remoteBridge || fallbackSettings?.remoteBridge || {};
+  const srv = cfg.server || {};
+  const peers = Array.isArray(cfg.peers) ? cfg.peers : [];
+  const st = statusData?.remoteBridge || {};
+
+  const enabled = Boolean(srv.enabled);
+  const bindMode = ['tailscale', 'lan', 'all', 'custom'].includes(srv.bindMode) ? srv.bindMode : 'tailscale';
+  const port = Number.isInteger(Number(srv.port)) && Number(srv.port) >= 1024 ? Number(srv.port) : 17374;
+  const bindHost = String(srv.bindHost || '');
+  const advertiseUrl = String(srv.advertiseUrl || '');
+  const machineLabel = String(srv.machineLabel || '');
+  const candidates = Array.isArray(st.candidates) ? st.candidates : [];
+  const localEnvId = String(st.environmentId || '');
+  const state = String(st.state || (enabled ? 'waiting_interface' : 'disabled'));
+  const boundHost = String(st.boundHost || '');
+  const fingerprint = String(st.tokenFingerprint || '');
+
+  const preview = bridgeUi?.parsedPreview || null;
+  const previewError = String(bridgeUi?.previewError || '');
+  const allowLoopback = Boolean(bridgeUi?.allowLoopbackTunnel);
+  const peerTestStatus = bridgeUi?.peerTestStatus || {};
+  const serverDirty = Boolean(bridgeUi?.serverDirty);
+
+  const serverBadge = (() => {
+    if (!enabled || state === 'disabled') return '<span class="pt-badge pt-badge-muted">未开启</span>';
+    if (state === 'listening') return '<span class="pt-badge pt-badge-ok">监听中</span>';
+    if (state === 'waiting_interface') return '<span class="pt-badge pt-badge-warn">等待网卡</span>';
+    if (state === 'ambiguous_interface') return '<span class="pt-badge pt-badge-warn">请选择地址</span>';
+    if (state === 'port_in_use') return '<span class="pt-badge pt-badge-danger">端口占用</span>';
+    return '<span class="pt-badge pt-badge-danger">不可用</span>';
+  })();
+
+  const serverStatusLine = (() => {
+    if (!enabled) return '默认关闭，对单机和未安装 Tailscale 的用户零影响。开启后供另一台电脑在 T3 Code Connect 中实时查看本机 TPS、上下文、步骤与额度（双向互配即可互通）。';
+    if (state === 'listening') {
+      const shownHost = boundHost.includes(':') ? `[${boundHost}]` : boundHost;
+      const shownUrl = advertiseUrl || (shownHost ? `http://${shownHost}:${port}` : '');
+      const fpText = fingerprint ? ` · 令牌指纹 ${fingerprint}` : '';
+      return `已就绪 · 监听 ${shownHost || '0.0.0.0'}:${port}${shownUrl ? ` · 对端地址 ${shownUrl}` : ''}${fpText}`;
+    }
+    if (state === 'waiting_interface') {
+      return bindMode === 'tailscale'
+        ? '正在等待 Tailscale 网卡就绪（已启动自动重连），或可下方点选候选地址 / 切换绑定方式'
+        : '正在等待所选网卡地址就绪（已启动自动重连）';
+    }
+    if (state === 'ambiguous_interface') return '检测到多个候选网卡地址，请在下方点选要监听的地址或手动指定';
+    if (state === 'port_in_use') return `端口 ${port} 已被占用（或与本地服务端口冲突），请修改监听端口后保存`;
+    return st.message || '共享监听暂不可用，请检查配置或本机环境标识';
+  })();
+
+  const needsAdvertiseUrl = bindMode === 'all' && !advertiseUrl.trim();
+  const showPlaintextWarn = enabled && (
+    bindMode === 'lan' ||
+    bindMode === 'all' ||
+    (advertiseUrl.trim().toLowerCase().startsWith('http://') && !/^http:\/\/100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./i.test(advertiseUrl.trim()))
+  );
+
+  const candidatesHtml = enabled && candidates.length ? `
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px;">
+      <span class="pt-muted" style="font-size:11px;">检测到网卡：</span>
+      ${candidates.map(c => `
+        <button type="button" class="pt-btn pt-mono" style="padding:2px 8px;font-size:11px;" data-pt-bridge-candidate="${esc(c.address)}" title="${esc(c.name)} (${esc(c.address)})">
+          ${esc(c.name)}: ${esc(c.address)}${c.trusted ? '' : ' (?)'}
+        </button>
+      `).join('')}
+    </div>
+  ` : '';
+
+  const previewHtml = preview ? `
+    <div style="margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));font-size:11.5px;display:flex;flex-direction:column;gap:2px;">
+      <div><strong>离线解析结果：</strong>${esc(preview.label || '未命名电脑')}</div>
+      <div class="pt-muted pt-mono" style="font-size:11px;">环境 ${esc(preview.environmentId)} · 地址 ${esc(preview.url)}</div>
+    </div>
+  ` : (previewError ? `<div class="pt-text-danger" style="font-size:11px;margin-top:4px;">${esc(previewError)}</div>` : '');
+
+  const peersHtml = peers.length ? `
+    <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+      ${peers.map(p => {
+        const lastTest = peerTestStatus[p.id];
+        const badge = !p.enabled
+          ? '<span class="pt-badge pt-badge-muted">已停用</span>'
+          : lastTest === 'unauthorized'
+            ? '<span class="pt-badge pt-badge-danger">鉴权失败</span>'
+            : lastTest === 'identityMismatch'
+              ? '<span class="pt-badge pt-badge-danger">身份不匹配</span>'
+              : lastTest === 'incompatible'
+                ? '<span class="pt-badge pt-badge-warn">版本不兼容</span>'
+                : lastTest === 'offline'
+                  ? '<span class="pt-badge pt-badge-warn">离线</span>'
+                  : p.verified
+                  ? '<span class="pt-badge pt-badge-ok">已验证</span>'
+                  : '<span class="pt-badge pt-badge-warn">待验证</span>';
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 10px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));">
+            <div style="min-width:0;flex:1;">
+              <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;">
+                <strong>${esc(p.label || '远端电脑')}</strong>
+                ${badge}
+                <span class="pt-muted pt-mono" style="font-size:10.5px;" title="${esc(p.environmentId)}">${esc(String(p.environmentId || '').slice(0, 8))}</span>
+              </div>
+              <div class="pt-muted pt-mono" style="font-size:11px;margin-top:2px;word-break:break-all;">${esc(p.url)}${p.allowLoopbackTunnel ? ' · 本地隧道' : ''}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:6px;flex:none;">
+              <label class="pt-switch" title="${p.enabled ? '停用此节点' : '启用此节点'}">
+                <input type="checkbox" data-bridge-peer-toggle="${esc(p.id)}" ${p.enabled ? 'checked' : ''} />
+                <span class="pt-switch-track"></span>
+              </label>
+              <button type="button" class="pt-btn" style="padding:3px 8px;font-size:11px;" data-pt-bridge-test-peer="${esc(p.id)}">测试</button>
+              <button type="button" class="pt-btn pt-btn-danger" style="padding:3px 8px;font-size:11px;" data-pt-bridge-remove-peer="${esc(p.id)}">移除</button>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  ` : '<div class="pt-muted" style="font-size:11.5px;margin-top:6px;">尚未配对远端电脑。在另一台电脑开启「共享本机实时状态」后，复制其配对码粘贴到上方即可。</div>';
+
+  return `
+    <div class="settings-group-title" id="settings-remote-bridge-anchor">Connect 跨机实时桥接</div>
+    <div class="pt-card" data-pt-remote-bridge-card="1">
+      <div class="setting-row">
+        <div>
+          <div class="setting-label">共享本机实时状态（只读） ${serverBadge}</div>
+          <div class="setting-desc">${esc(serverStatusLine)}</div>
+          ${localEnvId ? `<div class="pt-muted pt-mono" style="font-size:10.5px;margin-top:3px;">本机环境：${esc(localEnvId)}</div>` : ''}
+          ${showPlaintextWarn ? '<div class="pt-text-warning" style="font-size:11px;margin-top:4px;">提示：普通局域网 HTTP 会明文传输令牌，建议优先选择 Tailscale 专网或通过 HTTPS 反向代理暴露。</div>' : ''}
+        </div>
+        <label class="pt-switch">
+          <input type="checkbox" data-bridge-server="enabled" ${enabled ? 'checked' : ''} />
+          <span class="pt-switch-track"></span>
+        </label>
+      </div>
+
+      ${enabled ? `
+        <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:8px;">
+          <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div>
+              <div class="setting-label">监听方式与地址</div>
+              <div class="setting-desc">默认仅绑定 Tailscale 专网单地址；若使用反向代理/隧道，可填写“对端可达地址”</div>
+            </div>
+            <select class="pt-select" aria-label="监听方式" data-bridge-server="bindMode" style="max-width:240px;">
+              <option value="tailscale"${bindMode === 'tailscale' ? ' selected' : ''}>Tailscale 专网（推荐）</option>
+              <option value="lan"${bindMode === 'lan' ? ' selected' : ''}>局域网网卡</option>
+              <option value="custom"${bindMode === 'custom' ? ' selected' : ''}>指定网卡 IP</option>
+              <option value="all"${bindMode === 'all' ? ' selected' : ''}>全部接口（高级，需填可达地址）</option>
+            </select>
+          </div>
+          ${candidatesHtml}
+          <div style="width:100%;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+            <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">
+              <span>监听端口</span>
+              <input type="number" class="pt-input pt-mono" min="1024" max="65535" value="${esc(port)}" data-bridge-server="port" />
+            </label>
+            <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">
+              <span>本机显示名称（可选）</span>
+              <input type="text" class="pt-input" maxlength="64" placeholder="如：家里台式机 / MacBook" value="${esc(machineLabel)}" data-bridge-server="machineLabel" />
+            </label>
+            ${bindMode === 'custom' ? `
+              <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">
+                <span>自定义监听 IP</span>
+                <input type="text" class="pt-input pt-mono" placeholder="如：100.64.x.x 或 192.168.x.x" value="${esc(bindHost)}" data-bridge-server="bindHost" />
+              </label>
+            ` : ''}
+            <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">
+              <span>对端可达地址${bindMode === 'all' ? '（必填）' : '（可选）'}</span>
+              <input type="text" class="pt-input pt-mono" placeholder="如：http://100.x.y.z:17374 或 https://..." value="${esc(advertiseUrl)}" data-bridge-server="advertiseUrl" />
+            </label>
+          </div>
+          <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <button type="button" class="pt-btn pt-btn-accent" data-pt-action="save-bridge-server">保存监听配置</button>
+              <button type="button" class="pt-btn" data-pt-action="reset-bridge-server"${serverDirty ? '' : ' style="display:none;"'} data-bridge-reset-btn="1">还原</button>
+              <button type="button" class="pt-btn" data-pt-action="copy-bridge-pairing-code" ${state !== 'listening' || needsAdvertiseUrl ? 'disabled' : ''} title="${needsAdvertiseUrl ? '全部接口模式下需先填写对端可达地址' : '复制含本机环境与只读令牌的配对码'}">复制本机配对码</button>
+              <button type="button" class="pt-btn" data-pt-action="rotate-bridge-token" title="重置后旧配对码立即失效">重置令牌</button>
+            </div>
+            ${needsAdvertiseUrl ? '<span class="pt-text-warning" style="font-size:11px;">全部接口模式需先保存“对端可达地址”才能生成配对码</span>' : ''}
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="setting-row" style="align-items:flex-start;flex-direction:column;gap:6px;">
+        <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <div>
+            <div class="setting-label">已配对的远端电脑（${peers.length} 台）</div>
+            <div class="setting-desc">${embedded ? '为避免凭据暴露给宿主页面 DOM，嵌入窗口通过系统原生输入框安全导入配对码（也可在独立 T3Tools 窗口操作）；双向互加即可双向实时查看' : '粘贴另一台电脑的配对码（仅本地离线预览，点击“测试”或“添加”后才会联网校验）；双向互加即可双向实时查看'}</div>
+          </div>
+        </div>
+        ${embedded ? `
+          <div style="width:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <button type="button" class="pt-btn pt-btn-accent" data-pt-action="prompt-add-bridge-peer">输入配对码添加节点</button>
+            <button type="button" class="pt-btn" data-pt-action="prompt-test-bridge-peer">测试配对码</button>
+            <button type="button" class="pt-btn" data-pt-action="open-standalone-bridge-settings">在独立窗口管理</button>
+          </div>
+        ` : `
+          <div style="width:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <input type="text" class="pt-input pt-mono" style="flex:1;min-width:200px;" placeholder="粘贴 t3bridge://v1/... 配对码" data-bridge-pairing-input="1" autocomplete="off" spellcheck="false" />
+            <button type="button" class="pt-btn" data-pt-action="test-bridge-input">测试连接</button>
+            <button type="button" class="pt-btn pt-btn-accent" data-pt-action="add-bridge-peer">添加节点</button>
+          </div>
+          <div data-bridge-preview-slot="1" style="width:100%;">${previewHtml}</div>
+        `}
+        <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;" class="pt-muted">
+          <input type="checkbox" data-bridge-loopback="1" ${allowLoopback ? 'checked' : ''} />
+          <span>允许本地回环隧道地址（仅用于 SSH 端口转发场景）</span>
+        </label>
+        <div style="width:100%;">${peersHtml}</div>
+      </div>
+    </div>
+  `;
+}
+
 function renderMultiMachineSyncCardHtml(statusData = null, fallbackSettings = null) {
   const cfg = statusData?.settings?.multiMachineSync || fallbackSettings?.multiMachineSync || {};
   const st = statusData?.multiMachineSync || {};
@@ -5330,7 +5704,7 @@ function renderMultiMachineSyncCardHtml(statusData = null, fallbackSettings = nu
   `;
 }
 
-function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, version = '0.1.0') {
+function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, version = '0.1.0', remoteBridgeUi = null) {
   const cfg = fallbackSettings || statusData?.settings || {};
   const alertCfg = cfg.alertConfig || {};
   const cdp = statusData?.cdp || {};
@@ -5456,6 +5830,8 @@ function renderEmbeddedSettingsHtml(statusData = null, fallbackSettings = null, 
 
       ${renderPrivacyGuardCardHtml(statusData, fallbackSettings, { embedded: true })}
 
+      ${renderRemoteBridgeCardHtml(statusData, fallbackSettings, remoteBridgeUi, { embedded: true })}
+
       ${renderMultiMachineSyncCardHtml(statusData, fallbackSettings)}
 
       ${renderEmbeddedAppUpdateCardHtml(statusData, fallbackSettings, version)}
@@ -5533,6 +5909,7 @@ function renderDashboardHtml(data, uiState, {
   sideCollapsed = false,
   statusData = null,
   fallbackSettings = null,
+  remoteBridgeUi = null,
   dismissedAppUpdateVer = '',
   loading = false,
   error = '',
@@ -5569,7 +5946,7 @@ function renderDashboardHtml(data, uiState, {
 
   let activeBodyHtml = '';
   if (tab === 'settings') {
-    activeBodyHtml = renderEmbeddedSettingsHtml(statusData, fallbackSettings, version);
+    activeBodyHtml = renderEmbeddedSettingsHtml(statusData, fallbackSettings, version, remoteBridgeUi);
   } else if (!data && loading) {
     activeBodyHtml = '<div class="pt-card" style="text-align:center;padding:36px;">正在加载数据...</div>';
   } else if (!data && error) {

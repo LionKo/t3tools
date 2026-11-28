@@ -494,6 +494,8 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
             <div id="settings-privacy-guard-slot"></div>
 
+            <div id="settings-remote-bridge-slot"></div>
+
             <div id="settings-multi-machine-sync-slot"></div>
 
             <div class="settings-group-title">应用更新</div>
@@ -642,6 +644,42 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       let dashData = null;
       let focusErrorsOnRender = false;
       let statusData = null;
+      const remoteBridgeUi = { parsedPreview: null, previewError: '', allowLoopbackTunnel: false, peerTestStatus: {}, serverDirty: false };
+      let bridgeParseTimer = null;
+      let bridgeParseSeq = 0;
+      function validateBridgePortInput(rawVal) {
+        const text = String(rawVal ?? '').trim();
+        if (!/^\d+$/.test(text)) return { ok: false, error: '监听端口必须为 1024–65535 的整数' };
+        const n = Number(text);
+        if (!Number.isInteger(n) || n < 1024 || n > 65535) return { ok: false, error: '监听端口必须为 1024–65535 的整数' };
+        return { ok: true, value: n };
+      }
+      function formatUpsertPeerToast(saved) {
+        if (saved?.verified) return '已添加并验证远端电脑';
+        const st = String(saved?.verifyStatus || 'offline');
+        if (['unauthorized', 'identityMismatch', 'incompatible'].includes(st)) {
+          return '已保存节点，但校验未通过：' + formatRemoteBridgeErrorMessage(st) + '（已暂停自动轮询，修复后请点击“测试”）';
+        }
+        return '已保存远端电脑（当前离线，待对方上线后自动连通）';
+      }
+      function forceRenderRemoteBridgeSlot() {
+        const slot = document.getElementById('settings-remote-bridge-slot');
+        if (!slot) return;
+        const cfg = statusData?.settings || {};
+        slot.innerHTML = renderRemoteBridgeCardHtml(statusData, cfg, remoteBridgeUi, { embedded: false });
+      }
+      function updateStandaloneBridgePreviewDom() {
+        const slot = document.querySelector('#settings-remote-bridge-slot [data-bridge-preview-slot]');
+        if (!slot) return;
+        if (remoteBridgeUi.parsedPreview) {
+          const p = remoteBridgeUi.parsedPreview;
+          slot.innerHTML = '<div style="margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));font-size:11.5px;display:flex;flex-direction:column;gap:2px;"><div><strong>离线解析结果：</strong>' + esc(p.label || '未命名电脑') + '</div><div class="pt-muted pt-mono" style="font-size:11px;">环境 ' + esc(p.environmentId) + ' · 地址 ' + esc(p.url) + '</div></div>';
+        } else if (remoteBridgeUi.previewError) {
+          slot.innerHTML = '<div class="pt-text-danger" style="font-size:11px;margin-top:4px;">' + esc(remoteBridgeUi.previewError) + '</div>';
+        } else {
+          slot.innerHTML = '';
+        }
+      }
       let settingsSeq = 0;
       let statusSeq = 0;
       let saveQueue = Promise.resolve();
@@ -745,7 +783,7 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           json = await r.json();
         } catch {}
         if (!r.ok) {
-          return { ok: false, status: r.status, error: json?.error || ('HTTP ' + r.status) };
+          return { ok: false, status: r.status, code: json?.code || '', error: json?.code || json?.error || ('HTTP ' + r.status) };
         }
         return json || { ok: false, error: '服务返回空响应' };
       }
@@ -985,6 +1023,18 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         const privacyGuardSlot = document.getElementById('settings-privacy-guard-slot');
         if (privacyGuardSlot) {
           privacyGuardSlot.innerHTML = renderPrivacyGuardCardHtml(statusData, cfg, { embedded: false });
+        }
+        const remoteBridgeSlot = document.getElementById('settings-remote-bridge-slot');
+        if (remoteBridgeSlot) {
+          const activeEl = document.activeElement;
+          const editingBridgeInput = Boolean(
+            remoteBridgeUi.serverDirty ||
+            (activeEl && remoteBridgeSlot.contains(activeEl) && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT')) ||
+            remoteBridgeSlot.querySelector('[data-bridge-pairing-input]')?.value?.trim()
+          );
+          if (!editingBridgeInput) {
+            remoteBridgeSlot.innerHTML = renderRemoteBridgeCardHtml(statusData, cfg, remoteBridgeUi, { embedded: false });
+          }
         }
         const multiSyncSlot = document.getElementById('settings-multi-machine-sync-slot');
         if (multiSyncSlot) {
@@ -1404,6 +1454,49 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           openPtMachineMenu(machBtn, dashData?.facets?.machines || [], state.machine, applyMachineChoice);
           return;
         }
+        const bridgeCandBtn = target.closest?.('[data-pt-bridge-candidate]');
+        if (bridgeCandBtn) {
+          const ip = bridgeCandBtn.getAttribute('data-pt-bridge-candidate') || '';
+          if (ip && await saveSetting('remoteBridge.server', { remoteBridge: { server: { bindMode: 'custom', bindHost: ip } } })) {
+            await fetchStatus();
+            forceRenderRemoteBridgeSlot();
+            showToast('已选择监听地址 ' + ip);
+          }
+          return;
+        }
+        const bridgeTestPeerBtn = target.closest?.('[data-pt-bridge-test-peer]');
+        if (bridgeTestPeerBtn) {
+          const peerId = bridgeTestPeerBtn.getAttribute('data-pt-bridge-test-peer') || '';
+          if (peerId) {
+            showToast('正在测试远端连接...');
+            const res = await postApi('/api/remote-bridge/test-peer', { peerId }).catch(() => null);
+            if (res?.ok && res.data) {
+              remoteBridgeUi.peerTestStatus[peerId] = res.data.verified ? 'verified' : (res.data.status || 'offline');
+              await fetchStatus();
+              forceRenderRemoteBridgeSlot();
+              showToast(res.data.verified ? '连接正常，身份校验通过' : formatRemoteBridgeErrorMessage(res.data.status || 'offline'));
+            } else {
+              showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+            }
+          }
+          return;
+        }
+        const bridgeRemovePeerBtn = target.closest?.('[data-pt-bridge-remove-peer]');
+        if (bridgeRemovePeerBtn) {
+          const peerId = bridgeRemovePeerBtn.getAttribute('data-pt-bridge-remove-peer') || '';
+          if (peerId && confirm('将移除该远端配对节点及其凭据，是否继续？')) {
+            const res = await postApi('/api/remote-bridge/peers/remove', { peerId }).catch(() => null);
+            if (res?.ok) {
+              delete remoteBridgeUi.peerTestStatus[peerId];
+              await fetchStatus();
+              forceRenderRemoteBridgeSlot();
+              showToast('已移除远端节点');
+            } else {
+              showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+            }
+          }
+          return;
+        }
         const suggestBtn = target.closest?.('[data-pt-sync-suggest]');
         if (suggestBtn) {
           const suggestedDir = suggestBtn.getAttribute('data-pt-sync-suggest') || '';
@@ -1436,6 +1529,104 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
             positionSegsThumb(viewDataHeadEl, { animate: false });
             positionSegsThumb(settingsThemeSegsEl, { animate: false });
           }, 200);
+          return;
+        }
+        if (act === 'save-bridge-server') {
+          const slot = document.getElementById('settings-remote-bridge-slot');
+          const portInput = slot?.querySelector('[data-bridge-server="port"]');
+          const bindModeEl = slot?.querySelector('[data-bridge-server="bindMode"]');
+          const bindHostInput = slot?.querySelector('[data-bridge-server="bindHost"]');
+          const advInput = slot?.querySelector('[data-bridge-server="advertiseUrl"]');
+          const labelInput = slot?.querySelector('[data-bridge-server="machineLabel"]');
+          const patch = {};
+          if (portInput) {
+            const check = validateBridgePortInput(portInput.value);
+            if (!check.ok) { showToast(check.error); return; }
+            patch.port = check.value;
+          }
+          if (bindModeEl) patch.bindMode = bindModeEl.value;
+          if (bindHostInput) patch.bindHost = bindHostInput.value.trim();
+          if (advInput) patch.advertiseUrl = advInput.value.trim();
+          if (labelInput) patch.machineLabel = labelInput.value.trim();
+          if (await saveSetting('remoteBridge.server', { remoteBridge: { server: patch } })) {
+            remoteBridgeUi.serverDirty = false;
+            await fetchStatus();
+            forceRenderRemoteBridgeSlot();
+            showToast('桥接监听配置已保存');
+          }
+          return;
+        }
+        if (act === 'reset-bridge-server') {
+          remoteBridgeUi.serverDirty = false;
+          forceRenderRemoteBridgeSlot();
+          showToast('已还原未保存的监听配置');
+          return;
+        }
+        if (act === 'copy-bridge-pairing-code') {
+          if (!e.isTrusted) return;
+          const res = await postApi('/api/remote-bridge/pairing-code', {}).catch(() => null);
+          if (res?.ok && res.data?.code) {
+            try {
+              await navigator.clipboard.writeText(res.data.code);
+              showToast('已复制本机配对码到剪贴板（请仅粘贴给信任的另一台电脑）');
+            } catch {
+              showToast('剪贴板写入失败，请授予页面剪贴板权限');
+            }
+          } else {
+            showToast(formatRemoteBridgeErrorMessage(res?.error || 'serverUnavailable'));
+          }
+          return;
+        }
+        if (act === 'rotate-bridge-token') {
+          if (!confirm('重置后，所有使用旧配对码的远端电脑都将立即失效并需要重新配对，是否继续？')) return;
+          const res = await postApi('/api/remote-bridge/rotate-token', {}).catch(() => null);
+          if (res?.ok) {
+            await fetchStatus();
+            forceRenderRemoteBridgeSlot();
+            showToast('本机只读令牌已重置');
+          } else {
+            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+          }
+          return;
+        }
+        if (act === 'test-bridge-input') {
+          const slot = document.getElementById('settings-remote-bridge-slot');
+          const code = slot?.querySelector('[data-bridge-pairing-input]')?.value?.trim() || '';
+          if (!code) { showToast('请先粘贴远端配对码'); return; }
+          showToast('正在测试远端连接...');
+          const res = await postApi('/api/remote-bridge/test-peer', {
+            code,
+            allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel)
+          }).catch(() => null);
+          if (res?.ok && res.data) {
+            showToast(res.data.verified ? '连接正常，可以点击“添加节点”保存' : formatRemoteBridgeErrorMessage(res.data.status || 'offline'));
+          } else {
+            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+          }
+          return;
+        }
+        if (act === 'add-bridge-peer') {
+          const slot = document.getElementById('settings-remote-bridge-slot');
+          const inputEl = slot?.querySelector('[data-bridge-pairing-input]');
+          const code = inputEl?.value?.trim() || '';
+          if (!code) { showToast('请先粘贴远端配对码'); return; }
+          showToast('正在校验并保存远端节点...');
+          const res = await postApi('/api/remote-bridge/peers/upsert', {
+            code,
+            allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel),
+            verify: true
+          }).catch(() => null);
+          if (res?.ok && res.data) {
+            if (inputEl) inputEl.value = '';
+            remoteBridgeUi.parsedPreview = null;
+            remoteBridgeUi.previewError = '';
+            if (res.data.id) remoteBridgeUi.peerTestStatus[res.data.id] = res.data.verifyStatus || (res.data.verified ? 'verified' : 'offline');
+            await fetchStatus();
+            forceRenderRemoteBridgeSlot();
+            showToast(formatUpsertPeerToast(res.data));
+          } else {
+            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+          }
           return;
         }
         if (act === 'save-sync-paths') {
@@ -1680,6 +1871,39 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
           }
           return;
         }
+        if (e.target.dataset.bridgeServer) {
+          const key = e.target.dataset.bridgeServer;
+          if (key === 'enabled' || key === 'bindMode') {
+            const value = key === 'enabled' ? Boolean(e.target.checked) : e.target.value;
+            if (await saveSetting('remoteBridge.server.' + key, { remoteBridge: { server: { [key]: value } } })) {
+              remoteBridgeUi.serverDirty = false;
+              await fetchStatus();
+              forceRenderRemoteBridgeSlot();
+              showToast(key === 'enabled' ? (value ? '已开启本机只读共享' : '已关闭本机只读共享') : '监听方式已更新');
+            } else {
+              forceRenderRemoteBridgeSlot();
+            }
+          }
+          return;
+        }
+        if (e.target.dataset.bridgePeerToggle) {
+          const peerId = e.target.dataset.bridgePeerToggle;
+          const enabled = Boolean(e.target.checked);
+          const res = await postApi('/api/remote-bridge/peers/toggle', { peerId, enabled }).catch(() => null);
+          if (res?.ok) {
+            await fetchStatus();
+            forceRenderRemoteBridgeSlot();
+            showToast(enabled ? '已启用远端节点' : '已停用远端节点');
+          } else {
+            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+            forceRenderRemoteBridgeSlot();
+          }
+          return;
+        }
+        if (e.target.dataset.bridgeLoopback) {
+          remoteBridgeUi.allowLoopbackTunnel = Boolean(e.target.checked);
+          return;
+        }
         if (e.target.dataset.privacySetting) {
           const key = e.target.dataset.privacySetting;
           const value = Boolean(e.target.checked);
@@ -1757,6 +1981,38 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
 
       let searchTimer = null;
       document.body.addEventListener('input', e => {
+        const bridgeSrvInput = e.target.closest?.('[data-bridge-server]');
+        if (bridgeSrvInput && ['port', 'bindHost', 'advertiseUrl', 'machineLabel'].includes(bridgeSrvInput.dataset?.bridgeServer)) {
+          remoteBridgeUi.serverDirty = true;
+          const resetBtn = document.querySelector('#settings-remote-bridge-slot [data-bridge-reset-btn]');
+          if (resetBtn) resetBtn.style.display = '';
+          return;
+        }
+        const bridgeInput = e.target.closest?.('[data-bridge-pairing-input]');
+        if (bridgeInput) {
+          const raw = String(bridgeInput.value || '').trim();
+          clearTimeout(bridgeParseTimer);
+          const seq = ++bridgeParseSeq;
+          if (!raw) {
+            remoteBridgeUi.parsedPreview = null;
+            remoteBridgeUi.previewError = '';
+            updateStandaloneBridgePreviewDom();
+            return;
+          }
+          bridgeParseTimer = setTimeout(async () => {
+            const res = await postApi('/api/remote-bridge/parse-code', { code: raw }).catch(() => null);
+            if (seq !== bridgeParseSeq) return;
+            if (res?.ok && res.data) {
+              remoteBridgeUi.parsedPreview = res.data;
+              remoteBridgeUi.previewError = '';
+            } else {
+              remoteBridgeUi.parsedPreview = null;
+              remoteBridgeUi.previewError = formatRemoteBridgeErrorMessage(res?.error || 'Invalid pairing code');
+            }
+            updateStandaloneBridgePreviewDom();
+          }, 180);
+          return;
+        }
         const el = e.target.closest?.('[data-pt-filter="session"]');
         if (!el) return;
         state.session = el.value;

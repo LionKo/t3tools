@@ -70,7 +70,14 @@
   async function requestRpc(action, params, signal, rpcTimeoutMs = 8000) {
     async function http(url, options) {
       const response = await fetch(url, { ...options, signal });
-      if (!response.ok) throw Object.assign(new Error('HTTP ' + response.status), { receivedReply: response.status < 500 });
+      if (!response.ok) {
+        let msg = 'HTTP ' + response.status;
+        try {
+          const errJson = await response.json();
+          if (errJson?.code || errJson?.error) msg = String(errJson.code || errJson.error);
+        } catch {}
+        throw Object.assign(new Error(msg), { receivedReply: response.status < 500 });
+      }
       return response;
     }
     if (transport === 'cdp') {
@@ -89,6 +96,7 @@
     if (action === 'getLive') {
       const qs = new URLSearchParams({ allowFallback: '0' });
       if (params.threadId) qs.set('threadId', params.threadId);
+      if (params.environmentId) qs.set('environmentId', params.environmentId);
       const r = await http(`${apiBase}/api/live?${qs.toString()}`);
       const j = await r.json();
       if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
@@ -112,7 +120,12 @@
       if (!j.ok) throw Object.assign(new Error(j.error || '请求失败'), { receivedReply: true });
       return j.data;
     }
-    if (['focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates','checkAppUpdate','installAppUpdate','skipAppUpdate','triggerMultiMachineSync','clearRemoteSyncData'].includes(action)) {
+    if ([
+      'focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates',
+      'checkAppUpdate','installAppUpdate','skipAppUpdate','triggerMultiMachineSync','clearRemoteSyncData',
+      'getRemoteBridgePairingCode','rotateRemoteBridgeToken','parseRemoteBridgePairingCode',
+      'testRemoteBridgePeer','upsertRemoteBridgePeer','removeRemoteBridgePeer','toggleRemoteBridgePeer'
+    ].includes(action)) {
       const path = {
         focusThread: '/api/t3/focus-thread',
         ackErrors: '/api/errors/ack',
@@ -123,7 +136,14 @@
         installAppUpdate: '/api/app-update/install',
         skipAppUpdate: '/api/app-update/skip',
         triggerMultiMachineSync: '/api/sync/multi-machine',
-        clearRemoteSyncData: '/api/sync/multi-machine/clear-remote'
+        clearRemoteSyncData: '/api/sync/multi-machine/clear-remote',
+        getRemoteBridgePairingCode: '/api/remote-bridge/pairing-code',
+        rotateRemoteBridgeToken: '/api/remote-bridge/rotate-token',
+        parseRemoteBridgePairingCode: '/api/remote-bridge/parse-code',
+        testRemoteBridgePeer: '/api/remote-bridge/test-peer',
+        upsertRemoteBridgePeer: '/api/remote-bridge/peers/upsert',
+        removeRemoteBridgePeer: '/api/remote-bridge/peers/remove',
+        toggleRemoteBridgePeer: '/api/remote-bridge/peers/toggle'
       }[action];
       const res = await http(apiBase + path,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify(params)});
       const json = await res.json();
@@ -722,41 +742,125 @@
     return fallback ? { mode: 'below-card', anchor: fallback } : null;
   }
 
+  const ENV_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const SAFE_TARGET_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+  const NON_THREAD_SEGMENT_RE = /^(new|draft|settings|usage|projects|themes|home)$/i;
+  const DEFAULT_ROUTE_TARGET_PATTERNS = [
+    '^/threads?/([^/?#]+)/([^/?#]+)$',
+    '^/(?!settings(?:/|$)|usage(?:/|$)|projects?(?:/|$)|themes?(?:/|$)|login(?:/|$)|auth(?:/|$)|draft(?:/|$)|threads?(?:/|$)|c(?:/|$))([^/?#]+)/([^/?#]+)$'
+  ];
+
   function isNonThreadRoutePath(pathname = '') {
     return /^\/(draft|settings|usage|projects?|themes?|login|auth)(?:\/|$)/i.test(String(pathname || ''));
   }
 
-  function normalizeThreadIdCandidate(raw) {
-    const val = String(raw || '').trim();
-    if (!val || val === 'true' || val === '1') return '';
-    // T3 Code sidebar data-thread-item uses "<envUuid>:<threadId>"
-    const envPrefixMatch = val.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:(.+)$/i);
-    if (envPrefixMatch && envPrefixMatch[1]) {
-      return envPrefixMatch[1].trim();
+  function decodeTargetSegmentOnce(raw) {
+    const s = String(raw || '');
+    if (!s || s.length > 384) return '';
+    let decoded;
+    try {
+      decoded = decodeURIComponent(s).trim();
+    } catch {
+      return '';
     }
-    return val;
+    if (!decoded || decoded.length > 128) return '';
+    if (/[\x00-\x1f\x7f/\\]/.test(decoded)) return '';
+    if (!SAFE_TARGET_ID_RE.test(decoded)) return '';
+    return decoded;
   }
 
-  function matchRouteThreadId(pathname, search = '') {
-    if (isNonThreadRoutePath(pathname)) return '';
-    const pathAndQuery = `${pathname || ''}${search || ''}`;
-    for (const pattern of selectors.routeThreadPatterns || []) {
+  function parseTargetAttrCandidate(raw) {
+    const val = String(raw || '').trim();
+    if (!val || val === 'true' || val === '1') return { environmentId: '', threadId: '' };
+    // T3 Code sidebar data-thread-item uses "<envUuid>:<threadId>"
+    const envPrefixMatch = val.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}):(.+)$/i);
+    if (envPrefixMatch && envPrefixMatch[1] && envPrefixMatch[2]) {
+      const envId = decodeTargetSegmentOnce(envPrefixMatch[1]);
+      const threadId = decodeTargetSegmentOnce(envPrefixMatch[2]);
+      if (envId && threadId && !NON_THREAD_SEGMENT_RE.test(threadId)) {
+        return { environmentId: envId, threadId };
+      }
+      return { environmentId: '', threadId: '' };
+    }
+    const threadId = decodeTargetSegmentOnce(val);
+    if (threadId && !NON_THREAD_SEGMENT_RE.test(threadId)) {
+      return { environmentId: '', threadId };
+    }
+    return { environmentId: '', threadId: '' };
+  }
+
+  function matchRouteTarget(pathname, search = '') {
+    const cleanPath = String(pathname || '');
+    if (isNonThreadRoutePath(cleanPath)) return { environmentId: '', threadId: '', invalidRoute: true };
+    const pairedPatterns = Array.isArray(selectors.routeTargetPatterns) && selectors.routeTargetPatterns.length
+      ? selectors.routeTargetPatterns
+      : DEFAULT_ROUTE_TARGET_PATTERNS;
+    let sawMalformed = false;
+    for (const pattern of pairedPatterns) {
       try {
         const re = new RegExp(pattern, 'i');
-        const target = pattern.startsWith('[?&]') ? pathAndQuery : (pathname || '');
-        const m = target.match(re);
-        if (m && m[1]) {
-          const decoded = decodeURIComponent(m[1]).trim();
-          if (decoded && !/^(new|draft|settings|usage|projects|themes|home)$/i.test(decoded)) {
-            return decoded;
+        const m = cleanPath.match(re);
+        if (m && m[1] && m[2]) {
+          const envId = decodeTargetSegmentOnce(m[1]);
+          const threadId = decodeTargetSegmentOnce(m[2]);
+          if (envId && !NON_THREAD_SEGMENT_RE.test(envId) && threadId && !NON_THREAD_SEGMENT_RE.test(threadId)) {
+            return { environmentId: envId, threadId };
           }
+          sawMalformed = true;
         }
       } catch {}
     }
-    return '';
+    if (sawMalformed) return { environmentId: '', threadId: '', invalidRoute: true };
+
+    const pathAndQuery = `${cleanPath}${search || ''}`;
+    for (const pattern of selectors.routeThreadPatterns || []) {
+      try {
+        const re = new RegExp(pattern, 'i');
+        const target = pattern.startsWith('[?&]') ? pathAndQuery : cleanPath;
+        const m = target.match(re);
+        if (m && m[1]) {
+          const threadId = decodeTargetSegmentOnce(m[1]);
+          if (threadId && !NON_THREAD_SEGMENT_RE.test(threadId)) {
+            return { environmentId: '', threadId };
+          }
+          sawMalformed = true;
+        }
+      } catch {}
+    }
+    return { environmentId: '', threadId: '', invalidRoute: sawMalformed };
   }
 
-  function detectActiveThreadId() {
+  function detectSidebarActiveTarget() {
+    const activeEl = findAnchor('activeThreadItem');
+    if (!activeEl) return { environmentId: '', threadId: '' };
+    const container = activeEl.closest?.('[data-thread-item]') || activeEl;
+    const itemParsed = parseTargetAttrCandidate(container.getAttribute?.('data-thread-item'));
+    const idParsed = parseTargetAttrCandidate(container.getAttribute?.('data-thread-id'));
+    const link = activeEl.tagName === 'A' ? activeEl : (container.querySelector?.('a[href]') || activeEl.closest?.('a[href]'));
+    let hrefParsed = { environmentId: '', threadId: '' };
+    const href = link?.getAttribute?.('href') || '';
+    if (href) {
+      try {
+        const cleanHref = href.startsWith('#') ? href.slice(1) : href;
+        const u = new URL(cleanHref, 'http://localhost');
+        hrefParsed = matchRouteTarget(u.pathname, u.search);
+      } catch {}
+    }
+
+    const threadId = idParsed.threadId || itemParsed.threadId || hrefParsed.threadId || '';
+    if (!threadId) return { environmentId: '', threadId: '' };
+    let environmentId = '';
+    if (itemParsed.environmentId && (!itemParsed.threadId || itemParsed.threadId === threadId)) {
+      environmentId = itemParsed.environmentId;
+    } else if (hrefParsed.environmentId && hrefParsed.threadId === threadId) {
+      environmentId = hrefParsed.environmentId;
+    }
+    return { environmentId, threadId };
+  }
+
+  function detectActiveTarget() {
+    let routeTarget = { environmentId: '', threadId: '' };
+
     // 1. Electron desktop uses Hash routing: t3code://app/#/<envId>/<threadId>
     const rawHash = String(location.hash || '').replace(/^#/, '');
     if (rawHash) {
@@ -764,37 +868,40 @@
       const hashPath = qIdx >= 0 ? rawHash.slice(0, qIdx) : rawHash;
       const hashSearch = qIdx >= 0 ? rawHash.slice(qIdx) : '';
       const normalizedHashPath = hashPath.startsWith('/') ? hashPath : `/${hashPath}`;
-      if (isNonThreadRoutePath(normalizedHashPath)) return '';
-      const fromHash = matchRouteThreadId(normalizedHashPath, hashSearch);
-      if (fromHash) return fromHash;
+      if (isNonThreadRoutePath(normalizedHashPath)) return { environmentId: '', threadId: '' };
+      routeTarget = matchRouteTarget(normalizedHashPath, hashSearch);
+      if (routeTarget.invalidRoute) return { environmentId: '', threadId: '' };
     }
 
     // 2. Standard browser path routing: http://127.0.0.1:3773/<envId>/<threadId>
-    if (isNonThreadRoutePath(location.pathname)) return '';
-    const fromRoute = matchRouteThreadId(location.pathname, location.search);
-    if (fromRoute) return fromRoute;
-
-    // 3. Fallback to active sidebar thread item
-    const activeEl = findAnchor('activeThreadItem');
-    if (activeEl) {
-      const container = activeEl.closest?.('[data-thread-item]') || activeEl;
-      const attr = normalizeThreadIdCandidate(
-        container.getAttribute?.('data-thread-id') || container.getAttribute?.('data-thread-item')
-      );
-      if (attr) return attr;
-
-      const link = activeEl.tagName === 'A' ? activeEl : (container.querySelector?.('a[href]') || activeEl.closest?.('a[href]'));
-      const href = link?.getAttribute?.('href') || '';
-      if (href) {
-        try {
-          const cleanHref = href.startsWith('#') ? href.slice(1) : href;
-          const u = new URL(cleanHref, 'http://localhost');
-          const fromHref = matchRouteThreadId(u.pathname, u.search);
-          if (fromHref) return fromHref;
-        } catch {}
-      }
+    if (!routeTarget.threadId) {
+      if (isNonThreadRoutePath(location.pathname)) return { environmentId: '', threadId: '' };
+      routeTarget = matchRouteTarget(location.pathname, location.search);
+      if (routeTarget.invalidRoute) return { environmentId: '', threadId: '' };
     }
-    return '';
+
+    // 3. Explicit route environmentId wins; if route only gave threadId, allow active sidebar item
+    //    for the SAME threadId to fill missing environmentId; otherwise fall back to active sidebar item.
+    if (routeTarget.threadId) {
+      if (routeTarget.environmentId) return routeTarget;
+      const sidebarTarget = detectSidebarActiveTarget();
+      if (sidebarTarget.environmentId && sidebarTarget.threadId === routeTarget.threadId) {
+        return { environmentId: sidebarTarget.environmentId, threadId: routeTarget.threadId };
+      }
+      return routeTarget;
+    }
+
+    return detectSidebarActiveTarget();
+  }
+
+  function detectActiveThreadId() {
+    return detectActiveTarget().threadId;
+  }
+
+  function targetKey(target) {
+    const env = String(target?.environmentId || '').trim();
+    const tid = String(target?.threadId || '').trim();
+    return tid ? `${env}::${tid}` : '';
   }
 
   const themeSync = createThemeSynchronizer(selectors.theme);
@@ -826,6 +933,7 @@
   let disposed = false;
   let lastLive = null;
   let lastLiveThreadId = '';
+  let lastLiveTargetKey = '';
   let lastSettings = null;
   let settingsRevision = 0;
   let lastTodayUsage = null;
@@ -836,8 +944,37 @@
   let dismissedAppUpdateVer = '';
   try { dismissedRuntimeUpdateSig = localStorage.getItem('t3tools.dismissedRuntimeUpdateSig') || ''; } catch {}
   try { dismissedAppUpdateVer = localStorage.getItem('t3tools.dismissedAppUpdateVer') || ''; } catch {}
-  let activeThreadId = detectActiveThreadId();
+  let activeTarget = detectActiveTarget();
+  let activeThreadId = activeTarget.threadId;
   let lastRouteHref = String(location.href || '');
+  let remoteBridgeUi = { parsedPreview: null, previewError: '', allowLoopbackTunnel: false, peerTestStatus: {}, serverDirty: false };
+  let bridgeParseTimer = null;
+  let bridgeParseSeq = 0;
+
+  function isBridgeSettingsProtected() {
+    if (!dashboardOpen || dashState.tab !== 'settings') return false;
+    if (remoteBridgeUi.serverDirty) return true;
+    const activeEl = overlayMount?.shadow?.activeElement;
+    const bridgeCard = overlayMount?.contentEl?.querySelector('[data-pt-remote-bridge-card]');
+    return Boolean(activeEl && bridgeCard?.contains?.(activeEl) && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'SELECT'));
+  }
+
+  function validateBridgePortInput(rawVal) {
+    const text = String(rawVal ?? '').trim();
+    if (!/^\d+$/.test(text)) return { ok: false, error: '监听端口必须为 1024–65535 的整数' };
+    const n = Number(text);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) return { ok: false, error: '监听端口必须为 1024–65535 的整数' };
+    return { ok: true, value: n };
+  }
+
+  function formatUpsertPeerToast(saved) {
+    if (saved?.verified) return '已添加并验证远端电脑';
+    const st = String(saved?.verifyStatus || 'offline');
+    if (['unauthorized', 'identityMismatch', 'incompatible'].includes(st)) {
+      return `已保存节点，但校验未通过：${formatRemoteBridgeErrorMessage(st)}（已暂停自动轮询，修复后请点击“测试”）`;
+    }
+    return '已保存远端电脑（当前离线，待对方上线后自动连通）';
+  }
 
   let lastDash = null;
   let lastStatus = null;
@@ -1290,21 +1427,34 @@
     navigateToT3Settings('/settings/providers');
   }
 
-  function hasMatchingLiveForThread(live, threadId) {
+  function doesLiveMatchTarget(live, target) {
+    const reqKey = targetKey(target);
+    if (!reqKey || !live || lastLiveTargetKey !== reqKey) return false;
+    if (live.target) {
+      if (String(live.target.threadId || '') !== target.threadId) return false;
+      if (target.environmentId && String(live.target.environmentId || '') !== target.environmentId) return false;
+      return true;
+    }
+    const liveThreadId = String(live?.thread?.threadId || live?.thread?.requestedThreadId || '');
+    return !liveThreadId || liveThreadId === target.threadId;
+  }
+
+  function hasMatchingLiveForTarget(live, target) {
     return Boolean(
-      threadId &&
-      live &&
+      doesLiveMatchTarget(live, target) &&
       !live?.thread?.unresolved &&
-      live?.thread?.threadId === threadId &&
-      lastLiveThreadId === threadId
+      live?.thread?.threadId === target.threadId &&
+      lastLiveThreadId === target.threadId
     );
   }
 
   function renderLiveWidgets() {
-    const currentThreadId = detectActiveThreadId();
+    const currentTarget = detectActiveTarget();
+    const currentThreadId = currentTarget.threadId;
     const cfg = lastSettings || lastLive?.settings || {};
-    const matched = hasMatchingLiveForThread(lastLive, currentThreadId);
-    const effectiveLive = matched
+    const targetMatched = doesLiveMatchTarget(lastLive, currentTarget);
+    const resolvedMatched = hasMatchingLiveForTarget(lastLive, currentTarget);
+    const effectiveLive = targetMatched
       ? lastLive
       : (lastLive && !currentThreadId && lastLive?.thread?.unresolved
           ? lastLive
@@ -1316,11 +1466,12 @@
                 steps: []
               },
               context: null,
-              quotas: { groups: [] }
+              quotas: { groups: [] },
+              remote: null
             });
 
     if (composerMount) {
-      const hidden = cfg.enabled === false || cfg.showComposerBar === false || !matched;
+      const hidden = cfg.enabled === false || cfg.showComposerBar === false || !resolvedMatched;
       const isInline = composerMountMode === 'footer-inline';
       const nextDisplay = hidden ? 'none' : (isInline ? 'inline-flex' : 'block');
       if (composerMount.host.style.display !== nextDisplay) {
@@ -1386,7 +1537,7 @@
     else lastStatus = { appUpdate: nextUpd };
     syncAppUpdatePoll(nextUpd);
     renderSidebarWidget();
-    if (dashboardOpen) renderDashboardOverlay();
+    if (dashboardOpen && !isBridgeSettingsProtected()) renderDashboardOverlay();
   }
 
   async function fetchOverlayStatus({ fresh = false } = {}) {
@@ -1414,7 +1565,7 @@
       if (dashboardOpen) {
         const activeEl = overlayMount?.shadow?.activeElement;
         const editingSyncInput = dashState.tab === 'settings' && activeEl && activeEl.tagName === 'INPUT' && activeEl.type === 'text' && activeEl.dataset?.syncSetting;
-        if (!editingSyncInput) renderDashboardOverlay();
+        if (!editingSyncInput && !isBridgeSettingsProtected()) renderDashboardOverlay();
       }
     } catch {}
   }
@@ -1466,6 +1617,7 @@
       sideCollapsed: dashSideCollapsed,
       statusData: effectiveStatus,
       fallbackSettings: lastSettings || lastLive?.settings,
+      remoteBridgeUi,
       dismissedAppUpdateVer,
       loading: dashLoading,
       error: dashError,
@@ -1556,6 +1708,15 @@
       renderDashboardOverlay({ resetScroll: true });
       fetchOverlayStatus({ fresh: true });
       if (!lastDash) refreshDashboard({ force: false });
+    } else if (action === 'open-remote-bridge-settings') {
+      dashState.tab = 'settings';
+      dashboardOpen = true;
+      renderDashboardOverlay({ resetScroll: true });
+      fetchOverlayStatus({ fresh: true });
+      if (!lastDash) refreshDashboard({ force: false });
+      setTimeout(() => {
+        overlayMount?.contentEl?.querySelector('#settings-remote-bridge-anchor')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+      }, 40);
     } else if (action === 'open-quotas') {
       dashState.tab = 'quotas';
       dashboardOpen = true;
@@ -1708,6 +1869,62 @@
       });
       return;
     }
+    const bridgeCandEl = target.closest?.('[data-pt-bridge-candidate]');
+    if (bridgeCandEl) {
+      const ip = bridgeCandEl.getAttribute('data-pt-bridge-candidate') || '';
+      if (ip) {
+        try {
+          const updated = await callRpc('updateSettings', { remoteBridge: { server: { bindMode: 'custom', bindHost: ip } } });
+          if (updated) {
+            settingsRevision++;
+            lastSettings = updated;
+            if (lastLive) lastLive.settings = updated;
+            if (lastStatus) lastStatus.settings = updated;
+          }
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          showOverlayToast('已选择监听地址 ' + ip);
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+      }
+      return;
+    }
+    const bridgeTestPeerEl = target.closest?.('[data-pt-bridge-test-peer]');
+    if (bridgeTestPeerEl) {
+      const peerId = bridgeTestPeerEl.getAttribute('data-pt-bridge-test-peer') || '';
+      if (peerId) {
+        showOverlayToast('正在测试远端连接...');
+        try {
+          const res = await callRpc('testRemoteBridgePeer', { peerId });
+          remoteBridgeUi.peerTestStatus[peerId] = res?.verified ? 'verified' : (res?.status || 'offline');
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          pollLive({ force: true });
+          showOverlayToast(res?.verified ? '连接正常，身份校验通过' : formatRemoteBridgeErrorMessage(res?.status || 'offline'));
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+      }
+      return;
+    }
+    const bridgeRemovePeerEl = target.closest?.('[data-pt-bridge-remove-peer]');
+    if (bridgeRemovePeerEl) {
+      const peerId = bridgeRemovePeerEl.getAttribute('data-pt-bridge-remove-peer') || '';
+      if (peerId && window.confirm('将移除该远端配对节点及其凭据，是否继续？')) {
+        try {
+          await callRpc('removeRemoteBridgePeer', { peerId });
+          delete remoteBridgeUi.peerTestStatus[peerId];
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          pollLive({ force: true });
+          showOverlayToast('已移除远端节点');
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+      }
+      return;
+    }
     const suggestEl = target.closest?.('[data-pt-sync-suggest]');
     if (suggestEl) {
       const suggestedDir = suggestEl.getAttribute('data-pt-sync-suggest') || '';
@@ -1745,6 +1962,113 @@
           setTimeout(() => positionSegsThumb(overlayMount?.contentEl, { animate: false }), 200);
         } else {
           renderDashboardOverlay();
+        }
+        return;
+      }
+      if (action === 'save-bridge-server') {
+        const card = overlayMount?.contentEl?.querySelector('[data-pt-remote-bridge-card]');
+        const portInput = card?.querySelector('[data-bridge-server="port"]');
+        const bindModeEl = card?.querySelector('[data-bridge-server="bindMode"]');
+        const bindHostInput = card?.querySelector('[data-bridge-server="bindHost"]');
+        const advInput = card?.querySelector('[data-bridge-server="advertiseUrl"]');
+        const labelInput = card?.querySelector('[data-bridge-server="machineLabel"]');
+        const patch = {};
+        if (portInput) {
+          const check = validateBridgePortInput(portInput.value);
+          if (!check.ok) { showOverlayToast(check.error); return; }
+          patch.port = check.value;
+        }
+        if (bindModeEl) patch.bindMode = bindModeEl.value;
+        if (bindHostInput) patch.bindHost = bindHostInput.value.trim();
+        if (advInput) patch.advertiseUrl = advInput.value.trim();
+        if (labelInput) patch.machineLabel = labelInput.value.trim();
+        try {
+          const updated = await callRpc('updateSettings', { remoteBridge: { server: patch } });
+          remoteBridgeUi.serverDirty = false;
+          if (updated) {
+            settingsRevision++;
+            lastSettings = updated;
+            if (lastLive) lastLive.settings = updated;
+            if (lastStatus) lastStatus.settings = updated;
+          }
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          showOverlayToast('桥接监听配置已保存');
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+        return;
+      }
+      if (action === 'reset-bridge-server') {
+        remoteBridgeUi.serverDirty = false;
+        renderDashboardOverlay();
+        showOverlayToast('已还原未保存的监听配置');
+        return;
+      }
+      if (action === 'copy-bridge-pairing-code') {
+        if (!e.isTrusted) return;
+        try {
+          const res = await callRpc('getRemoteBridgePairingCode', {});
+          if (!res?.code) throw new Error('serverUnavailable');
+          if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+            await navigator.clipboard.writeText(res.code);
+            showOverlayToast('已复制本机配对码到剪贴板（请仅粘贴给信任的另一台电脑）');
+          } else {
+            showOverlayToast('当前环境不支持剪贴板写入，请在独立窗口中复制');
+          }
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+        return;
+      }
+      if (action === 'rotate-bridge-token') {
+        if (!window.confirm('重置后，所有使用旧配对码的远端电脑都将立即失效并需要重新配对，是否继续？')) return;
+        try {
+          await callRpc('rotateRemoteBridgeToken', {});
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          showOverlayToast('本机只读令牌已重置');
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+        return;
+      }
+      if (action === 'open-standalone-bridge-settings') {
+        if (!e.isTrusted) return;
+        window.open(`${apiBase}/?view=settings`, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      if (action === 'prompt-test-bridge-peer') {
+        if (!e.isTrusted) return;
+        const code = String(window.prompt('请粘贴远端配对码（t3bridge://v1/...）以测试连接：', '') || '').trim();
+        if (!code) return;
+        showOverlayToast('正在测试远端连接...');
+        try {
+          const res = await callRpc('testRemoteBridgePeer', { code, allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel) });
+          showOverlayToast(res?.verified ? '连接正常，可以点击“输入配对码添加节点”保存' : formatRemoteBridgeErrorMessage(res?.status || 'offline'));
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+        return;
+      }
+      if (action === 'prompt-add-bridge-peer') {
+        if (!e.isTrusted) return;
+        const code = String(window.prompt('请粘贴远端配对码（t3bridge://v1/...）：', '') || '').trim();
+        if (!code) return;
+        showOverlayToast('正在校验并保存远端节点...');
+        try {
+          const saved = await callRpc('upsertRemoteBridgePeer', {
+            code,
+            allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel),
+            verify: true
+          });
+          if (saved?.id) remoteBridgeUi.peerTestStatus[saved.id] = saved.verifyStatus || (saved.verified ? 'verified' : 'offline');
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          pollLive({ force: true });
+          showOverlayToast(formatUpsertPeerToast(saved));
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
         }
         return;
       }
@@ -1996,6 +2320,48 @@
 
   async function onDashboardChange(e) {
     const target = e.target;
+    if (target?.dataset?.bridgeServer) {
+      const key = target.dataset.bridgeServer;
+      if (key === 'enabled' || key === 'bindMode') {
+        const value = key === 'enabled' ? Boolean(target.checked) : target.value;
+        try {
+          const updated = await callRpc('updateSettings', { remoteBridge: { server: { [key]: value } } });
+          remoteBridgeUi.serverDirty = false;
+          if (updated) {
+            settingsRevision++;
+            lastSettings = updated;
+            if (lastLive) lastLive.settings = updated;
+            if (lastStatus) lastStatus.settings = updated;
+          }
+          await fetchOverlayStatus({ fresh: false });
+          renderDashboardOverlay();
+          showOverlayToast(key === 'enabled' ? (value ? '已开启本机只读共享' : '已关闭本机只读共享') : '监听方式已更新');
+        } catch (err) {
+          showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+          renderDashboardOverlay();
+        }
+      }
+      return;
+    }
+    if (target?.dataset?.bridgePeerToggle) {
+      const peerId = target.dataset.bridgePeerToggle;
+      const enabled = Boolean(target.checked);
+      try {
+        await callRpc('toggleRemoteBridgePeer', { peerId, enabled });
+        await fetchOverlayStatus({ fresh: false });
+        renderDashboardOverlay();
+        pollLive({ force: true });
+        showOverlayToast(enabled ? '已启用远端节点' : '已停用远端节点');
+      } catch (err) {
+        showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        renderDashboardOverlay();
+      }
+      return;
+    }
+    if (target?.dataset?.bridgeLoopback) {
+      remoteBridgeUi.allowLoopbackTunnel = Boolean(target.checked);
+      return;
+    }
     if (target?.dataset?.privacySetting) {
       const key = target.dataset.privacySetting;
       const value = Boolean(target.checked);
@@ -2129,7 +2495,26 @@
   }
 
   let searchTimer = null;
+  function updateEmbeddedBridgePreviewDom() {
+    const slot = overlayMount?.contentEl?.querySelector('[data-pt-remote-bridge-card] [data-bridge-preview-slot]');
+    if (!slot) return;
+    if (remoteBridgeUi.parsedPreview) {
+      const p = remoteBridgeUi.parsedPreview;
+      slot.innerHTML = `<div style="margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));font-size:11.5px;display:flex;flex-direction:column;gap:2px;"><div><strong>离线解析结果：</strong>${esc(p.label || '未命名电脑')}</div><div class="pt-muted pt-mono" style="font-size:11px;">环境 ${esc(p.environmentId)} · 地址 ${esc(p.url)}</div></div>`;
+    } else if (remoteBridgeUi.previewError) {
+      slot.innerHTML = `<div class="pt-text-danger" style="font-size:11px;margin-top:4px;">${esc(remoteBridgeUi.previewError)}</div>`;
+    } else {
+      slot.innerHTML = '';
+    }
+  }
   function onDashboardInput(e) {
+    const bridgeSrvInput = e.target.closest?.('[data-bridge-server]');
+    if (bridgeSrvInput && ['port', 'bindHost', 'advertiseUrl', 'machineLabel'].includes(bridgeSrvInput.dataset?.bridgeServer)) {
+      remoteBridgeUi.serverDirty = true;
+      const resetBtn = overlayMount?.contentEl?.querySelector('[data-bridge-reset-btn]');
+      if (resetBtn) resetBtn.style.display = '';
+      return;
+    }
     const el = e.target.closest?.('[data-pt-filter="session"]');
     if (!el) return;
     dashState.session = el.value;
@@ -2146,24 +2531,28 @@
   function syncActiveThread({ triggerPoll = true } = {}) {
     if (disposed) return false;
     const nextHref = String(location.href || '');
-    const nextThreadId = detectActiveThreadId();
+    const nextTarget = detectActiveTarget();
+    const nextKey = targetKey(nextTarget);
+    const prevKey = targetKey(activeTarget);
     const hrefChanged = nextHref !== lastRouteHref;
-    const threadChanged = nextThreadId !== activeThreadId;
-    if (!hrefChanged && !threadChanged) return false;
+    const targetChanged = nextKey !== prevKey;
+    if (!hrefChanged && !targetChanged) return false;
     lastRouteHref = nextHref;
-    activeThreadId = nextThreadId;
-    if (threadChanged) {
-      // Immediately drop stale snapshot so old TPS/TTFT/cache/context never leak into the new conversation
-      if (lastLiveThreadId !== nextThreadId) {
+    activeTarget = nextTarget;
+    activeThreadId = nextTarget.threadId;
+    if (targetChanged) {
+      // Immediately drop stale snapshot so old TPS/TTFT/cache/context never leak across threads or machines
+      if (lastLiveTargetKey !== nextKey) {
         lastLive = null;
         lastLiveThreadId = '';
+        lastLiveTargetKey = '';
       }
       renderLiveWidgets();
       if (triggerPoll) {
         pollLive({ force: true });
       }
     }
-    return threadChanged;
+    return targetChanged;
   }
 
   async function pollLive({ force = false } = {}) {
@@ -2175,14 +2564,16 @@
     inFlightPolls++;
     try {
       ensureMounts();
-      const threadId = detectActiveThreadId();
-      activeThreadId = threadId;
+      const target = detectActiveTarget();
+      const reqKey = targetKey(target);
+      activeTarget = target;
+      activeThreadId = target.threadId;
       lastRouteHref = String(location.href || '');
-      const live = await callRpc('getLive', { threadId });
+      const live = await callRpc('getLive', { threadId: target.threadId, environmentId: target.environmentId });
       // Discard delayed responses if a newer request was issued
       if (disposed || reqSeq !== liveRequestSeq) return;
-      // If user navigated to another thread while this request was in flight, immediately refetch the new thread
-      if (detectActiveThreadId() !== threadId) {
+      // If user navigated to another thread/environment while this request was in flight, immediately refetch
+      if (targetKey(detectActiveTarget()) !== reqKey) {
         syncActiveThread({ triggerPoll: true });
         return;
       }
@@ -2205,7 +2596,7 @@
       else if (live && lastLive?.globalAlerts) live.globalAlerts = lastLive.globalAlerts;
       if (dashboardOpen && alertsChanged) {
         if (dashState.tab === 'models') refreshDashboard();
-        else renderDashboardOverlay();
+        else if (!isBridgeSettingsProtected()) renderDashboardOverlay();
       }
       if (live?.todayUsage) lastTodayUsage = live.todayUsage;
       if (live?.sidebarUsage) lastSidebarUsage = live.sidebarUsage;
@@ -2224,23 +2615,26 @@
         lastAppUpdate = nextUpd;
         if (lastStatus) lastStatus = { ...lastStatus, appUpdate: nextUpd };
         syncAppUpdatePoll(nextUpd);
-        if (dashboardOpen && updChanged) renderDashboardOverlay();
+        if (dashboardOpen && updChanged && !isBridgeSettingsProtected()) renderDashboardOverlay();
       }
       lastLive = live;
+      lastLiveTargetKey = reqKey;
       lastLiveThreadId = (!live?.thread?.unresolved && live?.thread?.threadId) ? String(live.thread.threadId) : '';
       renderLiveWidgets();
     } catch {
       if (disposed || reqSeq !== liveRequestSeq) return;
       renderSidebarWidget();
-      const nowThreadId = detectActiveThreadId();
-      if (nowThreadId !== activeThreadId) {
+      const nowTarget = detectActiveTarget();
+      const nowKey = targetKey(nowTarget);
+      if (nowKey !== targetKey(activeTarget)) {
         syncActiveThread({ triggerPoll: true });
         return;
       }
-      // Clear stale snapshot on daemon disconnect/timeout or when switching to a thread that fails to load
-      if (transportState === 'disconnected' || lastLiveThreadId !== nowThreadId) {
+      // Clear stale snapshot on daemon disconnect/timeout or when switching to a target that fails to load
+      if (transportState === 'disconnected' || lastLiveTargetKey !== nowKey) {
         lastLive = null;
         lastLiveThreadId = '';
+        lastLiveTargetKey = '';
         renderLiveWidgets();
       }
     } finally {
@@ -2334,9 +2728,12 @@
       for (const key of Object.keys(selectors.anchors || {})) {
         report[key] = Boolean(findAnchor(key));
       }
+      const t = detectActiveTarget();
       return {
-        threadId: detectActiveThreadId(),
+        threadId: t.threadId,
+        environmentId: t.environmentId,
         lastLiveThreadId,
+        lastLiveTargetKey,
         anchors: report,
         overviewLayout: { ...lastLayoutDebug }
       };
@@ -2347,13 +2744,17 @@
       dashboardOpen = false;
       dashRequestSeq++;
       liveRequestSeq++;
+      bridgeParseSeq++;
       lastLive = null;
       lastLiveThreadId = '';
+      lastLiveTargetKey = '';
       closePtPopMenu();
       clearTimeout(pollTimer);
       clearTimeout(appUpdatePollTimer);
       appUpdatePollTimer = null;
       clearTimeout(searchTimer);
+      clearTimeout(bridgeParseTimer);
+      bridgeParseTimer = null;
       clearTimeout(overlayToastTimer);
       clearTimeout(layoutRecheckTimer);
       layoutRecheckTimer = null;

@@ -1,3 +1,5 @@
+import { createRemoteBridge } from './remote-bridge.mjs';
+import { isValidEnvironmentId } from './remote-bridge-protocol.mjs';
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { resolvePaths } from '../core/paths.mjs';
@@ -245,8 +247,9 @@ export async function startDaemon({
   const startedAtMs = Date.now();
   let cdpHost = null;
   let boundPort = port;
-  let activeCdpThreadId = '';
-  let activeCdpThreadAtMs = 0;
+  let activeTarget = null;
+  const remoteBridge = createRemoteBridge({paths:ctx.paths, settings:ctx.settings, engine:ctx.engine,
+    version:PLUGIN_VERSION, getLocalPort:()=>boundPort});
   const ACTIVE_CDP_THREAD_TTL_MS = 30000;
   let privacyApplySeq = 0;
   let privacyApplyPending = false;
@@ -316,10 +319,21 @@ export async function startDaemon({
     return activeRelaunchPromise;
   }
 
-  function getActiveCdpThreadId(now = Date.now()) {
-    if (!activeCdpThreadId) return '';
-    if (now - activeCdpThreadAtMs > ACTIVE_CDP_THREAD_TTL_MS) return '';
-    return activeCdpThreadId;
+  async function resolveLiveTargetSnapshot({environmentId = '', threadId = '', allowFallback = true, cdp = false}) {
+    if (cdp) activeTarget = {environmentId,threadId,updatedAtMs:Date.now()};
+    else if (!threadId && !environmentId && allowFallback && activeTarget?.threadId && Date.now()-activeTarget.updatedAtMs <= ACTIVE_CDP_THREAD_TTL_MS) {
+      ({environmentId,threadId} = activeTarget);
+      allowFallback = false;
+    }
+    const local = remoteBridge.localEnvironmentId();
+    if (environmentId && environmentId !== local) {
+      if (local) return remoteBridge.fetchRemoteLive(environmentId,threadId);
+      const record = ctx.t3State.readThreadIndex().threadsById.get(threadId);
+      if (!isValidEnvironmentId(environmentId) || !record || record.hasEnvironmentIdColumn !== true || record.environmentId !== environmentId) return remoteBridge.fetchRemoteLive(environmentId,threadId,'localEnvUnknown');
+      allowFallback = false;
+    }
+    const snapshot = ctx.engine.getLiveThreadSnapshot(threadId,{allowFallback});
+    return {...snapshot,target:{environmentId:environmentId || local,threadId:snapshot.thread?.threadId || threadId},remote:null};
   }
 
   function getDaemonStatus({ fresh = false } = {}) {
@@ -343,6 +357,7 @@ export async function startDaemon({
       todayUsage: ctx.engine.getTodayUsageSummary(now),
       sidebarUsage: ctx.engine.getSidebarUsageSummary(now, { preset: settings.sidebarUsageRange }),
       settings,
+      remoteBridge: remoteBridge.getStatus(),
       diagnostics: {
         antigravity: ctx.antigravityAdapter.getDiagnostics(),
         codex: ctx.codexAdapter.getDiagnostics()
@@ -356,7 +371,24 @@ export async function startDaemon({
   }
 
   async function handleRpc(action, params = {}) {
+    const result = await dispatchRpc(action, params);
+    if (action === 'getRemoteBridgePairingCode') return result;
+    return remoteBridge.publicData(result);
+  }
+
+  async function dispatchRpc(action, params = {}) {
+    if (['focusThread','resolveErrors','ackErrors'].includes(action) && params.environmentId && params.environmentId !== remoteBridge.localEnvironmentId()) {
+      return {ok:false,reason:'Remote target is read-only'};
+    }
     switch (action) {
+      case 'getRemoteBridgePairingCode':
+      case 'rotateRemoteBridgeToken':
+      case 'parseRemoteBridgePairingCode':
+      case 'testRemoteBridgePeer':
+      case 'upsertRemoteBridgePeer':
+      case 'removeRemoteBridgePeer':
+      case 'toggleRemoteBridgePeer':
+        return remoteBridge.manage(action,params);
       case 'ackErrors': return ctx.engine.acknowledgeErrors();
       case 'resolveErrors': return ctx.engine.resolveErrors(params || {});
       case 'testAlert': return ctx.engine.testAlert();
@@ -366,10 +398,8 @@ export async function startDaemon({
       case 'getLive': {
         // Desktop CDP client passes allowFallback: false so unresolved routes never display another thread (fixes P1 #2)
         const reqThreadId = String(params.threadId || '').trim();
-        activeCdpThreadId = reqThreadId;
-        activeCdpThreadAtMs = Date.now();
         return {
-          ...ctx.engine.getLiveThreadSnapshot(reqThreadId, { allowFallback: false }),
+          ...await resolveLiveTargetSnapshot({environmentId:params.environmentId,threadId:reqThreadId,allowFallback:false,cdp:true}),
           appUpdate: appUpdater.getStatus()
         };
       }
@@ -384,7 +414,9 @@ export async function startDaemon({
       case 'getSettings':
         return ctx.settings.get();
       case 'updateSettings': {
+        remoteBridge.validatePublicSettings(params || {});
         const updated = ctx.settings.update(params || {});
+        if (params?.remoteBridge) await remoteBridge.configure();
         if (params?.multiMachineSync) {
           ctx.folderSync.invalidate?.();
           if (updated?.multiMachineSync?.enabled && String(updated?.multiMachineSync?.syncDir || '').trim()) {
@@ -439,7 +471,9 @@ export async function startDaemon({
       const t3Origin = readT3ServerOrigin(ctx.paths.serverRuntimePath);
       return t3Origin ? [t3Origin] : [];
     },
-    getActiveThreadId: () => getActiveCdpThreadId(),
+    resolveLiveTargetSnapshot,
+    redactBridgeText: remoteBridge.redactText,
+    validatePublicSettings: remoteBridge.validatePublicSettings,
     handleRpc,
     engine: ctx.engine,
     settings: ctx.settings,
@@ -449,6 +483,7 @@ export async function startDaemon({
     buildClientBundle: opts => buildClientBundle({ ...opts, version: PLUGIN_VERSION }),
     buildFallbackHtml: opts => buildFallbackHtml({ ...opts, version: PLUGIN_VERSION }),
     onSettingsUpdated: async (updated, patch) => {
+      if (patch?.remoteBridge) await remoteBridge.configure();
       if (cdpHost && Object.prototype.hasOwnProperty.call(patch || {}, 'autoAttachT3')) {
         await cdpHost.setEnabled(Boolean(updated.autoAttachT3));
       }
@@ -513,6 +548,7 @@ export async function startDaemon({
   try {
     const bound = await httpServer.listen();
     boundPort = bound.port;
+    await remoteBridge.configure();
 
     if (enableCdp) {
       cdpHost = createCdpHost({
@@ -633,6 +669,7 @@ export async function startDaemon({
     }
     try { await privacyGuard.stopAndDrain(3000); } catch (err) { console.error('[daemon] privacyGuard drain failed', err); }
     try { await cdpHost?.stop(); } catch (err) { console.error('[daemon] CDP shutdown failed', err); }
+    await remoteBridge.stop();
     try { await httpServer.close(); } catch (err) { console.error('[daemon] HTTP shutdown failed', err); }
     try { await ctx.folderSync.whenIdle?.(1500); } catch (err) { console.error('[daemon] folderSync shutdown failed', err); }
     try { ctx.close(); } catch (err) { console.error('[daemon] store shutdown failed', err); }
@@ -677,6 +714,7 @@ export async function startDaemon({
     httpServer,
     appUpdater,
     privacyGuard,
+    handleRpc,
     getStatus: getDaemonStatus,
     stop
   };

@@ -464,9 +464,8 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
    * Uses indexed DB lookup instead of loading full history (fixes P2 #15).
    * Respects `allowFallback: false` for desktop injected client (fixes P1 #2).
    */
-  function getLiveThreadSnapshot(requestedThreadId = '', { now = Date.now(), allowFallback = true } = {}) {
+  function readThreadSnapshot(requestedThreadId, { now, allowFallback }) {
     syncAll();
-    const cfg = settings.get();
     const execution = t3State.readThreadExecution(requestedThreadId, now, { allowFallback });
     const quotas = quotaAdapter.readAllQuotas(now);
 
@@ -593,6 +592,16 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       ? (store.listThreadIncidents?.(execution.threadId, (execution.natives || []).map(n => n.nativeSessionId), now - 1800000) || [])
           .map(r => ({ ...r, resolved: isErrorResolved(r, ackTsMs, resolvedState) }))
       : [];
+    return {updatedAtMs: now, thread: execution, context: liveContext, quotas, threadErrors,
+      dbUnavailable: Boolean(execution?.dbUnavailable || (!execution && requestedThreadId && !allowFallback))};
+  }
+
+  function getLocalCommonShell({ now = Date.now(), execution = null, quotas } = {}) {
+    if (!quotas) {
+      syncAll();
+      quotas = quotaAdapter.readAllQuotas(now);
+    }
+    const cfg = settings.get();
     const threadResolvedTs = execution?.threadId ? (resolvedSessions.get(execution.threadId) || 0) : 0;
     const currentUnread = execution?.threadId && !execution.unresolved
       ? store.countThreadUnread?.(execution.threadId, Math.max(ackTsMs, threadResolvedTs, new Date(now).setHours(0, 0, 0, 0) - 1)) || 0 : 0;
@@ -603,14 +612,19 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
       updatedAtMs: now,
       settings: cfg,
       globalAlerts: { ...counts, otherUnreadCount: Math.max(0, counts.unreadCount - currentUnread), latestAlert: monitor.snapshot().latestAlert },
-      threadErrors,
-      thread: execution,
-      context: liveContext,
-      quotas,
       todayUsage,
       sidebarUsage,
       runtimeUpdates
     };
+  }
+
+  function getExactLocalThreadSnapshot(threadId, {now = Date.now()} = {}) {
+    return readThreadSnapshot(threadId, {now, allowFallback: false});
+  }
+
+  function getLiveThreadSnapshot(threadId = '', {now = Date.now(), allowFallback = true} = {}) {
+    const {dbUnavailable, ...exact} = readThreadSnapshot(threadId, {now, allowFallback});
+    return {...getLocalCommonShell({now, execution: exact.thread, quotas: exact.quotas}), ...exact};
   }
 
   /**
@@ -791,6 +805,8 @@ export function createAnalyticsEngine({ store, settings, t3State, antigravityAda
     getRuntimeUpdates,
     checkRuntimeUpdates,
     getLiveThreadSnapshot,
+    getExactLocalThreadSnapshot,
+    getLocalCommonShell,
     exportRequestsCsv: (query, options) => getDashboardData(query, { ...options, csvOnly: true }),
     getDashboardData
   };

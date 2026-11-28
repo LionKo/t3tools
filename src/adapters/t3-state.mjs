@@ -260,6 +260,7 @@ export function createT3StateAdapter(paths) {
     if (cachedIndex && cachedIndexStamp === stamp) return cachedIndex;
 
     const emptyIndex = () => ({
+      dbUnavailable: true,
       threadsById: new Map(),
       nativeToThread: new Map(),
       threadToNatives: new Map(),
@@ -291,6 +292,7 @@ export function createT3StateAdapter(paths) {
               threadId: r.thread_id,
               title: r.title || '未命名会话',
               environmentId: r.environment_id, projectId: r.project_id,
+              hasEnvironmentIdColumn: cols.has('environment_id'),
               defaultProvider: r.default_provider || '',
               providerInstanceId: r.provider_instance_id || r.default_provider || '',
               updatedAtMs: isoToMs(r.updated_at) || 0,
@@ -389,7 +391,7 @@ export function createT3StateAdapter(paths) {
         }
         if (!latestThreadId) latestThreadId = threadsById.keys().next().value || null;
 
-        return { threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId, recentThreads };
+        return { dbUnavailable: !tables.has('orchestration_v2_projection_threads'), threadsById, nativeToThread, threadToNatives, providerThreadToNative, latestThreadId, recentThreads };
       });
 
       if (!result) {
@@ -399,7 +401,7 @@ export function createT3StateAdapter(paths) {
       cachedIndexStamp = stamp;
       return cachedIndex;
     } catch {
-      return cachedIndex || emptyIndex();
+      return { ...(cachedIndex || emptyIndex()), dbUnavailable: true };
     }
   }
 
@@ -413,6 +415,7 @@ export function createT3StateAdapter(paths) {
     const index = readThreadIndex();
     const trimmedReq = String(requestedThreadId || '').trim();
     let threadId = '';
+    if (!allowFallback && index.dbUnavailable) return {unresolved:true, dbUnavailable:true, reason:'打开会话后显示', requestedThreadId:trimmedReq, recentThreads:index.recentThreads};
 
     if (trimmedReq) {
       if (index.threadsById.has(trimmedReq)) {

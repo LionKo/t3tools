@@ -2,10 +2,35 @@ import http from 'node:http';
 import { URL } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
+const bridgeActions = {
+  '/api/remote-bridge/pairing-code':'getRemoteBridgePairingCode',
+  '/api/remote-bridge/rotate-token':'rotateRemoteBridgeToken',
+  '/api/remote-bridge/parse-code':'parseRemoteBridgePairingCode',
+  '/api/remote-bridge/test-peer':'testRemoteBridgePeer',
+  '/api/remote-bridge/peers/upsert':'upsertRemoteBridgePeer',
+  '/api/remote-bridge/peers/remove':'removeRemoteBridgePeer',
+  '/api/remote-bridge/peers/toggle':'toggleRemoteBridgePeer'
+};
+
+const ALLOWED_BRIDGE_ERROR_CODES = new Set([
+  'serverUnavailable',
+  'Invalid pairing code',
+  'Invalid bridge configuration',
+  'identityMismatch',
+  'invalidAddress',
+  'unauthorized',
+  'incompatible',
+  'offline',
+  'unpaired',
+  'disabled',
+  'reconfigured',
+  'secretStoreUnavailable'
+]);
+
 const MAX_BODY_BYTES = 64 * 1024;
 
-function sendJson(res, status, payload) {
-  const body = JSON.stringify(payload);
+function sendJson(res, status, payload, redact = value => value) {
+  const body = redact(JSON.stringify(payload));
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
@@ -73,6 +98,11 @@ export function createHttpServer({
   authToken = randomBytes(24).toString('hex'),
   getAllowedOrigins = () => [],
   getActiveThreadId = () => '',
+  resolveLiveTargetSnapshot = ({threadId,allowFallback}) => engine.getLiveThreadSnapshot(
+    threadId || (allowFallback ? getActiveThreadId() : ''), {allowFallback}
+  ),
+  redactBridgeText = value => value,
+  validatePublicSettings = () => {},
   engine,
   settings,
   handleRpc,
@@ -114,11 +144,12 @@ export function createHttpServer({
     );
   }
 
+  const json = (res,status,data) => sendJson(res,status,data,redactBridgeText);
   const server = http.createServer(async (req, res) => {
     try {
       // 1. Host header validation (blocks DNS rebinding)
       if (!isValidHost(req.headers.host)) {
-        sendJson(res, 403, { ok: false, error: 'Forbidden Host' });
+        json(res, 403, { ok: false, error: 'Forbidden Host' });
         return;
       }
 
@@ -127,8 +158,9 @@ export function createHttpServer({
       const reqUrl = new URL(req.url || '/', `http://127.0.0.1:${boundPort}`);
       const pathname = reqUrl.pathname;
       if (origin) {
-        if (!allowedOriginSet(pathname === '/api/health').has(origin)) {
-          sendJson(res, 403, { ok: false, error: 'Forbidden Origin' });
+        const localOnlyOrigin = pathname === '/api/health' || pathname === '/' || pathname === '/api/remote-bridge/pairing-code';
+        if (!allowedOriginSet(localOnlyOrigin).has(origin)) {
+          json(res, 403, { ok: false, error: 'Forbidden Origin' });
           return;
         }
         res.setHeader('Access-Control-Allow-Origin', origin);
@@ -144,7 +176,7 @@ export function createHttpServer({
       }
 
       if (req.method === 'GET' && pathname === '/api/health') {
-        sendJson(res, 200, { ok: true, data: getHealth() });
+        json(res, 200, { ok: true, data: getHealth() });
         return;
       }
 
@@ -161,24 +193,23 @@ export function createHttpServer({
 
       if (req.method === 'GET' && pathname === '/api/status') {
         const fresh = reqUrl.searchParams.get('fresh') === '1';
-        sendJson(res, 200, { ok: true, data: getDaemonStatus({ fresh }) });
+        json(res, 200, { ok: true, data: getDaemonStatus({ fresh }) });
         return;
       }
 
       if (req.method === 'GET' && pathname === '/api/live') {
         const requestedThreadId = reqUrl.searchParams.get('threadId') || '';
         const allowFallback = reqUrl.searchParams.get('allowFallback') !== '0';
-        const threadId = requestedThreadId || (allowFallback ? (getActiveThreadId() || '') : '');
-        const data = engine.getLiveThreadSnapshot(threadId, { allowFallback });
+        const data = await resolveLiveTargetSnapshot({threadId:requestedThreadId,environmentId:reqUrl.searchParams.get('environmentId') || '',allowFallback});
         if (typeof getAppUpdate === 'function') data.appUpdate = getAppUpdate();
-        sendJson(res, 200, { ok: true, data });
+        json(res, 200, { ok: true, data });
         return;
       }
 
       if (req.method === 'GET' && pathname === '/api/requests.csv') {
         const { csv, filename } = engine.exportRequestsCsv(Object.fromEntries(reqUrl.searchParams));
         res.writeHead(200, { 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${filename}"` });
-        res.end(csv);
+        res.end(redactBridgeText(csv));
         return;
       }
 
@@ -186,12 +217,12 @@ export function createHttpServer({
         const query = Object.fromEntries(reqUrl.searchParams.entries());
         // Never trigger forced rescans from GET requests (fixes P1 #5)
         const data = engine.getDashboardData(query, { forceSync: false });
-        sendJson(res, 200, { ok: true, data });
+        json(res, 200, { ok: true, data });
         return;
       }
 
       if (req.method === 'GET' && pathname === '/api/settings') {
-        sendJson(res, 200, { ok: true, data: settings.get() });
+        json(res, 200, { ok: true, data: settings.get() });
         return;
       }
 
@@ -207,6 +238,7 @@ export function createHttpServer({
 
       // Mutating endpoints require per-daemon token + exact application/json media type (fixes P2 #5)
       const mutatingPaths = new Set([
+        ...Object.keys(bridgeActions),
         '/api/settings',
         '/api/errors/ack', '/api/errors/resolve', '/api/t3/focus-thread', '/api/alerts/test',
         '/api/runtime-updates/check',
@@ -226,15 +258,16 @@ export function createHttpServer({
       if (req.method === 'POST' && mutatingPaths.has(pathname)) {
         const token = req.headers['x-t3tools-token'];
         if (!safeTokenMatch(token, authToken)) {
-          sendJson(res, 401, { ok: false, error: 'Unauthorized: missing or invalid X-T3Tools-Token' });
+          json(res, 401, { ok: false, error: 'Unauthorized: missing or invalid X-T3Tools-Token' });
           return;
         }
         const mediaType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
         if (mediaType !== 'application/json') {
-          sendJson(res, 415, { ok: false, error: 'Unsupported Media Type: expected application/json' });
+          json(res, 415, { ok: false, error: 'Unsupported Media Type: expected application/json' });
           return;
         }
         const action = {
+          ...bridgeActions,
           '/api/errors/ack': 'ackErrors',
           '/api/errors/resolve': 'resolveErrors',
           '/api/t3/focus-thread': 'focusThread',
@@ -248,19 +281,35 @@ export function createHttpServer({
         }[pathname];
         if (action) {
           const body = await readJsonBody(req);
-          sendJson(res, 200, { ok: true, data: await handleRpc(action, body) });
+          if (Object.hasOwn(bridgeActions,pathname)) {
+            try {
+              const result = await handleRpc(action,body);
+              if (pathname === '/api/remote-bridge/pairing-code') {
+                sendJson(res, 200, { ok: true, data: result });
+              } else {
+                json(res, 200, { ok: true, data: result });
+              }
+            } catch (bridgeErr) {
+              const code = ALLOWED_BRIDGE_ERROR_CODES.has(bridgeErr?.message) ? bridgeErr.message : 'BRIDGE_ACTION_FAILED';
+              const msg = code === 'BRIDGE_ACTION_FAILED' ? 'Bridge action failed' : code;
+              json(res, 400, { ok: false, code, error: msg });
+            }
+            return;
+          }
+          json(res, 200, { ok: true, data: await handleRpc(action, body) });
           return;
         }
         if (pathname === '/api/settings') {
           const body = await readJsonBody(req);
           try {
+            validatePublicSettings(body);
             const updated = settings.update(body);
             if (typeof onSettingsUpdated === 'function') {
               await onSettingsUpdated(updated, body);
             }
-            sendJson(res, 200, { ok: true, data: updated });
+            json(res, 200, { ok: true, data: updated });
           } catch (validationErr) {
-            sendJson(res, 400, { ok: false, error: validationErr?.message || '配置校验失败' });
+            json(res, 400, { ok: false, error: validationErr?.message || '配置校验失败' });
           }
           return;
         }
@@ -269,46 +318,46 @@ export function createHttpServer({
           const data = typeof handleRpc === 'function'
             ? await handleRpc('forceSync', {})
             : (engine.syncAll({ force: true }), { syncedAtMs: Date.now() });
-          sendJson(res, 200, { ok: true, data });
+          json(res, 200, { ok: true, data });
           return;
         }
         if (pathname === '/api/cdp/reattach') {
           await readJsonBody(req);
           const data = typeof onReattachCdp === 'function' ? await onReattachCdp() : getDaemonStatus().cdp;
-          sendJson(res, 200, { ok: true, data });
+          json(res, 200, { ok: true, data });
           return;
         }
         if (pathname === '/api/cdp/toggle') {
           const body = await readJsonBody(req);
           if (typeof body?.enabled !== 'boolean') {
-            sendJson(res, 400, { ok: false, error: 'enabled 必须为布尔值' });
+            json(res, 400, { ok: false, error: 'enabled 必须为布尔值' });
             return;
           }
           const data = typeof onToggleCdp === 'function' ? await onToggleCdp(body.enabled) : getDaemonStatus().cdp;
-          sendJson(res, 200, { ok: true, data });
+          json(res, 200, { ok: true, data });
           return;
         }
         if (pathname === '/api/launcher/patch-debug') {
           await readJsonBody(req);
           const data = typeof onPatchDebugShortcuts === 'function' ? await onPatchDebugShortcuts() : { ok: false, error: '未启用' };
-          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          json(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
           return;
         }
         if (pathname === '/api/t3/launch') {
           await readJsonBody(req);
           const data = typeof onLaunchT3 === 'function' ? await onLaunchT3() : { ok: false, error: '未启用' };
-          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          json(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
           return;
         }
         if (pathname === '/api/t3/relaunch') {
           await readJsonBody(req);
           const data = typeof onRelaunchT3 === 'function' ? await onRelaunchT3() : { ok: false, error: '未启用' };
-          sendJson(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
+          json(res, data?.ok === false ? 400 : 200, { ok: data?.ok !== false, data, error: data?.error || '' });
           return;
         }
         if (pathname === '/api/shutdown') {
           await readJsonBody(req);
-          sendJson(res, 200, { ok: true, data: { shuttingDown: true } });
+          json(res, 200, { ok: true, data: { shuttingDown: true } });
           if (typeof onShutdown === 'function') {
             setTimeout(() => { onShutdown(); }, 40);
           }
@@ -316,9 +365,9 @@ export function createHttpServer({
         }
       }
 
-      sendJson(res, 404, { ok: false, error: 'Not Found' });
+      json(res, 404, { ok: false, error: 'Not Found' });
     } catch (err) {
-      sendJson(res, [400, 413].includes(err?.statusCode) ? err.statusCode : 500, { ok: false, error: err?.message || 'Internal Server Error' });
+      json(res, [400, 413].includes(err?.statusCode) ? err.statusCode : 500, { ok: false, error: err?.message || 'Internal Server Error' });
     }
   });
 

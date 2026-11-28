@@ -52,6 +52,8 @@ export function resolvePaths(overrides = {}) {
     t3Caches,
     t3ProvidersDir,
     t3AntigravityProvidersDir,
+    environmentIdPath: join(t3UserData, 'environment-id'),
+    remoteBridgeSecretsPath: join(pluginDataDir, 'remote-bridge-secrets.json'),
     stateDbPath: join(t3UserData, 'statev2.sqlite'),
     settingsPath: join(t3UserData, 'settings.json'),
     serverRuntimePath: join(t3UserData, 'server-runtime.json'),

@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileS
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+import { sanitizeBridgeConfig } from '../host/remote-bridge-protocol.mjs';
+
 export const DEFAULT_SETTINGS = {
   enabled: true,
   port: 17373,
@@ -26,6 +28,7 @@ export const DEFAULT_SETTINGS = {
     checkIntervalMinutes: 60,
     skippedVersion: ''
   },
+  remoteBridge: { server: { enabled: false, port: 17374, bindMode: 'tailscale', bindHost: '', advertiseUrl: '', machineLabel: '' }, peers: [] },
   multiMachineSync: {
     enabled: false,
     syncDir: '',
@@ -219,6 +222,7 @@ export function sanitizeSettingsPatch(patch) {
     }
     clean.privacyGuard = cleanPrivacy;
   }
+  if (Object.hasOwn(patch,'remoteBridge')) clean.remoteBridge = sanitizeBridgeConfig(patch.remoteBridge);
   return clean;
 }
 
@@ -241,6 +245,7 @@ function mergeSettings(base, rawPatch) {
   return {
     ...base,
     ...safePatch,
+    remoteBridge: {server: {...base.remoteBridge.server, ...safePatch.remoteBridge?.server}, peers: structuredClone(safePatch.remoteBridge?.peers ?? base.remoteBridge.peers)},
     alertConfig: { ...base.alertConfig, ...safePatch.alertConfig },
     appUpdates: { ...base.appUpdates, ...(safePatch.appUpdates || {}) },
     multiMachineSync: { ...base.multiMachineSync, ...(safePatch.multiMachineSync || {}) },
