@@ -662,6 +662,59 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         }
         return '已保存远端电脑（当前离线，待对方上线后自动连通）';
       }
+      function openStandaloneRenameModal({ currentLabel = '', autoLabel = '' } = {}) {
+        return new Promise(resolve => {
+          document.getElementById('pt-bridge-rename-modal')?.remove();
+          const backdrop = document.createElement('div');
+          backdrop.id = 'pt-bridge-rename-modal';
+          backdrop.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,.56);backdrop-filter:blur(4px);';
+          const box = document.createElement('div');
+          box.style.cssText = 'width:min(440px,100%);border-radius:12px;background:var(--pt-card,#14161b);color:var(--pt-fg,#f3f4f6);border:1px solid var(--pt-border,rgba(255,255,255,.14));box-shadow:var(--pt-shadow,0 14px 36px rgba(0,0,0,.5));padding:16px 18px;display:flex;flex-direction:column;gap:10px;';
+          const title = document.createElement('div');
+          title.style.cssText = 'font-size:14px;font-weight:600;';
+          title.textContent = '修改远端电脑名称';
+          const desc = document.createElement('div');
+          desc.className = 'pt-muted';
+          desc.style.cssText = 'font-size:11.5px;line-height:1.5;';
+          desc.textContent = autoLabel
+            ? ('当前自动识别名称：' + autoLabel + '。可自定义显示名称（最多 64 字），留空保存将恢复自动识别。')
+            : '自定义此远端电脑的显示名称（最多 64 字），留空保存将自动使用 Tailscale / 远端主机名。';
+          const input = document.createElement('input');
+          input.type = 'text';
+          input.className = 'pt-input';
+          input.maxLength = 64;
+          input.value = String(currentLabel || '');
+          input.placeholder = autoLabel ? ('自动：' + autoLabel) : '如：办公室主机 / Knight';
+          const actions = document.createElement('div');
+          actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:4px;';
+          const cancelBtn = document.createElement('button');
+          cancelBtn.type = 'button';
+          cancelBtn.className = 'pt-btn';
+          cancelBtn.textContent = '取消';
+          const saveBtn = document.createElement('button');
+          saveBtn.type = 'button';
+          saveBtn.className = 'pt-btn pt-btn-accent';
+          saveBtn.textContent = '保存名称';
+          actions.append(cancelBtn, saveBtn);
+          box.append(title, desc, input, actions);
+          backdrop.append(box);
+          const done = (val) => {
+            backdrop.remove();
+            resolve(val);
+          };
+          backdrop.addEventListener('click', ev => { if (ev.target === backdrop) done(null); });
+          cancelBtn.addEventListener('click', () => done(null));
+          saveBtn.addEventListener('click', () => done({ submitted: true, label: String(input.value || '').trim() }));
+          input.addEventListener('keydown', ev => {
+            if (ev.key === 'Enter') { ev.preventDefault(); done({ submitted: true, label: String(input.value || '').trim() }); }
+            else if (ev.key === 'Escape') { ev.preventDefault(); done(null); }
+          });
+          document.body.append(backdrop);
+          input.focus();
+          input.select();
+        });
+      }
+
       function forceRenderRemoteBridgeSlot() {
         const slot = document.getElementById('settings-remote-bridge-slot');
         if (!slot) return;
@@ -1462,6 +1515,26 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
             await fetchStatus();
             forceRenderRemoteBridgeSlot();
             showToast('已选择监听地址 ' + ip);
+          }
+          return;
+        }
+        const bridgeRenamePeerBtn = target.closest?.('[data-pt-bridge-rename-peer]');
+        if (bridgeRenamePeerBtn) {
+          const peerId = bridgeRenamePeerBtn.getAttribute('data-pt-bridge-rename-peer') || '';
+          if (peerId) {
+            const currentLabel = bridgeRenamePeerBtn.getAttribute('data-peer-label') || '';
+            const autoLabel = bridgeRenamePeerBtn.getAttribute('data-peer-auto-label') || '';
+            const modalRes = await openStandaloneRenameModal({ currentLabel, autoLabel });
+            if (modalRes?.submitted) {
+              const res = await postApi('/api/remote-bridge/peers/rename', { peerId, label: modalRes.label }).catch(() => null);
+              if (res?.ok) {
+                await fetchStatus();
+                forceRenderRemoteBridgeSlot();
+                showToast(modalRes.label ? ('已重命名为 ' + modalRes.label) : '已恢复自动识别名称');
+              } else {
+                showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+              }
+            }
           }
           return;
         }

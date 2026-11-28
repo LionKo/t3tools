@@ -386,6 +386,7 @@ export async function startDaemon({
       case 'parseRemoteBridgePairingCode':
       case 'testRemoteBridgePeer':
       case 'upsertRemoteBridgePeer':
+      case 'renameRemoteBridgePeer':
       case 'removeRemoteBridgePeer':
       case 'toggleRemoteBridgePeer':
         return remoteBridge.manage(action,params);

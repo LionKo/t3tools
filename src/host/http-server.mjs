@@ -8,6 +8,7 @@ const bridgeActions = {
   '/api/remote-bridge/parse-code':'parseRemoteBridgePairingCode',
   '/api/remote-bridge/test-peer':'testRemoteBridgePeer',
   '/api/remote-bridge/peers/upsert':'upsertRemoteBridgePeer',
+  '/api/remote-bridge/peers/rename':'renameRemoteBridgePeer',
   '/api/remote-bridge/peers/remove':'removeRemoteBridgePeer',
   '/api/remote-bridge/peers/toggle':'toggleRemoteBridgePeer'
 };

@@ -57,6 +57,7 @@ function createNode(tagName = 'DIV', attrs = {}) {
         if (selector.includes('[data-pt-action]') && cur.getAttribute('data-pt-action')) return cur;
         if (selector.includes('[data-pt-tab]') && cur.getAttribute('data-pt-tab')) return cur;
         if (selector.includes('[data-pt-bridge-candidate]') && cur.getAttribute('data-pt-bridge-candidate')) return cur;
+        if (selector.includes('[data-pt-bridge-rename-peer]') && cur.getAttribute('data-pt-bridge-rename-peer')) return cur;
         if (selector.includes('a[href]') && cur.tagName === 'A' && cur.getAttribute('href')) return cur;
         cur = cur.parentElement;
       }
@@ -637,6 +638,98 @@ test('embedded pairing modal works in Electron without window.prompt using close
   await delay(30);
   assert.equal(tests.length, 1);
   assert.equal(tests[0].code, PAIRING_CODE);
+});
+
+test('embedded settings shows auto-detected peer label and supports renaming via closed modal without window.prompt', async t => {
+  const renames = [];
+  let currentPeerLabel = '';
+
+  const h = createCdpHarness({
+    hash: `#/${ENV_A}/t1`,
+    onRpc: async (req) => {
+      if (req.action === 'getStatus') {
+        return {
+          version: '0.1.11',
+          httpUrl: 'http://127.0.0.1:17373',
+          cdp: { connected: true, devToolsPort: 9222 },
+          settings: {
+            remoteBridge: {
+              server: { enabled: true, port: 17374, bindMode: 'tailscale', bindHost: '', advertiseUrl: '', machineLabel: '' },
+              peers: [{ id: 'p-knight', environmentId: ENV_B, label: currentPeerLabel, url: 'http://100.71.86.74:17374', enabled: true, allowLoopbackTunnel: false, verified: true, lastVerifiedAtMs: Date.now() }]
+            }
+          },
+          remoteBridge: {
+            state: 'listening',
+            boundHost: '100.103.198.16',
+            port: 17374,
+            environmentId: ENV_A,
+            defaultMachineLabel: 'ReadyToWork',
+            resolvedMachineLabel: 'ReadyToWork',
+            peerResolvedLabels: { 'p-knight': currentPeerLabel || 'Knight' },
+            tokenFingerprint: '9b7ec23a',
+            candidates: [{ name: 'Tailscale', address: '100.103.198.16', trusted: true }]
+          }
+        };
+      }
+      if (req.action === 'renameRemoteBridgePeer') {
+        renames.push(req.params);
+        currentPeerLabel = req.params.label;
+        return { peer: { id: 'p-knight', label: currentPeerLabel } };
+      }
+      if (req.action === 'getDashboard') {
+        return { summary: {}, facets: {}, requests: { items: [], total: 0, page: 1, totalPages: 1 }, quotas: { groups: [] }, errorInsights: { summary: {} } };
+      }
+      return makeResolvedLive({ envId: ENV_A, threadId: 't1', tps: 30, accountId: 'acc-a' });
+    }
+  });
+  t.after(() => h.dispose());
+
+  h.win.prompt = () => { throw new Error('prompt() is and will not be supported.'); };
+
+  h.context.__t3Tools.openDashboard();
+  await delay(20);
+  const overlayHost = h.mounted.get('t3tools-dashboard-overlay');
+  const overlayContent = overlayHost.shadowRoot.children[1];
+
+  overlayContent.dispatch('click', { target: createNode('BUTTON', { 'data-pt-tab': 'settings' }), isTrusted: true });
+  await delay(20);
+
+  assert.match(overlayContent.innerHTML, /自动：ReadyToWork/);
+  assert.match(overlayContent.innerHTML, />Knight<\/strong>/);
+  assert.match(overlayContent.innerHTML, /data-pt-bridge-rename-peer="p-knight"/);
+
+  const findInTree = (node, predicate) => {
+    if (!node) return null;
+    if (predicate(node)) return node;
+    for (const child of node.children || []) {
+      const found = findInTree(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  const renameBtn = createNode('BUTTON', {
+    'data-pt-bridge-rename-peer': 'p-knight',
+    'data-peer-label': '',
+    'data-peer-auto-label': 'Knight'
+  });
+  overlayContent.dispatch('click', { target: renameBtn, isTrusted: true });
+  await delay(10);
+
+  const modalHost = h.mounted.get('t3tools-bridge-modal');
+  assert.ok(modalHost);
+  assert.equal(modalHost.shadowRoot, null);
+  const inputEl = findInTree(modalHost._shadowForTest, n => n.getAttribute?.('data-pt-bridge-rename-input') === '1');
+  const submitBtn = findInTree(modalHost._shadowForTest, n => n.getAttribute?.('data-pt-bridge-rename-submit') === '1');
+  assert.ok(inputEl && submitBtn);
+
+  inputEl.value = '家里主机';
+  submitBtn.dispatch('click', { target: submitBtn, isTrusted: true });
+  await delay(30);
+
+  assert.equal(renames.length, 1);
+  assert.deepEqual(renames[0], { peerId: 'p-knight', label: '家里主机' });
+  assert.match(overlayContent.innerHTML, />家里主机<\/strong>/);
 });
 
 test('standalone fallback HTML includes remote bridge slot, handlers, and valid inline JS syntax', () => {

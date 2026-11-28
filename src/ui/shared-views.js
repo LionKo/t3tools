@@ -5378,6 +5378,8 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
   const bindHost = String(srv.bindHost || '');
   const advertiseUrl = String(srv.advertiseUrl || '');
   const machineLabel = String(srv.machineLabel || '');
+  const defaultMachineLabel = String(st.defaultMachineLabel || st.resolvedMachineLabel || '');
+  const peerResolvedLabels = (st.peerResolvedLabels && typeof st.peerResolvedLabels === 'object') ? st.peerResolvedLabels : {};
   const candidates = Array.isArray(st.candidates) ? st.candidates : [];
   const localEnvId = String(st.environmentId || '');
   const state = String(st.state || (enabled ? 'waiting_interface' : 'disabled'));
@@ -5446,6 +5448,10 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
     <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
       ${peers.map(p => {
         const lastTest = peerTestStatus[p.id];
+        const manualLabel = String(p.label || '').trim();
+        const autoLabel = String(peerResolvedLabels[p.id] || '').trim();
+        const shownLabel = manualLabel || autoLabel || '远端电脑';
+        const isAutoLabel = !manualLabel && Boolean(autoLabel);
         const badge = !p.enabled
           ? '<span class="pt-badge pt-badge-muted">已停用</span>'
           : lastTest === 'unauthorized'
@@ -5463,7 +5469,8 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
           <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 10px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));">
             <div style="min-width:0;flex:1;">
               <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;">
-                <strong>${esc(p.label || '远端电脑')}</strong>
+                <strong>${esc(shownLabel)}</strong>
+                ${isAutoLabel ? '<span class="pt-badge pt-badge-muted" title="已自动从 Tailscale / 远端主机识别，点击“改名”可手动修改">自动</span>' : ''}
                 ${badge}
                 <span class="pt-muted pt-mono" style="font-size:10.5px;" title="${esc(p.environmentId)}">${esc(String(p.environmentId || '').slice(0, 8))}</span>
               </div>
@@ -5474,6 +5481,7 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
                 <input type="checkbox" data-bridge-peer-toggle="${esc(p.id)}" ${p.enabled ? 'checked' : ''} />
                 <span class="pt-switch-track"></span>
               </label>
+              <button type="button" class="pt-btn" style="padding:3px 8px;font-size:11px;" data-pt-bridge-rename-peer="${esc(p.id)}" data-peer-label="${esc(manualLabel)}" data-peer-auto-label="${esc(autoLabel)}">改名</button>
               <button type="button" class="pt-btn" style="padding:3px 8px;font-size:11px;" data-pt-bridge-test-peer="${esc(p.id)}">测试</button>
               <button type="button" class="pt-btn pt-btn-danger" style="padding:3px 8px;font-size:11px;" data-pt-bridge-remove-peer="${esc(p.id)}">移除</button>
             </div>
@@ -5521,7 +5529,7 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
             </label>
             <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">
               <span>本机显示名称（可选）</span>
-              <input type="text" class="pt-input" maxlength="64" placeholder="如：家里台式机 / MacBook" value="${esc(machineLabel)}" data-bridge-server="machineLabel" />
+              <input type="text" class="pt-input" maxlength="64" placeholder="${esc(defaultMachineLabel ? `自动：${defaultMachineLabel}（留空则自动识别）` : '如：家里台式机 / MacBook')}" value="${esc(machineLabel)}" data-bridge-server="machineLabel" />
             </label>
             ${bindMode === 'custom' ? `
               <label style="display:flex;flex-direction:column;gap:3px;font-size:11px;" class="pt-muted">

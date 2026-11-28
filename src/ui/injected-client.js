@@ -124,7 +124,7 @@
       'focusThread','ackErrors','resolveErrors','testAlert','checkRuntimeUpdates',
       'checkAppUpdate','installAppUpdate','skipAppUpdate','triggerMultiMachineSync','clearRemoteSyncData',
       'getRemoteBridgePairingCode','rotateRemoteBridgeToken','parseRemoteBridgePairingCode',
-      'testRemoteBridgePeer','upsertRemoteBridgePeer','removeRemoteBridgePeer','toggleRemoteBridgePeer'
+      'testRemoteBridgePeer','upsertRemoteBridgePeer','renameRemoteBridgePeer','removeRemoteBridgePeer','toggleRemoteBridgePeer'
     ].includes(action)) {
       const path = {
         focusThread: '/api/t3/focus-thread',
@@ -142,6 +142,7 @@
         parseRemoteBridgePairingCode: '/api/remote-bridge/parse-code',
         testRemoteBridgePeer: '/api/remote-bridge/test-peer',
         upsertRemoteBridgePeer: '/api/remote-bridge/peers/upsert',
+        renameRemoteBridgePeer: '/api/remote-bridge/peers/rename',
         removeRemoteBridgePeer: '/api/remote-bridge/peers/remove',
         toggleRemoteBridgePeer: '/api/remote-bridge/peers/toggle'
       }[action];
@@ -1775,6 +1776,104 @@
     });
   }
 
+  function openBridgeRenameModal({ currentLabel = '', autoLabel = '' } = {}) {
+    closeBridgePairingModal(null);
+    return new Promise(resolve => {
+      const host = document.createElement('div');
+      host.id = 't3tools-bridge-modal';
+      host.setAttribute('data-t3tools', '1');
+      host.style.cssText = 'position:fixed;inset:0;z-index:99999;';
+      const shadow = host.attachShadow({ mode: 'closed' });
+      const styleEl = document.createElement('style');
+      styleEl.textContent = PT_SHARED_CSS + `
+        .pt-bridge-modal-backdrop {
+          position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+          padding: 16px; background: rgba(0, 0, 0, 0.56); backdrop-filter: blur(4px); z-index: 99999;
+        }
+        .pt-bridge-modal-box {
+          width: min(440px, 100%); border-radius: 12px;
+          background: var(--pt-card, #14161b); color: var(--pt-fg, #f3f4f6);
+          border: 1px solid var(--pt-border, rgba(255, 255, 255, 0.14));
+          box-shadow: var(--pt-shadow, 0 14px 36px rgba(0, 0, 0, 0.5));
+          padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;
+          font-family: var(--pt-font-sans, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif);
+        }
+        .pt-bridge-modal-title { font-size: 14px; font-weight: 600; }
+        .pt-bridge-modal-desc { font-size: 11.5px; color: var(--pt-muted, #9ca3af); line-height: 1.5; }
+        .pt-bridge-modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+      `;
+      const rootEl = document.createElement('div');
+      rootEl.className = 'pt-root';
+      const backdropEl = document.createElement('div');
+      backdropEl.className = 'pt-bridge-modal-backdrop';
+      const boxEl = document.createElement('div');
+      boxEl.className = 'pt-bridge-modal-box';
+      boxEl.setAttribute('role', 'dialog');
+      boxEl.setAttribute('aria-modal', 'true');
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'pt-bridge-modal-title';
+      titleEl.textContent = '修改远端电脑名称';
+
+      const descEl = document.createElement('div');
+      descEl.className = 'pt-bridge-modal-desc';
+      descEl.textContent = autoLabel
+        ? `当前自动识别名称：${autoLabel}。可自定义任意显示名称（最多 64 字），留空保存将恢复自动识别。`
+        : '自定义此远端电脑的显示名称（最多 64 字），留空保存将自动使用 Tailscale / 远端主机名。';
+
+      const inputEl = document.createElement('input');
+      inputEl.type = 'text';
+      inputEl.className = 'pt-input';
+      inputEl.maxLength = 64;
+      inputEl.value = String(currentLabel || '');
+      inputEl.setAttribute('placeholder', autoLabel ? `自动：${autoLabel}` : '如：办公室主机 / Knight');
+      inputEl.setAttribute('data-pt-bridge-rename-input', '1');
+
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'pt-bridge-modal-actions';
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'pt-btn';
+      cancelBtn.textContent = '取消';
+      cancelBtn.setAttribute('data-pt-bridge-modal-cancel', '1');
+      const submitBtn = document.createElement('button');
+      submitBtn.type = 'button';
+      submitBtn.className = 'pt-btn pt-btn-accent';
+      submitBtn.textContent = '保存名称';
+      submitBtn.setAttribute('data-pt-bridge-rename-submit', '1');
+      actionsEl.appendChild(cancelBtn);
+      actionsEl.appendChild(submitBtn);
+
+      boxEl.appendChild(titleEl);
+      boxEl.appendChild(descEl);
+      boxEl.appendChild(inputEl);
+      boxEl.appendChild(actionsEl);
+      backdropEl.appendChild(boxEl);
+      rootEl.appendChild(backdropEl);
+      shadow.append(styleEl, rootEl);
+
+      bridgeModal = { host, inputEl, resolve, parseTimer: null, parseSeq: 0 };
+
+      const submit = () => closeBridgePairingModal({ submitted: true, label: String(inputEl.value || '').trim() });
+      for (const evtName of ['input', 'change', 'paste', 'keydown', 'keyup', 'keypress']) {
+        boxEl.addEventListener(evtName, evt => { evt.stopPropagation?.(); });
+      }
+      inputEl.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter') { evt.preventDefault?.(); submit(); }
+        else if (evt.key === 'Escape') { evt.preventDefault?.(); closeBridgePairingModal(null); }
+      });
+      backdropEl.addEventListener('click', evt => {
+        if (evt.target === backdropEl) closeBridgePairingModal(null);
+      });
+      cancelBtn.addEventListener('click', () => closeBridgePairingModal(null));
+      submitBtn.addEventListener('click', submit);
+
+      document.body.appendChild(host);
+      themeSync.register(host);
+      try { inputEl.focus?.(); inputEl.select?.(); } catch {}
+    });
+  }
+
   function renderDashboardOverlay({ partialRequestsOnly = false, resetScroll = false } = {}) {
     if (!dashboardOpen) {
       closeBridgePairingModal('');
@@ -2092,6 +2191,28 @@
           showOverlayToast('已选择监听地址 ' + ip);
         } catch (err) {
           showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+        }
+      }
+      return;
+    }
+    const bridgeRenamePeerEl = target.closest?.('[data-pt-bridge-rename-peer]');
+    if (bridgeRenamePeerEl) {
+      if (!e.isTrusted) return;
+      const peerId = bridgeRenamePeerEl.getAttribute('data-pt-bridge-rename-peer') || '';
+      if (peerId) {
+        const currentLabel = bridgeRenamePeerEl.getAttribute('data-peer-label') || '';
+        const autoLabel = bridgeRenamePeerEl.getAttribute('data-peer-auto-label') || '';
+        const modalRes = await openBridgeRenameModal({ currentLabel, autoLabel });
+        if (modalRes?.submitted) {
+          try {
+            await callRpc('renameRemoteBridgePeer', { peerId, label: modalRes.label });
+            await fetchOverlayStatus({ fresh: false });
+            renderDashboardOverlay();
+            pollLive({ force: true });
+            showOverlayToast(modalRes.label ? ('已重命名为 ' + modalRes.label) : '已恢复自动识别名称');
+          } catch (err) {
+            showOverlayToast(formatRemoteBridgeErrorMessage(err?.message));
+          }
         }
       }
       return;

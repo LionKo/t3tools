@@ -1,12 +1,12 @@
 import http from 'node:http';
 import https from 'node:https';
 import { lookup } from 'node:dns/promises';
-import { networkInterfaces as interfaces } from 'node:os';
+import { networkInterfaces as interfaces, hostname as osHostname } from 'node:os';
 import { isIP } from 'node:net';
 import { createHash, randomBytes as bytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import {
   buildSanitizedRemoteLivePayload,
   validateRemoteLivePayload,
@@ -26,6 +26,79 @@ const fail = (status) => {
 };
 const permanent = new Set(['unauthorized', 'identityMismatch', 'incompatible']);
 const validSecret = (s) => typeof s === 'string' && /^[0-9a-f]{64}$/.test(s) && s.length === 64;
+
+function cleanLabelCandidate(raw) {
+  const text = String(raw || '')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .trim()
+    .slice(0, 64);
+  return text;
+}
+
+function pickTailscaleNodeName(node) {
+  if (!node || typeof node !== 'object') return '';
+  const host = cleanLabelCandidate(node.HostName);
+  if (host && !/^localhost(?:\.localdomain)?$/i.test(host)) return host;
+  const dns = cleanLabelCandidate(node.DNSName).replace(/\.+$/, '');
+  if (dns) {
+    const first = cleanLabelCandidate(dns.split('.')[0]);
+    if (first && !/^localhost$/i.test(first)) return first;
+  }
+  return '';
+}
+
+function parseTailscaleStatusJson(raw) {
+  const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  const peersByIp = new Map();
+  const selfName = pickTailscaleNodeName(parsed?.Self);
+  for (const ip of Array.isArray(parsed?.Self?.TailscaleIPs) ? parsed.Self.TailscaleIPs : []) {
+    const cleanIp = String(ip || '').trim().toLowerCase();
+    if (cleanIp && selfName) peersByIp.set(cleanIp, selfName);
+  }
+  for (const peer of Object.values(parsed?.Peer || {})) {
+    const name = pickTailscaleNodeName(peer);
+    if (!name) continue;
+    for (const ip of Array.isArray(peer?.TailscaleIPs) ? peer.TailscaleIPs : []) {
+      const cleanIp = String(ip || '').trim().toLowerCase();
+      if (cleanIp) peersByIp.set(cleanIp, name);
+    }
+  }
+  return { selfName, peersByIp };
+}
+
+function defaultTailscaleProbe() {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        'tailscale',
+        ['status', '--json'],
+        { windowsHide: true, encoding: 'utf8', timeout: 2500, maxBuffer: 1024 * 1024 },
+        (err, stdout) => {
+          if (err || !stdout) return resolve({ selfName: '', peersByIp: new Map() });
+          try {
+            resolve(parseTailscaleStatusJson(stdout));
+          } catch {
+            resolve({ selfName: '', peersByIp: new Map() });
+          }
+        }
+      );
+    } catch {
+      resolve({ selfName: '', peersByIp: new Map() });
+    }
+  });
+}
+
+function readT3EnvironmentLabel(paths) {
+  const files = [paths?.serverRuntimePath, paths?.settingsPath].filter(Boolean);
+  for (const file of files) {
+    try {
+      const data = JSON.parse(readFileSync(file, 'utf8'));
+      const found = cleanLabelCandidate(data?.environmentLabel || data?.label || data?.environment?.label);
+      if (found) return found;
+    } catch {}
+  }
+  return '';
+}
 
 function savePrivate(path, data) {
   mkdirSync(dirname(path), { recursive: true });
@@ -83,6 +156,8 @@ export function createRemoteBridge({
   getLocalPort = () => 0,
   now = Date.now,
   networkInterfaces = interfaces,
+  hostnameFn = osHostname,
+  tailscaleProbe = defaultTailscaleProbe,
   createHttpListener = http.createServer,
   dnsLookup = lookup,
   httpRequest = (url, opts, cb) => (url.protocol === 'https:' ? https : http).request(url, opts, cb),
@@ -103,10 +178,73 @@ export function createRemoteBridge({
     envExpires = -Infinity,
     stopped = false,
     lifecycle = Promise.resolve();
+  let tsDirectory = { selfName: '', peersByIp: new Map() },
+    tsFetchedAt = -Infinity,
+    tsInflight = null;
   const inflight = new Map(),
     cache = new Map(),
     penalties = new Map(),
-    controllers = new Set();
+    controllers = new Set(),
+    observedPeerLabels = new Map();
+
+  function refreshTailscaleDirectory(force = false) {
+    if (stopped || typeof tailscaleProbe !== 'function') return Promise.resolve(tsDirectory);
+    if (!force && now() - tsFetchedAt < 60000) return Promise.resolve(tsDirectory);
+    if (tsInflight) return tsInflight;
+    const p = Promise.resolve()
+      .then(() => tailscaleProbe())
+      .then((res) => {
+        if (!stopped && res && typeof res === 'object') {
+          tsDirectory = {
+            selfName: cleanLabelCandidate(res.selfName),
+            peersByIp: res.peersByIp instanceof Map ? res.peersByIp : new Map(Object.entries(res.peersByIp || {}))
+          };
+          tsFetchedAt = now();
+        }
+        return tsDirectory;
+      })
+      .catch(() => tsDirectory)
+      .finally(() => {
+        if (tsInflight === p) tsInflight = null;
+      });
+    tsInflight = p;
+    return p;
+  }
+
+  function defaultLocalMachineLabel() {
+    const t3Label = readT3EnvironmentLabel(paths);
+    if (t3Label) return t3Label;
+    if (tsDirectory.selfName) return tsDirectory.selfName;
+    try {
+      const host = cleanLabelCandidate(hostnameFn?.());
+      if (host && !/^localhost(?:\.localdomain)?$/i.test(host)) return host;
+    } catch {}
+    return '';
+  }
+
+  function effectiveLocalMachineLabel() {
+    return cleanLabelCandidate(cfg.server.machineLabel) || defaultLocalMachineLabel();
+  }
+
+  function peerTailscaleName(peer) {
+    if (!peer?.url || !tsDirectory.peersByIp?.size) return '';
+    try {
+      const host = new URL(peer.url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      return cleanLabelCandidate(tsDirectory.peersByIp.get(host));
+    } catch {
+      return '';
+    }
+  }
+
+  function resolvePeerLabel(peer, remoteReportedLabel = '') {
+    const manual = cleanLabelCandidate(peer?.label);
+    if (manual) return manual;
+    const reported = cleanLabelCandidate(remoteReportedLabel);
+    if (reported) return reported;
+    const observed = cleanLabelCandidate(observedPeerLabels.get(peer?.id));
+    if (observed) return observed;
+    return peerTailscaleName(peer);
+  }
 
   function localEnvironmentId(fresh = false) {
     if (fresh || now() >= envExpires) {
@@ -171,6 +309,12 @@ export function createRemoteBridge({
     return secret.serverToken;
   }
   function getStatus() {
+    if (cfg.server.enabled || cfg.peers.length) refreshTailscaleDirectory();
+    const peerResolvedLabels = {};
+    for (const p of cfg.peers) {
+      const resolved = resolvePeerLabel(p);
+      if (resolved) peerResolvedLabels[p.id] = resolved;
+    }
     return {
       state,
       boundHost,
@@ -184,6 +328,9 @@ export function createRemoteBridge({
       port: cfg.server.port,
       candidates,
       environmentId: localEnvironmentId(),
+      defaultMachineLabel: defaultLocalMachineLabel(),
+      resolvedMachineLabel: effectiveLocalMachineLabel(),
+      peerResolvedLabels,
       tokenFingerprint: secret?.serverToken ? digest(secret.serverToken).toString('hex').slice(0, 8) : ''
     };
   }
@@ -219,7 +366,7 @@ export function createRemoteBridge({
         try {
           const url = new URL(req.url, 'http://localhost');
           const env = localEnvironmentId(),
-            machineLabel = cfg.server.machineLabel;
+            machineLabel = effectiveLocalMachineLabel();
           if (!['/api/remote/info', '/api/remote/live'].includes(url.pathname))
             return error(404, 'NOT_FOUND');
           if (!env) return error(503, 'DATA_UNAVAILABLE');
@@ -264,6 +411,9 @@ export function createRemoteBridge({
   }
   async function reconcile(generation) {
     if (generation !== epoch) return;
+    if (!stopped && (cfg.server.enabled || cfg.peers.length)) {
+      refreshTailscaleDirectory();
+    }
     if (!cfg.server.enabled || stopped) {
       await closeServer();
       state = 'disabled';
@@ -425,6 +575,8 @@ export function createRemoteBridge({
           expectedEnvironmentId: peer.environmentId,
           expectedThreadId: threadId
         });
+        const reportedLabel = cleanLabelCandidate(data?.machineLabel);
+        if (reportedLabel) observedPeerLabels.set(peer.id, reportedLabel);
         result = { status: 'connected', data, receivedAtMs: now() };
         ttl = 500;
       } catch (e) {
@@ -476,7 +628,7 @@ export function createRemoteBridge({
         status: result.status,
         environmentId,
         peerId: peer?.id || '',
-        peerLabel: peer?.label || '',
+        peerLabel: resolvePeerLabel(peer, data?.machineLabel),
         message: result.status,
         receivedAtMs: result.receivedAtMs || null,
         remoteUpdatedAtMs: data?.updatedAtMs ?? null
@@ -487,6 +639,7 @@ export function createRemoteBridge({
     const info = await request(peer, token, '/api/remote/info');
     if (info.protocolVersion !== 1) fail('incompatible');
     if (info.environmentId !== peer.environmentId) fail('identityMismatch');
+    return info;
   }
   function decodeInput(params) {
     const p = params.code
@@ -522,6 +675,7 @@ export function createRemoteBridge({
     }
     if (action === 'getRemoteBridgePairingCode') {
       if (state !== 'listening') fail('serverUnavailable');
+      await refreshTailscaleDirectory();
       const address = isIP(boundHost) === 6 ? '[' + boundHost + ']' : boundHost;
       const url = cfg.server.advertiseUrl || 'http://' + address + ':' + cfg.server.port;
       return {
@@ -529,14 +683,14 @@ export function createRemoteBridge({
           v: 1,
           url,
           environmentId: localEnvironmentId(true),
-          label: cfg.server.machineLabel,
+          label: effectiveLocalMachineLabel(),
           token: serverToken()
         })
       };
     }
     if (action === 'parseRemoteBridgePairingCode') {
       const { environmentId, label, url } = decodePairingCode(params.code);
-      return { environmentId, label, url };
+      return { environmentId, label: label || peerTailscaleName({ url }), url };
     }
     const peer = cfg.peers.find((p) => p.id === params.peerId);
     const generation = epoch;
@@ -548,9 +702,10 @@ export function createRemoteBridge({
       if (input.environmentId === localEnvironmentId()) fail('identityMismatch');
       const test = action === 'testRemoteBridgePeer' || params.verify === true;
       let status = 'untested';
+      let verifiedInfo = null;
       if (test) {
         try {
-          await verify(input, token);
+          verifiedInfo = await verify(input, token);
           status = 'verified';
         } catch (e) {
           status = permanent.has(e.message) ? e.message : 'offline';
@@ -559,6 +714,8 @@ export function createRemoteBridge({
       if (generation !== epoch) fail('reconfigured');
       if (action === 'testRemoteBridgePeer') {
         if (byId) {
+          const reportedLabel = cleanLabelCandidate(verifiedInfo?.machineLabel);
+          if (reportedLabel) observedPeerLabels.set(peer.id, reportedLabel);
           await savePeers(
             cfg.peers.map((p) =>
               p !== peer
@@ -578,13 +735,15 @@ export function createRemoteBridge({
       const next = {
         id: old?.id || randomUUID(),
         environmentId: input.environmentId,
-        label: input.label,
+        label: cleanLabelCandidate(params.label ?? input.label ?? old?.label ?? ''),
         url: input.url,
         enabled: params.enabled ?? old?.enabled ?? true,
         allowLoopbackTunnel: input.allowLoopbackTunnel,
         verified: status === 'verified',
         lastVerifiedAtMs: status === 'verified' ? now() : null
       };
+      const reportedLabel = cleanLabelCandidate(verifiedInfo?.machineLabel);
+      if (reportedLabel) observedPeerLabels.set(next.id, reportedLabel);
       const peers = [...cfg.peers.filter((p) => p !== old), next];
       sanitizeBridgeConfig({ peers });
       validatePublicSettings({ peers });
@@ -604,6 +763,18 @@ export function createRemoteBridge({
       return { ...next, verifyStatus: status };
     }
     if (!peer) fail('unpaired');
+    if (action === 'renameRemoteBridgePeer') {
+      if (typeof params.label !== 'string') fail('Invalid bridge configuration');
+      const nextLabel = params.label.trim();
+      const peers = cfg.peers.map((p) => (p !== peer ? p : { ...p, label: nextLabel }));
+      sanitizeBridgeConfig({ peers });
+      validatePublicSettings({ peers });
+      const tok = peerToken(peer);
+      if (tok && nextLabel.includes(tok)) fail('Invalid bridge configuration');
+      await savePeers(peers);
+      const updatedPeer = cfg.peers.find((p) => p.id === peer.id);
+      return { peer: updatedPeer, status: getStatus() };
+    }
     if (action === 'toggleRemoteBridgePeer') {
       await savePeers(cfg.peers.map((p) => (p !== peer ? p : { ...p, enabled: params.enabled })));
       return getStatus();
@@ -613,6 +784,7 @@ export function createRemoteBridge({
         remaining = { ...data.peers };
       delete remaining[peer.id];
       persist({ ...data, peers: remaining });
+      observedPeerLabels.delete(peer.id);
       try {
         await savePeers(cfg.peers.filter((p) => p !== peer));
       } catch (e) {

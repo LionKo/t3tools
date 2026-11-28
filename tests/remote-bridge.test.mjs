@@ -658,3 +658,126 @@ test('review regressions: origin restriction, missing local env on old DB, encod
     await daemon.stop('test done');
   }
 });
+
+test('auto-resolves local and peer labels via Tailscale / remote report while allowing manual rename and reset', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 't3-bridge-labels-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const envPath = join(dir, 'environment-id');
+  writeFileSync(envPath, '11111111-1111-4111-8111-111111111111');
+  const settings = createSettingsStore(join(dir, 'settings.json'));
+  const port = await freePort();
+  settings.update({
+    remoteBridge: {
+      server: { enabled: true, port, bindMode: 'custom', bindHost: '127.0.0.1', advertiseUrl: `http://127.0.0.1:${port}`, machineLabel: '' }
+    }
+  });
+
+  const peerToken = 'c'.repeat(64);
+  const peerEnvId = '22222222-2222-4222-8222-222222222222';
+  const bridge = createRemoteBridge({
+    paths: { environmentIdPath: envPath, remoteBridgeSecretsPath: join(dir, 'secrets.json') },
+    settings,
+    engine: {
+      getLocalCommonShell: () => ({ updatedAtMs: Date.now() }),
+      getExactLocalThreadSnapshot: async () => ({ thread: { unresolved: true } })
+    },
+    version: '0.1.11',
+    getLocalPort: () => 17373,
+    hostnameFn: () => 'FallbackHost',
+    tailscaleProbe: async () => ({
+      selfName: 'ReadyToWork',
+      peersByIp: new Map([['100.71.86.74', 'Knight']])
+    }),
+    httpRequest: (_url, _opts, cb) => {
+      const listeners = new Map();
+      const req = {
+        on(evt, fn) { listeners.set(evt, fn); return req; },
+        destroy() {},
+        end() {
+          queueMicrotask(() => {
+            const resListeners = new Map();
+            const payload = JSON.stringify({
+              ok: true,
+              data: {
+                protocolVersion: 1,
+                environmentId: peerEnvId,
+                machineLabel: 'KnightRemote',
+                requestedThreadId: 'thread-1',
+                updatedAtMs: Date.now(),
+                thread: {
+                  unresolved: false,
+                  threadId: 'thread-1',
+                  title: 'Demo',
+                  accountId: 'acc',
+                  selectedModel: 'gemini-4-neon',
+                  phase: 'completed',
+                  phaseLabel: '已完成',
+                  queuedRuns: 0,
+                  totalSteps: 0,
+                  run: null,
+                  steps: []
+                },
+                context: null,
+                quotas: { updatedAtMs: null, groups: [], flatWindows: [] },
+                threadErrors: []
+              }
+            });
+            const res = {
+              statusCode: 200,
+              on(evt, fn) { resListeners.set(evt, fn); return res; }
+            };
+            cb(res);
+            resListeners.get('data')?.(Buffer.from(payload));
+            resListeners.get('end')?.();
+          });
+        }
+      };
+      return req;
+    }
+  });
+  t.after(() => bridge.stop());
+
+  await bridge.configure();
+  const { code: localCode } = await bridge.manage('getRemoteBridgePairingCode');
+  assert.equal(protocol.decodePairingCode(localCode).label, 'ReadyToWork');
+  assert.equal(bridge.getStatus().defaultMachineLabel, 'ReadyToWork');
+  assert.equal(bridge.getStatus().resolvedMachineLabel, 'ReadyToWork');
+
+  // Pairing code with empty label resolves preview + peer status from Tailscale IP automatically
+  const emptyLabelPeerCode = protocol.encodePairingCode({
+    v: 1,
+    environmentId: peerEnvId,
+    label: '',
+    url: 'http://100.71.86.74:17374',
+    token: peerToken
+  });
+  const parsed = await bridge.manage('parseRemoteBridgePairingCode', { code: emptyLabelPeerCode });
+  assert.equal(parsed.label, 'Knight');
+
+  const saved = await bridge.manage('upsertRemoteBridgePeer', { code: emptyLabelPeerCode, verify: false });
+  assert.equal(saved.label, '');
+  assert.equal(bridge.getStatus().peerResolvedLabels[saved.id], 'Knight');
+
+  // After live fetch, remote-reported machineLabel overrides Tailscale when manual label is empty
+  const liveAuto = await bridge.fetchRemoteLive(peerEnvId, 'thread-1');
+  assert.equal(liveAuto.remote.status, 'connected');
+  assert.equal(liveAuto.remote.peerLabel, 'KnightRemote');
+
+  // Manual rename overrides both remote report and Tailscale
+  const renamed = await bridge.manage('renameRemoteBridgePeer', { peerId: saved.id, label: '办公室主力机' });
+  assert.equal(renamed.peer.label, '办公室主力机');
+  assert.equal(bridge.getStatus().peerResolvedLabels[saved.id], '办公室主力机');
+  const liveCustom = await bridge.fetchRemoteLive(peerEnvId, 'thread-1');
+  assert.equal(liveCustom.remote.peerLabel, '办公室主力机');
+
+  // Reject secret leakage in rename
+  await assert.rejects(
+    () => bridge.manage('renameRemoteBridgePeer', { peerId: saved.id, label: peerToken }),
+    /Invalid bridge configuration|Credentials cannot appear in settings/
+  );
+
+  // Clearing custom label restores automatic detection
+  await bridge.manage('renameRemoteBridgePeer', { peerId: saved.id, label: '' });
+  assert.equal(bridge.getStatus().peerResolvedLabels[saved.id], 'KnightRemote');
+});
