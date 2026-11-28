@@ -5550,7 +5550,7 @@ function renderRemoteBridgeCardHtml(statusData = null, fallbackSettings = null, 
         <div style="width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
           <div>
             <div class="setting-label">已配对的远端电脑（${peers.length} 台）</div>
-            <div class="setting-desc">${embedded ? '为避免凭据暴露给宿主页面 DOM，嵌入窗口通过系统原生输入框安全导入配对码（也可在独立 T3Tools 窗口操作）；双向互加即可双向实时查看' : '粘贴另一台电脑的配对码（仅本地离线预览，点击“测试”或“添加”后才会联网校验）；双向互加即可双向实时查看'}</div>
+            <div class="setting-desc">${embedded ? '为避免凭据暴露给宿主页面 DOM，嵌入窗口通过隔离安全弹窗导入配对码（也可在独立 T3Tools 窗口操作）；双向互加即可双向实时查看' : '粘贴另一台电脑的配对码（仅本地离线预览，点击“测试”或“添加”后才会联网校验）；双向互加即可双向实时查看'}</div>
           </div>
         </div>
         ${embedded ? `

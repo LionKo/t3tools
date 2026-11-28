@@ -671,14 +671,15 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
       function updateStandaloneBridgePreviewDom() {
         const slot = document.querySelector('#settings-remote-bridge-slot [data-bridge-preview-slot]');
         if (!slot) return;
+        let html = '';
         if (remoteBridgeUi.parsedPreview) {
           const p = remoteBridgeUi.parsedPreview;
-          slot.innerHTML = '<div style="margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));font-size:11.5px;display:flex;flex-direction:column;gap:2px;"><div><strong>离线解析结果：</strong>' + esc(p.label || '未命名电脑') + '</div><div class="pt-muted pt-mono" style="font-size:11px;">环境 ' + esc(p.environmentId) + ' · 地址 ' + esc(p.url) + '</div></div>';
-        } else if (remoteBridgeUi.previewError) {
-          slot.innerHTML = '<div class="pt-text-danger" style="font-size:11px;margin-top:4px;">' + esc(remoteBridgeUi.previewError) + '</div>';
-        } else {
-          slot.innerHTML = '';
+          html += '<div style="margin-top:6px;padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.03));border:1px solid var(--pt-border,rgba(255,255,255,.08));font-size:11.5px;display:flex;flex-direction:column;gap:2px;"><div><strong>离线解析结果：</strong>' + esc(p.label || '未命名电脑') + '</div><div class="pt-muted pt-mono" style="font-size:11px;">环境 ' + esc(p.environmentId) + ' · 地址 ' + esc(p.url) + '</div></div>';
         }
+        if (remoteBridgeUi.previewError) {
+          html += '<div class="pt-text-danger" style="font-size:11px;margin-top:4px;">' + esc(remoteBridgeUi.previewError) + '</div>';
+        }
+        slot.innerHTML = html;
       }
       let settingsSeq = 0;
       let statusSeq = 0;
@@ -1592,40 +1593,71 @@ export function buildFallbackHtml({ version = '0.1.0', apiBase = '', authToken =
         if (act === 'test-bridge-input') {
           const slot = document.getElementById('settings-remote-bridge-slot');
           const code = slot?.querySelector('[data-bridge-pairing-input]')?.value?.trim() || '';
-          if (!code) { showToast('请先粘贴远端配对码'); return; }
+          const btnEl = target.closest?.('[data-pt-action]');
+          if (!code) {
+            remoteBridgeUi.previewError = '请先粘贴远端配对码';
+            updateStandaloneBridgePreviewDom();
+            showToast('请先粘贴远端配对码');
+            return;
+          }
+          if (btnEl) btnEl.disabled = true;
           showToast('正在测试远端连接...');
-          const res = await postApi('/api/remote-bridge/test-peer', {
-            code,
-            allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel)
-          }).catch(() => null);
-          if (res?.ok && res.data) {
-            showToast(res.data.verified ? '连接正常，可以点击“添加节点”保存' : formatRemoteBridgeErrorMessage(res.data.status || 'offline'));
-          } else {
-            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+          try {
+            const res = await postApi('/api/remote-bridge/test-peer', {
+              code,
+              allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel)
+            }).catch(() => null);
+            if (res?.ok && res.data) {
+              const msg = res.data.verified ? '连接正常，可以点击“添加节点”保存' : formatRemoteBridgeErrorMessage(res.data.status || 'offline');
+              remoteBridgeUi.previewError = res.data.verified ? '' : msg;
+              updateStandaloneBridgePreviewDom();
+              showToast(msg);
+            } else {
+              const msg = formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED');
+              remoteBridgeUi.previewError = msg;
+              updateStandaloneBridgePreviewDom();
+              showToast(msg);
+            }
+          } finally {
+            if (btnEl) btnEl.disabled = false;
           }
           return;
         }
         if (act === 'add-bridge-peer') {
           const slot = document.getElementById('settings-remote-bridge-slot');
           const inputEl = slot?.querySelector('[data-bridge-pairing-input]');
+          const btnEl = target.closest?.('[data-pt-action]');
           const code = inputEl?.value?.trim() || '';
-          if (!code) { showToast('请先粘贴远端配对码'); return; }
+          if (!code) {
+            remoteBridgeUi.previewError = '请先粘贴远端配对码';
+            updateStandaloneBridgePreviewDom();
+            showToast('请先粘贴远端配对码');
+            return;
+          }
+          if (btnEl) btnEl.disabled = true;
           showToast('正在校验并保存远端节点...');
-          const res = await postApi('/api/remote-bridge/peers/upsert', {
-            code,
-            allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel),
-            verify: true
-          }).catch(() => null);
-          if (res?.ok && res.data) {
-            if (inputEl) inputEl.value = '';
-            remoteBridgeUi.parsedPreview = null;
-            remoteBridgeUi.previewError = '';
-            if (res.data.id) remoteBridgeUi.peerTestStatus[res.data.id] = res.data.verifyStatus || (res.data.verified ? 'verified' : 'offline');
-            await fetchStatus();
-            forceRenderRemoteBridgeSlot();
-            showToast(formatUpsertPeerToast(res.data));
-          } else {
-            showToast(formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED'));
+          try {
+            const res = await postApi('/api/remote-bridge/peers/upsert', {
+              code,
+              allowLoopbackTunnel: Boolean(remoteBridgeUi.allowLoopbackTunnel),
+              verify: true
+            }).catch(() => null);
+            if (res?.ok && res.data) {
+              if (inputEl) inputEl.value = '';
+              remoteBridgeUi.parsedPreview = null;
+              remoteBridgeUi.previewError = '';
+              if (res.data.id) remoteBridgeUi.peerTestStatus[res.data.id] = res.data.verifyStatus || (res.data.verified ? 'verified' : 'offline');
+              await fetchStatus();
+              forceRenderRemoteBridgeSlot();
+              showToast(formatUpsertPeerToast(res.data));
+            } else {
+              const msg = formatRemoteBridgeErrorMessage(res?.error || 'BRIDGE_ACTION_FAILED');
+              remoteBridgeUi.previewError = msg;
+              updateStandaloneBridgePreviewDom();
+              showToast(msg);
+            }
+          } finally {
+            if (btnEl) btnEl.disabled = false;
           }
           return;
         }

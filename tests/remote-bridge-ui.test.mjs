@@ -110,13 +110,15 @@ function createNode(tagName = 'DIV', attrs = {}) {
     dispatch(type, evt) {
       for (const fn of listeners.get(type) || []) fn(evt);
     },
-    attachShadow() {
+    attachShadow(init = { mode: 'open' }) {
       const shadow = {
+        mode: init?.mode || 'open',
         children: [],
         activeElement: null,
         append(...els) { this.children.push(...els); }
       };
-      this.shadowRoot = shadow;
+      this._shadowForTest = shadow;
+      this.shadowRoot = init?.mode === 'closed' ? null : shadow;
       return shadow;
     },
     querySelector(sel) {
@@ -516,6 +518,125 @@ test('embedded settings bridge card never renders secrets and rejects untrusted 
   assert.equal(pairingRequested, 1);
   assert.equal(h.clipboardWrites.length, 1);
   assert.doesNotMatch(overlayContent.innerHTML, new RegExp(SECRET_TOKEN));
+});
+
+test('embedded pairing modal works in Electron without window.prompt using closed Shadow DOM', async t => {
+  const SECRET_TOKEN = 'b'.repeat(64);
+  const PAIRING_CODE = 't3bridge://v1/mock-' + SECRET_TOKEN;
+  const upserts = [];
+  const tests = [];
+  let promptCalled = 0;
+
+  const h = createCdpHarness({
+    hash: `#/${ENV_A}/t1`,
+    onRpc: async (req) => {
+      if (req.action === 'getStatus') {
+        return {
+          version: '0.1.10',
+          httpUrl: 'http://127.0.0.1:17373',
+          cdp: { connected: true, devToolsPort: 9222 },
+          settings: {
+            remoteBridge: {
+              server: { enabled: true, port: 17374, bindMode: 'tailscale', bindHost: '', advertiseUrl: '', machineLabel: 'ReadyToWork' },
+              peers: upserts.length
+                ? [{ id: 'p2', environmentId: ENV_B, label: 'Knight', url: 'http://100.71.86.74:17374', enabled: true, allowLoopbackTunnel: false, verified: true, lastVerifiedAtMs: Date.now() }]
+                : []
+            }
+          },
+          remoteBridge: {
+            state: 'listening',
+            boundHost: '100.103.198.16',
+            port: 17374,
+            environmentId: ENV_A,
+            tokenFingerprint: '9b7ec23a',
+            candidates: [{ name: 'Tailscale', address: '100.103.198.16', trusted: true }]
+          }
+        };
+      }
+      if (req.action === 'upsertRemoteBridgePeer') {
+        upserts.push(req.params);
+        return { id: 'p2', environmentId: ENV_B, label: 'Knight', url: 'http://100.71.86.74:17374', verified: true, verifyStatus: 'verified' };
+      }
+      if (req.action === 'testRemoteBridgePeer') {
+        tests.push(req.params);
+        return { verified: true, status: 'verified' };
+      }
+      if (req.action === 'getDashboard') {
+        return { summary: {}, facets: {}, requests: { items: [], total: 0, page: 1, totalPages: 1 }, quotas: { groups: [] }, errorInsights: { summary: {} } };
+      }
+      return makeResolvedLive({ envId: ENV_A, threadId: 't1', tps: 30, accountId: 'acc-a' });
+    }
+  });
+  t.after(() => h.dispose());
+
+  // Simulate Electron renderer where window.prompt() always throws
+  h.win.prompt = () => {
+    promptCalled++;
+    throw new Error('prompt() is and will not be supported.');
+  };
+
+  h.context.__t3Tools.openDashboard();
+  await delay(20);
+  const overlayHost = h.mounted.get('t3tools-dashboard-overlay');
+  const overlayContent = overlayHost.shadowRoot.children[1];
+
+  const tabBtn = createNode('BUTTON', { 'data-pt-tab': 'settings' });
+  overlayContent.dispatch('click', { target: tabBtn, isTrusted: true });
+  await delay(20);
+
+  const findInTree = (node, predicate) => {
+    if (!node) return null;
+    if (predicate(node)) return node;
+    for (const child of node.children || []) {
+      const found = findInTree(child, predicate);
+      if (found) return found;
+    }
+    return null;
+  };
+
+  // Untrusted click must be rejected
+  const addBtn = createNode('BUTTON', { 'data-pt-action': 'prompt-add-bridge-peer' });
+  overlayContent.dispatch('click', { target: addBtn, isTrusted: false });
+  await delay(10);
+  assert.equal(h.mounted.get('t3tools-bridge-modal'), undefined);
+
+  // Trusted click opens a CLOSED shadow modal without calling window.prompt()
+  overlayContent.dispatch('click', { target: addBtn, isTrusted: true });
+  await delay(10);
+  assert.equal(promptCalled, 0);
+  const modalHost = h.mounted.get('t3tools-bridge-modal');
+  assert.ok(modalHost, 'expected bridge pairing modal to mount');
+  assert.equal(modalHost.shadowRoot, null, 'modal must use closed Shadow DOM so host page cannot read credentials');
+
+  const closedRoot = modalHost._shadowForTest;
+  const inputEl = findInTree(closedRoot, n => n.getAttribute?.('data-pt-bridge-modal-input') === '1');
+  const submitBtn = findInTree(closedRoot, n => n.getAttribute?.('data-pt-bridge-modal-submit') === '1');
+  assert.ok(inputEl && submitBtn, 'expected input and submit button inside closed shadow modal');
+
+  inputEl.value = PAIRING_CODE;
+  submitBtn.dispatch('click', { target: submitBtn, isTrusted: true });
+  await delay(30);
+
+  assert.equal(upserts.length, 1);
+  assert.equal(upserts[0].code, PAIRING_CODE);
+  assert.equal(upserts[0].verify, true);
+  assert.equal(inputEl.value, '', 'input value must be wiped on modal close');
+  assert.equal(modalHost.isConnected, false, 'modal host must be removed after submit');
+  assert.doesNotMatch(overlayContent.innerHTML, new RegExp(SECRET_TOKEN));
+
+  // Test-only action also uses the closed shadow modal
+  const testBtn = createNode('BUTTON', { 'data-pt-action': 'prompt-test-bridge-peer' });
+  overlayContent.dispatch('click', { target: testBtn, isTrusted: true });
+  await delay(10);
+  assert.equal(promptCalled, 0);
+  const testModalHost = h.mounted.get('t3tools-bridge-modal');
+  const testInput = findInTree(testModalHost._shadowForTest, n => n.getAttribute?.('data-pt-bridge-modal-input') === '1');
+  const testSubmit = findInTree(testModalHost._shadowForTest, n => n.getAttribute?.('data-pt-bridge-modal-submit') === '1');
+  testInput.value = PAIRING_CODE;
+  testSubmit.dispatch('click', { target: testSubmit, isTrusted: true });
+  await delay(30);
+  assert.equal(tests.length, 1);
+  assert.equal(tests[0].code, PAIRING_CODE);
 });
 
 test('standalone fallback HTML includes remote bridge slot, handlers, and valid inline JS syntax', () => {

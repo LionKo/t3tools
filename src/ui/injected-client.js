@@ -1570,8 +1570,214 @@
     } catch {}
   }
 
+  let bridgeModal = null;
+  function closeBridgePairingModal(result = '') {
+    if (!bridgeModal) return;
+    const current = bridgeModal;
+    bridgeModal = null;
+    clearTimeout(current.parseTimer);
+    try { if (current.inputEl) current.inputEl.value = ''; } catch {}
+    themeSync.unregister(current.host);
+    try { current.host.remove(); } catch {}
+    try { current.resolve(result); } catch {}
+  }
+
+  function openBridgePairingModal({ mode = 'add' } = {}) {
+    closeBridgePairingModal('');
+    return new Promise(resolve => {
+      const host = document.createElement('div');
+      host.id = 't3tools-bridge-modal';
+      host.setAttribute('data-t3tools', '1');
+      host.style.cssText = 'position:fixed;inset:0;z-index:99999;';
+      const shadow = host.attachShadow({ mode: 'closed' });
+      const styleEl = document.createElement('style');
+      styleEl.textContent = PT_SHARED_CSS + `
+        .pt-bridge-modal-backdrop {
+          position: fixed;
+          inset: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 16px;
+          background: rgba(0, 0, 0, 0.56);
+          backdrop-filter: blur(4px);
+          z-index: 99999;
+        }
+        .pt-bridge-modal-box {
+          width: min(520px, 100%);
+          border-radius: 12px;
+          background: var(--pt-card, #14161b);
+          color: var(--pt-fg, #f3f4f6);
+          border: 1px solid var(--pt-border, rgba(255, 255, 255, 0.14));
+          box-shadow: var(--pt-shadow, 0 14px 36px rgba(0, 0, 0, 0.5));
+          padding: 16px 18px;
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+          font-family: var(--pt-font-sans, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif);
+        }
+        .pt-bridge-modal-title { font-size: 14px; font-weight: 600; }
+        .pt-bridge-modal-desc { font-size: 11.5px; color: var(--pt-muted, #9ca3af); line-height: 1.5; }
+        .pt-bridge-modal-row { display: flex; align-items: center; gap: 8px; }
+        .pt-bridge-modal-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+      `;
+      const rootEl = document.createElement('div');
+      rootEl.className = 'pt-root';
+
+      const backdropEl = document.createElement('div');
+      backdropEl.className = 'pt-bridge-modal-backdrop';
+      backdropEl.setAttribute('data-pt-bridge-modal-backdrop', '1');
+
+      const boxEl = document.createElement('div');
+      boxEl.className = 'pt-bridge-modal-box';
+      boxEl.setAttribute('role', 'dialog');
+      boxEl.setAttribute('aria-modal', 'true');
+
+      const titleEl = document.createElement('div');
+      titleEl.className = 'pt-bridge-modal-title';
+      titleEl.textContent = mode === 'test' ? '测试远端配对码' : '添加远端配对节点';
+
+      const descEl = document.createElement('div');
+      descEl.className = 'pt-bridge-modal-desc';
+      descEl.textContent = '请粘贴另一台电脑复制的配对码（t3bridge://v1/...）。此输入弹窗运行在隔离的 Closed Shadow DOM 中，宿主页面无法读取。';
+
+      const rowEl = document.createElement('div');
+      rowEl.className = 'pt-bridge-modal-row';
+
+      const inputEl = document.createElement('input');
+      inputEl.type = 'text';
+      inputEl.className = 'pt-input pt-mono';
+      inputEl.style.cssText = 'flex:1;min-width:0;';
+      inputEl.setAttribute('placeholder', '粘贴 t3bridge://v1/... 配对码');
+      inputEl.setAttribute('autocomplete', 'off');
+      inputEl.setAttribute('spellcheck', 'false');
+      inputEl.setAttribute('data-pt-bridge-modal-input', '1');
+      rowEl.appendChild(inputEl);
+
+      const canReadClipboard = Boolean(navigator.clipboard && typeof navigator.clipboard.readText === 'function');
+      let pasteBtn = null;
+      if (canReadClipboard) {
+        pasteBtn = document.createElement('button');
+        pasteBtn.type = 'button';
+        pasteBtn.className = 'pt-btn';
+        pasteBtn.textContent = '粘贴';
+        pasteBtn.setAttribute('data-pt-bridge-modal-paste', '1');
+        rowEl.appendChild(pasteBtn);
+      }
+
+      const previewEl = document.createElement('div');
+      previewEl.setAttribute('data-pt-bridge-modal-preview', '1');
+
+      const actionsEl = document.createElement('div');
+      actionsEl.className = 'pt-bridge-modal-actions';
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'pt-btn';
+      cancelBtn.textContent = '取消';
+      cancelBtn.setAttribute('data-pt-bridge-modal-cancel', '1');
+
+      const submitBtn = document.createElement('button');
+      submitBtn.type = 'button';
+      submitBtn.className = 'pt-btn pt-btn-accent';
+      submitBtn.textContent = mode === 'test' ? '测试连接' : '添加并验证';
+      submitBtn.setAttribute('data-pt-bridge-modal-submit', '1');
+
+      actionsEl.appendChild(cancelBtn);
+      actionsEl.appendChild(submitBtn);
+
+      boxEl.appendChild(titleEl);
+      boxEl.appendChild(descEl);
+      boxEl.appendChild(rowEl);
+      boxEl.appendChild(previewEl);
+      boxEl.appendChild(actionsEl);
+      backdropEl.appendChild(boxEl);
+      rootEl.appendChild(backdropEl);
+      shadow.append(styleEl, rootEl);
+
+      const modalState = { host, inputEl, resolve, parseTimer: null, parseSeq: 0 };
+      bridgeModal = modalState;
+
+      const setPreviewError = (msg) => {
+        previewEl.innerHTML = msg
+          ? `<div class="pt-text-danger" style="font-size:11.5px;">${esc(msg)}</div>`
+          : '';
+      };
+
+      const scheduleParse = () => {
+        const raw = String(inputEl.value || '').trim();
+        clearTimeout(modalState.parseTimer);
+        const seq = ++modalState.parseSeq;
+        if (!raw) {
+          previewEl.innerHTML = '';
+          return;
+        }
+        modalState.parseTimer = setTimeout(async () => {
+          try {
+            const parsed = await callRpc('parseRemoteBridgePairingCode', { code: raw });
+            if (bridgeModal !== modalState || seq !== modalState.parseSeq) return;
+            previewEl.innerHTML = `<div style="padding:7px 9px;border-radius:8px;background:var(--pt-surface,rgba(255,255,255,.04));border:1px solid var(--pt-border,rgba(255,255,255,.1));font-size:11.5px;display:flex;flex-direction:column;gap:2px;"><div><strong>离线解析结果：</strong>${esc(parsed?.label || '未命名电脑')}</div><div class="pt-muted pt-mono" style="font-size:11px;">环境 ${esc(parsed?.environmentId || '')} · 地址 ${esc(parsed?.url || '')}</div></div>`;
+          } catch (err) {
+            if (bridgeModal !== modalState || seq !== modalState.parseSeq) return;
+            setPreviewError(formatRemoteBridgeErrorMessage(err?.message || 'Invalid pairing code'));
+          }
+        }, 180);
+      };
+
+      const submit = () => {
+        const code = String(inputEl.value || '').trim();
+        if (!code) {
+          setPreviewError('请先粘贴远端配对码（t3bridge://v1/...）');
+          try { inputEl.focus?.(); } catch {}
+          return;
+        }
+        closeBridgePairingModal(code);
+      };
+
+      for (const evtName of ['input', 'change', 'paste', 'keydown', 'keyup', 'keypress']) {
+        boxEl.addEventListener(evtName, evt => { evt.stopPropagation?.(); });
+      }
+      inputEl.addEventListener('input', scheduleParse);
+      inputEl.addEventListener('keydown', evt => {
+        if (evt.key === 'Enter') {
+          evt.preventDefault?.();
+          submit();
+        } else if (evt.key === 'Escape') {
+          evt.preventDefault?.();
+          closeBridgePairingModal('');
+        }
+      });
+      backdropEl.addEventListener('click', evt => {
+        if (evt.target === backdropEl) closeBridgePairingModal('');
+      });
+      cancelBtn.addEventListener('click', () => closeBridgePairingModal(''));
+      submitBtn.addEventListener('click', submit);
+      if (pasteBtn) {
+        pasteBtn.addEventListener('click', async () => {
+          try {
+            const text = String(await navigator.clipboard.readText() || '').trim();
+            if (!text) {
+              setPreviewError('剪贴板为空，请先在另一台电脑点击“复制本机配对码”');
+              return;
+            }
+            inputEl.value = text;
+            scheduleParse();
+          } catch {
+            setPreviewError('无法读取剪贴板，请直接在输入框按 Ctrl+V 粘贴');
+            try { inputEl.focus?.(); } catch {}
+          }
+        });
+      }
+
+      document.body.appendChild(host);
+      themeSync.register(host);
+      try { inputEl.focus?.(); } catch {}
+    });
+  }
+
   function renderDashboardOverlay({ partialRequestsOnly = false, resetScroll = false } = {}) {
     if (!dashboardOpen) {
+      closeBridgePairingModal('');
       destroyMount(overlayMount);
       overlayMount = null;
       return;
@@ -2040,7 +2246,7 @@
       }
       if (action === 'prompt-test-bridge-peer') {
         if (!e.isTrusted) return;
-        const code = String(window.prompt('请粘贴远端配对码（t3bridge://v1/...）以测试连接：', '') || '').trim();
+        const code = String(await openBridgePairingModal({ mode: 'test' }) || '').trim();
         if (!code) return;
         showOverlayToast('正在测试远端连接...');
         try {
@@ -2053,7 +2259,7 @@
       }
       if (action === 'prompt-add-bridge-peer') {
         if (!e.isTrusted) return;
-        const code = String(window.prompt('请粘贴远端配对码（t3bridge://v1/...）：', '') || '').trim();
+        const code = String(await openBridgePairingModal({ mode: 'add' }) || '').trim();
         if (!code) return;
         showOverlayToast('正在校验并保存远端节点...');
         try {
@@ -2670,6 +2876,11 @@
     if (!disposed) scheduleOverviewLayout();
   };
   const onKeyDown = e => {
+    if (e.key === 'Escape' && bridgeModal) {
+      e.preventDefault();
+      closeBridgePairingModal('');
+      return;
+    }
     if (e.key === 'Escape' && dashboardOpen) {
       if (closePtPopMenu()) { e.preventDefault(); return; }
       const back = overlayMount?.contentEl.querySelector('[data-pt-led-back]');
@@ -2748,6 +2959,7 @@
       lastLive = null;
       lastLiveThreadId = '';
       lastLiveTargetKey = '';
+      closeBridgePairingModal('');
       closePtPopMenu();
       clearTimeout(pollTimer);
       clearTimeout(appUpdatePollTimer);
